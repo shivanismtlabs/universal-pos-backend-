@@ -7,7 +7,13 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ─── Enums (ERD + ChatGPT agreed improvements) ─────────────────────────────
+// =============================================================================
+// UNIVERSAL BUSINESS OPERATING SYSTEM — Phase 1 schema
+// Core = industry-agnostic. Industry packs live under mod_* tables / modules.
+// Legacy rental schema preserved as schema.rental-legacy.prisma for mapping.
+// =============================================================================
+
+// ─── Enums (generic) ────────────────────────────────────────────────────────
 
 enum TenantStatus {
   active
@@ -21,23 +27,69 @@ enum SubscriptionStatus {
   cancelled
 }
 
-enum UnitCondition {
-  NEW
-  GOOD
-  DAMAGED
+enum LocationType {
+  store
+  branch
+  warehouse
+  clinic
+  kitchen
+  office
+  other
 }
 
-enum AvailabilityStatus {
-  AVAILABLE
-  RESERVED
-  CHECKED_OUT
-  CLEANING
-  REPAIR
-  RETIRED
+enum MembershipStatus {
+  invited
+  active
+  suspended
+  terminated
 }
 
-enum Ownership {
+enum TaxMode {
+  none
+  simple
+  in_gst
+  vat
+}
+
+enum ModuleStatus {
+  installed
+  enabled
+  disabled
+}
+
+enum ProductKind {
+  physical
+  service
+  digital
+  bundle
+}
+
+enum FulfillmentMode {
+  sale
+  rental
+  service
+  subscription
+}
+
+enum StockUnitStatus {
+  available
+  reserved
+  checked_out
+  in_service
+  cleaning
+  repair
+  retired
+}
+
+enum StockUnitCondition {
+  new
+  good
+  damaged
+}
+
+enum OwnershipType {
   own
+  consignment
   sub_rental
   network
 }
@@ -49,28 +101,32 @@ enum ReservationStatus {
   cancelled
 }
 
+enum OrderKind {
+  sale
+  rental
+  service
+  mixed
+  return_order
+}
+
 enum OrderStatus {
-  quote
-  reserved
-  fitted
+  draft
+  quoted
+  confirmed
+  in_progress
   ready
-  checked_out
-  returned
-  inspected
+  fulfilled
   closed
   cancelled
 }
 
-enum OrderItemType {
-  rental_unit
-  retail
-  special
-}
-
-enum AppointmentType {
-  fitting
-  pickup
-  return
+enum OrderItemKind {
+  product
+  service
+  stock_unit
+  fee
+  discount
+  custom
 }
 
 enum PaymentType {
@@ -84,7 +140,11 @@ enum PaymentMethod {
   cash
   card
   upi
+  bank_transfer
+  gateway
+  store_credit
   collect_later
+  other
 }
 
 enum PaymentStatus {
@@ -94,28 +154,28 @@ enum PaymentStatus {
   cancelled
 }
 
-enum FeeType {
-  late
-  damage
-  other
-}
-
-enum InspectStatus {
-  clean_ready
-  needs_cleaning
-  damaged
+enum AppointmentStatus {
+  scheduled
+  checked_in
+  completed
+  no_show
+  cancelled
 }
 
 enum DocumentType {
+  invoice
+  receipt
   agreement
   id_proof
-  damage_photo
+  photo
+  other
 }
 
 enum NotificationChannel {
   whatsapp
   sms
   email
+  push
 }
 
 enum SyncStatus {
@@ -128,94 +188,124 @@ enum PoType {
   purchase
   sub_rental
   special
+  transfer
 }
 
-// ─── Platform / SaaS ────────────────────────────────────────────────────────
-
-model Tenant {
-  id        String       @id @default(uuid()) @db.Uuid
-  name      String
-  slug      String       @unique
-  gstin     String?
-  status    TenantStatus @default(active)
-  branding  Json         @default("{}")
-  settings  Json         @default("{}")
-  createdAt DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  stores              Store[]
-  users               User[]
-  subscriptions       TenantSubscription[]
-  featureFlags        FeatureFlag[]
-  auditLogs           AuditLog[]
-  roles               Role[]
-  customers           Customer[]
-  customerMeasurements CustomerMeasurement[]
-  parties             Party[]
-  categories          Category[]
-  productStyles       ProductStyle[]
-  suppliers           Supplier[]
-  inventoryUnits      InventoryUnit[]
-  unitReservations    UnitReservation[]
-  inventoryMovements  InventoryMovement[]
-  retailSkus          RetailSku[]
-  purchaseOrders      PurchaseOrder[]
-  rentalOrders        RentalOrder[]
-  orderItems          OrderItem[]
-  appointments        Appointment[]
-  payments            Payment[]
-  layawaySchedules    LayawaySchedule[]
-  orderFees           OrderFee[]
-  invoices            Invoice[]
-  returnEvents        ReturnEvent[]
-  cleaningJobs        CleaningJob[]
-  damageRecords       DamageRecord[]
-  documents           Document[]
-  notificationLogs    NotificationLog[]
-  webhookEndpoints    WebhookEndpoint[]
-  apiKeys             ApiKey[]
-  offlineSyncEvents   OfflineSyncEvent[]
-
-  @@map("tenants")
+enum CustomFieldEntity {
+  customer
+  product
+  order
+  order_item
+  stock_unit
+  appointment
+  employee
+  location
 }
 
-model Store {
-  id         String   @id @default(uuid()) @db.Uuid
-  tenantId   String   @map("tenant_id") @db.Uuid
-  name       String
-  code       String
-  address    String?
-  stateCode  String?  @map("state_code")
-  isActive   Boolean  @default(true) @map("is_active")
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  tenant            Tenant             @relation(fields: [tenantId], references: [id])
-  users             User[]
-  userRoles         UserRole[]
-  inventoryUnits    InventoryUnit[]
-  retailSkus        RetailSku[]
-  rentalOrders      RentalOrder[]
-  appointments      Appointment[]
-  offlineSyncEvents OfflineSyncEvent[]
-
-  @@unique([tenantId, code])
-  @@map("stores")
+enum OutboxStatus {
+  pending
+  published
+  failed
 }
+
+// Rental-module specific (not Core order machine)
+enum RentalOrderLifecycle {
+  quote
+  reserved
+  fitted
+  ready
+  checked_out
+  returned
+  inspected
+  closed
+  cancelled
+}
+
+enum InspectStatus {
+  clean_ready
+  needs_cleaning
+  damaged
+}
+
+// ─── Platform / SaaS billing ────────────────────────────────────────────────
 
 model Plan {
-  id        String   @id @default(uuid()) @db.Uuid
-  code      String   @unique
-  name      String
-  limits    Json     @default("{}")
-  features  Json     @default("{}")
-  priceInr  Decimal  @default(0) @map("price_inr") @db.Decimal(12, 2)
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id           String   @id @default(uuid()) @db.Uuid
+  code         String   @unique
+  name         String
+  limits       Json     @default("{}")
+  features     Json     @default("{}")
+  priceAmount  Decimal  @default(0) @map("price_amount") @db.Decimal(12, 2)
+  currencyCode String   @default("INR") @map("currency_code") @db.Char(3)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   subscriptions TenantSubscription[]
 
   @@map("plans")
+}
+
+model Tenant {
+  id           String       @id @default(uuid()) @db.Uuid
+  name         String
+  slug         String       @unique
+  status       TenantStatus @default(active)
+  /// Legal tax id (GSTIN / VAT / EIN) — format validated by tax_mode helpers
+  taxId        String?      @map("tax_id")
+  taxMode      TaxMode      @default(in_gst) @map("tax_mode")
+  currencyCode String       @default("INR") @map("currency_code") @db.Char(3)
+  locale       String       @default("en-IN")
+  timezone     String       @default("Asia/Kolkata")
+  branding     Json         @default("{}")
+  settings     Json         @default("{}")
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organizations      Organization[]
+  locations          Location[]
+  departments        Department[]
+  teams              Team[]
+  users              User[]
+  employees          Employee[]
+  memberships        Membership[]
+  subscriptions      TenantSubscription[]
+  featureFlags       FeatureFlag[]
+  tenantModules      TenantModule[]
+  roles              Role[]
+  auditLogs          AuditLog[]
+  customers          Customer[]
+  categories         Category[]
+  products           Product[]
+  suppliers          Supplier[]
+  stockUnits         StockUnit[]
+  stockLevels        StockLevel[]
+  stockReservations  StockReservation[]
+  stockMovements     StockMovement[]
+  purchaseOrders     PurchaseOrder[]
+  orders             Order[]
+  orderItems         OrderItem[]
+  appointments       Appointment[]
+  payments           Payment[]
+  orderFees          OrderFee[]
+  invoices           Invoice[]
+  returnEvents       ReturnEvent[]
+  documents          Document[]
+  notificationLogs   NotificationLog[]
+  webhookEndpoints   WebhookEndpoint[]
+  apiKeys            ApiKey[]
+  offlineSyncEvents  OfflineSyncEvent[]
+  customFieldDefs    CustomFieldDefinition[]
+  customFieldValues  CustomFieldValue[]
+  outboxEvents       OutboxEvent[]
+  registerSessions   RegisterSession[]
+  // rental module
+  rentalOrders       ModRentalOrder[]
+  rentalParties      ModRentalParty[]
+  rentalMeasurements ModRentalMeasurement[]
+  rentalCleaningJobs ModRentalCleaningJob[]
+  rentalDamageRecords ModRentalDamageRecord[]
+
+  @@map("tenants")
 }
 
 model TenantSubscription {
@@ -249,49 +339,230 @@ model FeatureFlag {
   @@map("feature_flags")
 }
 
-model User {
-  id                   String    @id @default(uuid()) @db.Uuid
-  tenantId             String    @map("tenant_id") @db.Uuid
-  primaryStoreId       String?   @map("primary_store_id") @db.Uuid
-  email                String
-  phone                String?
-  passwordHash         String    @map("password_hash")
-  fullName             String    @map("full_name")
-  isActive             Boolean   @default(true) @map("is_active")
-  failedLoginAttempts  Int       @default(0) @map("failed_login_attempts")
-  lockedUntil          DateTime? @map("locked_until") @db.Timestamptz(6)
-  refreshTokenHash     String?   @map("refresh_token_hash")
-  refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at") @db.Timestamptz(6)
-  passwordChangedAt    DateTime? @map("password_changed_at") @db.Timestamptz(6)
-  lastLoginAt          DateTime? @map("last_login_at") @db.Timestamptz(6)
-  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+/// Platform module catalog (installable apps)
+model Module {
+  id          String   @id @default(uuid()) @db.Uuid
+  code        String   @unique
+  name        String
+  description String?
+  /// Module codes this module requires (e.g. rental → inventory, orders)
+  dependsOn   String[] @default([]) @map("depends_on")
+  /// Sidebar/nav contribution schema
+  navSchema   Json     @default("[]") @map("nav_schema")
+  /// Permission codes contributed
+  permissions String[] @default([])
+  isCore      Boolean  @default(false) @map("is_core")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant               Tenant               @relation(fields: [tenantId], references: [id])
-  primaryStore         Store?               @relation(fields: [primaryStoreId], references: [id])
-  userRoles            UserRole[]
-  auditLogs            AuditLog[]
-  measurementsTaken    CustomerMeasurement[]
-  inventoryMovements   InventoryMovement[]
-  ordersCreated        RentalOrder[]        @relation("OrderCreatedBy")
-  appointmentsAssigned Appointment[]        @relation("AppointmentAssignee")
-  paymentsTaken        Payment[]
-  returnsReceived      ReturnEvent[]        @relation("ReturnReceivedBy")
-  returnsApproved      ReturnEvent[]        @relation("ReturnApprovedBy")
+  tenantModules TenantModule[]
+
+  @@map("modules")
+}
+
+model TenantModule {
+  id         String       @id @default(uuid()) @db.Uuid
+  tenantId   String       @map("tenant_id") @db.Uuid
+  moduleId   String       @map("module_id") @db.Uuid
+  status     ModuleStatus @default(installed)
+  config     Json         @default("{}")
+  enabledAt  DateTime?    @map("enabled_at") @db.Timestamptz(6)
+  createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  module Module @relation(fields: [moduleId], references: [id])
+
+  @@unique([tenantId, moduleId])
+  @@map("tenant_modules")
+}
+
+// ─── Organization hierarchy ─────────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String
+  code      String
+  taxId     String?  @map("tax_id")
+  isDefault Boolean  @default(false) @map("is_default")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id])
+  locations Location[]
+
+  @@unique([tenantId, code])
+  @@map("organizations")
+}
+
+/// Store / branch / warehouse / clinic — one physical or logical place of work
+model Location {
+  id             String       @id @default(uuid()) @db.Uuid
+  tenantId       String       @map("tenant_id") @db.Uuid
+  organizationId String?      @map("organization_id") @db.Uuid
+  name           String
+  code           String
+  type           LocationType @default(store)
+  address        String?
+  regionCode     String?      @map("region_code")
+  isActive       Boolean      @default(true) @map("is_active")
+  settings       Json         @default("{}")
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant            Tenant             @relation(fields: [tenantId], references: [id])
+  organization      Organization?      @relation(fields: [organizationId], references: [id])
+  departments       Department[]
+  usersPrimary      User[]             @relation("UserPrimaryLocation")
+  memberships       Membership[]
+  stockUnits        StockUnit[]
+  stockLevels       StockLevel[]
+  orders            Order[]
+  appointments      Appointment[]
+  offlineSyncEvents OfflineSyncEvent[]
+  registerSessions  RegisterSession[]
+  userRoles         UserRole[]
+
+  @@unique([tenantId, code])
+  @@map("locations")
+}
+
+model Department {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  locationId String?  @map("location_id") @db.Uuid
+  name       String
+  code       String
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant      @relation(fields: [tenantId], references: [id])
+  location Location?   @relation(fields: [locationId], references: [id])
+  teams    Team[]
+  memberships Membership[]
+
+  @@unique([tenantId, code])
+  @@map("departments")
+}
+
+model Team {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  departmentId String?  @map("department_id") @db.Uuid
+  name         String
+  code         String
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id])
+  department Department? @relation(fields: [departmentId], references: [id])
+  memberships Membership[]
+
+  @@unique([tenantId, code])
+  @@map("teams")
+}
+
+// ─── Identity / employees / RBAC ────────────────────────────────────────────
+
+model User {
+  id                    String    @id @default(uuid()) @db.Uuid
+  tenantId              String    @map("tenant_id") @db.Uuid
+  primaryLocationId     String?   @map("primary_location_id") @db.Uuid
+  email                 String
+  phone                 String?
+  passwordHash          String    @map("password_hash")
+  fullName              String    @map("full_name")
+  isActive              Boolean   @default(true) @map("is_active")
+  failedLoginAttempts   Int       @default(0) @map("failed_login_attempts")
+  lockedUntil           DateTime? @map("locked_until") @db.Timestamptz(6)
+  refreshTokenHash      String?   @map("refresh_token_hash")
+  refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at") @db.Timestamptz(6)
+  passwordChangedAt     DateTime? @map("password_changed_at") @db.Timestamptz(6)
+  lastLoginAt           DateTime? @map("last_login_at") @db.Timestamptz(6)
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant             Tenant              @relation(fields: [tenantId], references: [id])
+  primaryLocation    Location?           @relation("UserPrimaryLocation", fields: [primaryLocationId], references: [id])
+  employee           Employee?
+  memberships        Membership[]
+  userRoles          UserRole[]
+  auditLogs          AuditLog[]
+  stockMovements     StockMovement[]
+  ordersCreated      Order[]             @relation("OrderCreatedBy")
+  appointmentsAssigned Appointment[]     @relation("AppointmentAssignee")
+  paymentsTaken      Payment[]
+  returnsReceived    ReturnEvent[]       @relation("ReturnReceivedBy")
+  returnsApproved    ReturnEvent[]       @relation("ReturnApprovedBy")
+  registerSessions   RegisterSession[]
+  rentalMeasurementsTaken ModRentalMeasurement[]
 
   @@unique([tenantId, email])
   @@map("users")
 }
 
+/// HR-ish profile extension (optional for tiny shops — can mirror user)
+model Employee {
+  id                 String           @id @default(uuid()) @db.Uuid
+  tenantId           String           @map("tenant_id") @db.Uuid
+  userId             String           @unique @map("user_id") @db.Uuid
+  employeeCode       String?          @map("employee_code")
+  status             MembershipStatus @default(active)
+  hiredAt            DateTime?        @map("hired_at") @db.Date
+  terminatedAt       DateTime?        @map("terminated_at") @db.Date
+  managerEmployeeId  String?          @map("manager_employee_id") @db.Uuid
+  jobTitle           String?          @map("job_title")
+  notes              String?
+  meta               Json             @default("{}")
+  createdAt          DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant  Tenant    @relation(fields: [tenantId], references: [id])
+  user    User      @relation(fields: [userId], references: [id])
+  manager Employee? @relation("EmployeeManager", fields: [managerEmployeeId], references: [id])
+  reports Employee[] @relation("EmployeeManager")
+
+  @@unique([tenantId, employeeCode])
+  @@map("employees")
+}
+
+/// Assignment of a user to location / department / team with a role
+model Membership {
+  id           String           @id @default(uuid()) @db.Uuid
+  tenantId     String           @map("tenant_id") @db.Uuid
+  userId       String           @map("user_id") @db.Uuid
+  locationId   String?          @map("location_id") @db.Uuid
+  departmentId String?          @map("department_id") @db.Uuid
+  teamId       String?          @map("team_id") @db.Uuid
+  roleId       String           @map("role_id") @db.Uuid
+  status       MembershipStatus @default(active)
+  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id])
+  user       User        @relation(fields: [userId], references: [id])
+  location   Location?   @relation(fields: [locationId], references: [id])
+  department Department? @relation(fields: [departmentId], references: [id])
+  team       Team?       @relation(fields: [teamId], references: [id])
+  role       Role        @relation(fields: [roleId], references: [id])
+
+  @@index([tenantId, userId])
+  @@map("memberships")
+}
+
 model Role {
-  id        String   @id @default(uuid()) @db.Uuid
-  tenantId  String   @map("tenant_id") @db.Uuid
-  code      String
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  code        String
+  name        String?
+  isSystem    Boolean  @default(false) @map("is_system")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant          Tenant           @relation(fields: [tenantId], references: [id])
   userRoles       UserRole[]
+  memberships     Membership[]
   rolePermissions RolePermission[]
 
   @@unique([tenantId, code])
@@ -299,10 +570,12 @@ model Role {
 }
 
 model Permission {
-  id        String   @id @default(uuid()) @db.Uuid
-  code      String   @unique
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id         String   @id @default(uuid()) @db.Uuid
+  code       String   @unique
+  moduleCode String?  @map("module_code")
+  description String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   rolePermissions RolePermission[]
 
@@ -310,16 +583,16 @@ model Permission {
 }
 
 model UserRole {
-  id      String  @id @default(uuid()) @db.Uuid
-  userId  String  @map("user_id") @db.Uuid
-  roleId  String  @map("role_id") @db.Uuid
-  storeId String? @map("store_id") @db.Uuid
+  id         String  @id @default(uuid()) @db.Uuid
+  userId     String  @map("user_id") @db.Uuid
+  roleId     String  @map("role_id") @db.Uuid
+  locationId String? @map("location_id") @db.Uuid
 
-  user  User   @relation(fields: [userId], references: [id])
-  role  Role   @relation(fields: [roleId], references: [id])
-  store Store? @relation(fields: [storeId], references: [id])
+  user     User      @relation(fields: [userId], references: [id])
+  role     Role      @relation(fields: [roleId], references: [id])
+  location Location? @relation(fields: [locationId], references: [id])
 
-  @@unique([userId, roleId, storeId])
+  @@unique([userId, roleId, locationId])
   @@map("user_roles")
 }
 
@@ -335,17 +608,17 @@ model RolePermission {
 }
 
 model AuditLog {
-  id           String   @id @default(uuid()) @db.Uuid
-  tenantId     String   @map("tenant_id") @db.Uuid
-  actorUserId  String?  @map("actor_user_id") @db.Uuid
-  entityType   String   @map("entity_type")
-  entityId     String?  @map("entity_id") @db.Uuid
-  action       String
-  beforeAfter  Json?    @map("before_after")
-  ip           String?
-  device       String?
-  userAgent    String?  @map("user_agent")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  actorUserId String?  @map("actor_user_id") @db.Uuid
+  entityType  String   @map("entity_type")
+  entityId    String?  @map("entity_id") @db.Uuid
+  action      String
+  beforeAfter Json?    @map("before_after")
+  ip          String?
+  device      String?
+  userAgent   String?  @map("user_agent")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
   actor  User?  @relation(fields: [actorUserId], references: [id])
@@ -354,126 +627,83 @@ model AuditLog {
   @@map("audit_logs")
 }
 
-// ─── Customers ──────────────────────────────────────────────────────────────
+// ─── Customers (generic party) ──────────────────────────────────────────────
 
 model Customer {
-  id              String    @id @default(uuid()) @db.Uuid
-  tenantId        String    @map("tenant_id") @db.Uuid
-  fullName        String    @map("full_name")
-  phone           String
-  email           String?
-  eventDate       DateTime? @map("event_date") @db.Date
-  notes           String?
-  marketingOptIn  Boolean   @default(false) @map("marketing_opt_in")
-  consentAt       DateTime? @map("consent_at") @db.Timestamptz(6)
-  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  fullName       String    @map("full_name")
+  phone          String
+  email          String?
+  notes          String?
+  marketingOptIn Boolean   @default(false) @map("marketing_opt_in")
+  consentAt      DateTime? @map("consent_at") @db.Timestamptz(6)
+  /// Industry-agnostic bag (labels, tags, external ids)
+  meta           Json      @default("{}")
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant           Tenant                @relation(fields: [tenantId], references: [id])
-  measurements     CustomerMeasurement[]
-  partyMemberships PartyMember[]
-  primaryParties   Party[]               @relation("PartyPrimary")
-  rentalOrders     RentalOrder[]
-  wornItems        OrderItem[]           @relation("ItemWearer")
+  tenant           Tenant                 @relation(fields: [tenantId], references: [id])
+  orders           Order[]
   appointments     Appointment[]
   documents        Document[]
   notificationLogs NotificationLog[]
+  orderItemsWorn   OrderItem[]            @relation("ItemWearer")
+  rentalPartyPrimary ModRentalParty[]     @relation("RentalPartyPrimary")
+  rentalPartyMemberships ModRentalPartyMember[]
+  rentalMeasurements ModRentalMeasurement[]
 
   @@unique([tenantId, phone])
   @@map("customers")
 }
 
-model CustomerMeasurement {
-  id            String   @id @default(uuid()) @db.Uuid
-  tenantId      String   @map("tenant_id") @db.Uuid
-  customerId    String   @map("customer_id") @db.Uuid
-  heightCm      Decimal? @map("height_cm") @db.Decimal(8, 2)
-  weightKg      Decimal? @map("weight_kg") @db.Decimal(8, 2)
-  chest         Decimal? @db.Decimal(8, 2)
-  waist         Decimal? @db.Decimal(8, 2)
-  inseam        Decimal? @db.Decimal(8, 2)
-  sleeve        Decimal? @db.Decimal(8, 2)
-  shoeSize      String?  @map("shoe_size")
-  extras        Json     @default("{}")
-  takenByUserId String?  @map("taken_by_user_id") @db.Uuid
-  takenAt       DateTime @default(now()) @map("taken_at") @db.Timestamptz(6)
-  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  tenant   Tenant    @relation(fields: [tenantId], references: [id])
-  customer Customer  @relation(fields: [customerId], references: [id])
-  takenBy  User?     @relation(fields: [takenByUserId], references: [id])
-
-  @@map("customer_measurements")
-}
-
-model Party {
-  id                 String    @id @default(uuid()) @db.Uuid
-  tenantId           String    @map("tenant_id") @db.Uuid
-  name               String
-  eventDate          DateTime? @map("event_date") @db.Date
-  primaryCustomerId  String?   @map("primary_customer_id") @db.Uuid
-  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  tenant          Tenant         @relation(fields: [tenantId], references: [id])
-  primaryCustomer Customer?      @relation("PartyPrimary", fields: [primaryCustomerId], references: [id])
-  members         PartyMember[]
-  rentalOrders    RentalOrder[]
-
-  @@map("parties")
-}
-
-model PartyMember {
-  partyId    String  @map("party_id") @db.Uuid
-  customerId String  @map("customer_id") @db.Uuid
-  roleLabel  String? @map("role_label")
-
-  party    Party    @relation(fields: [partyId], references: [id])
-  customer Customer @relation(fields: [customerId], references: [id])
-
-  @@id([partyId, customerId])
-  @@map("party_members")
-}
-
-// ─── Inventory ──────────────────────────────────────────────────────────────
+// ─── Catalog / inventory (commerce core) ────────────────────────────────────
 
 model Category {
   id        String   @id @default(uuid()) @db.Uuid
   tenantId  String   @map("tenant_id") @db.Uuid
   name      String
+  parentId  String?  @map("parent_id") @db.Uuid
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant Tenant         @relation(fields: [tenantId], references: [id])
-  styles ProductStyle[]
+  tenant   Tenant     @relation(fields: [tenantId], references: [id])
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+  products Product[]
 
   @@unique([tenantId, name])
   @@map("categories")
 }
 
-model ProductStyle {
-  id          String   @id @default(uuid()) @db.Uuid
-  tenantId    String   @map("tenant_id") @db.Uuid
-  categoryId  String?  @map("category_id") @db.Uuid
-  name        String
-  styleCode   String   @map("style_code")
-  color       String?
-  photoUrl    String?  @map("photo_url")
-  isRental    Boolean  @default(true) @map("is_rental")
-  hsnSac      String?  @map("hsn_sac")
-  description String?
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+model Product {
+  id              String          @id @default(uuid()) @db.Uuid
+  tenantId        String          @map("tenant_id") @db.Uuid
+  categoryId      String?         @map("category_id") @db.Uuid
+  name            String
+  skuCode         String          @map("sku_code")
+  kind            ProductKind     @default(physical)
+  fulfillmentMode FulfillmentMode @default(sale) @map("fulfillment_mode")
+  description     String?
+  photoUrl        String?         @map("photo_url")
+  taxCode         String?         @map("tax_code")
+  basePrice       Decimal         @default(0) @map("base_price") @db.Decimal(12, 2)
+  trackSerial     Boolean         @default(false) @map("track_serial")
+  trackQty        Boolean         @default(true) @map("track_qty")
+  isActive        Boolean         @default(true) @map("is_active")
+  meta            Json            @default("{}")
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant         Tenant          @relation(fields: [tenantId], references: [id])
-  category       Category?       @relation(fields: [categoryId], references: [id])
-  inventoryUnits InventoryUnit[]
-  retailSkus     RetailSku[]
+  tenant      Tenant       @relation(fields: [tenantId], references: [id])
+  category    Category?    @relation(fields: [categoryId], references: [id])
+  stockUnits  StockUnit[]
+  stockLevels StockLevel[]
+  orderItems  OrderItem[]
 
-  @@unique([tenantId, styleCode])
-  @@map("product_styles")
+  @@unique([tenantId, skuCode])
+  @@map("products")
 }
 
 model Supplier {
@@ -486,102 +716,105 @@ model Supplier {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant         Tenant          @relation(fields: [tenantId], references: [id])
-  inventoryUnits InventoryUnit[]
+  stockUnits     StockUnit[]
   purchaseOrders PurchaseOrder[]
 
   @@map("suppliers")
 }
 
-model InventoryUnit {
-  id                     String             @id @default(uuid()) @db.Uuid
-  tenantId               String             @map("tenant_id") @db.Uuid
-  storeId                String             @map("store_id") @db.Uuid
-  productStyleId         String             @map("product_style_id") @db.Uuid
-  barcodeSku             String             @map("barcode_sku")
-  size                   String
-  condition              UnitCondition      @default(GOOD)
-  availabilityStatus     AvailabilityStatus @default(AVAILABLE) @map("availability_status")
-  ownership              Ownership          @default(own)
-  supplierId             String?            @map("supplier_id") @db.Uuid
-  networkSourceTenantId  String?            @map("network_source_tenant_id") @db.Uuid
-  rentalPrice            Decimal            @default(0) @map("rental_price") @db.Decimal(12, 2)
-  depositAmount          Decimal            @default(0) @map("deposit_amount") @db.Decimal(12, 2)
-  purchaseCost           Decimal?           @map("purchase_cost") @db.Decimal(12, 2)
-  createdAt              DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt              DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+/// Serialized / unique physical asset (camera body, tuxedo piece, bike)
+model StockUnit {
+  id                    String             @id @default(uuid()) @db.Uuid
+  tenantId              String             @map("tenant_id") @db.Uuid
+  locationId            String             @map("location_id") @db.Uuid
+  productId             String             @map("product_id") @db.Uuid
+  barcodeSku            String             @map("barcode_sku")
+  variantLabel          String?            @map("variant_label")
+  condition             StockUnitCondition @default(good)
+  status                StockUnitStatus    @default(available)
+  ownership             OwnershipType      @default(own)
+  supplierId            String?            @map("supplier_id") @db.Uuid
+  networkSourceTenantId String?            @map("network_source_tenant_id") @db.Uuid
+  depositAmount         Decimal            @default(0) @map("deposit_amount") @db.Decimal(12, 2)
+  purchaseCost          Decimal?           @map("purchase_cost") @db.Decimal(12, 2)
+  meta                  Json               @default("{}")
+  createdAt             DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant       Tenant              @relation(fields: [tenantId], references: [id])
-  store        Store               @relation(fields: [storeId], references: [id])
-  productStyle ProductStyle        @relation(fields: [productStyleId], references: [id])
-  supplier     Supplier?           @relation(fields: [supplierId], references: [id])
-  reservations UnitReservation[]
-  movements    InventoryMovement[]
-  orderItems   OrderItem[]
-  orderFees    OrderFee[]
-  returnEvents ReturnEvent[]
-  cleaningJobs CleaningJob[]
-  damageRecords DamageRecord[]
+  tenant        Tenant             @relation(fields: [tenantId], references: [id])
+  location      Location           @relation(fields: [locationId], references: [id])
+  product       Product            @relation(fields: [productId], references: [id])
+  supplier      Supplier?          @relation(fields: [supplierId], references: [id])
+  reservations  StockReservation[]
+  movements     StockMovement[]
+  orderItems    OrderItem[]
+  orderFees     OrderFee[]
+  returnEvents  ReturnEvent[]
+  cleaningJobs  ModRentalCleaningJob[]
+  damageRecords ModRentalDamageRecord[]
 
   @@unique([tenantId, barcodeSku])
-  @@index([tenantId, storeId, availabilityStatus, size])
-  @@map("inventory_units")
+  @@index([tenantId, locationId, status])
+  @@map("stock_units")
 }
 
-model UnitReservation {
-  id              String            @id @default(uuid()) @db.Uuid
-  tenantId        String            @map("tenant_id") @db.Uuid
-  inventoryUnitId String            @map("inventory_unit_id") @db.Uuid
-  orderItemId     String?           @map("order_item_id") @db.Uuid
-  startDate       DateTime          @map("start_date") @db.Date
-  endDate         DateTime          @map("end_date") @db.Date
-  status          ReservationStatus @default(held)
-  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+/// Quantity-tracked stock (grocery, accessories)
+model StockLevel {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  locationId String  @map("location_id") @db.Uuid
+  productId String   @map("product_id") @db.Uuid
+  sku       String
+  qtyOnHand Int      @default(0) @map("qty_on_hand")
+  sellPrice Decimal  @default(0) @map("sell_price") @db.Decimal(12, 2)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant        Tenant        @relation(fields: [tenantId], references: [id])
-  inventoryUnit InventoryUnit @relation(fields: [inventoryUnitId], references: [id])
-  orderItem     OrderItem?    @relation(fields: [orderItemId], references: [id])
-
-  @@index([inventoryUnitId, startDate, endDate])
-  @@map("unit_reservations")
-}
-
-model InventoryMovement {
-  id               String              @id @default(uuid()) @db.Uuid
-  tenantId         String              @map("tenant_id") @db.Uuid
-  inventoryUnitId  String              @map("inventory_unit_id") @db.Uuid
-  fromAvailability AvailabilityStatus? @map("from_availability")
-  toAvailability   AvailabilityStatus  @map("to_availability")
-  reason           String?
-  orderId          String?             @map("order_id") @db.Uuid
-  actorUserId      String?             @map("actor_user_id") @db.Uuid
-  createdAt        DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
-
-  tenant        Tenant        @relation(fields: [tenantId], references: [id])
-  inventoryUnit InventoryUnit @relation(fields: [inventoryUnitId], references: [id])
-  actor         User?         @relation(fields: [actorUserId], references: [id])
-
-  @@map("inventory_movements")
-}
-
-model RetailSku {
-  id             String   @id @default(uuid()) @db.Uuid
-  tenantId       String   @map("tenant_id") @db.Uuid
-  storeId        String   @map("store_id") @db.Uuid
-  productStyleId String   @map("product_style_id") @db.Uuid
-  sku            String
-  qtyOnHand      Int      @default(0) @map("qty_on_hand")
-  sellPrice      Decimal  @default(0) @map("sell_price") @db.Decimal(12, 2)
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  tenant       Tenant       @relation(fields: [tenantId], references: [id])
-  store        Store        @relation(fields: [storeId], references: [id])
-  productStyle ProductStyle @relation(fields: [productStyleId], references: [id])
-  orderItems   OrderItem[]
+  tenant     Tenant      @relation(fields: [tenantId], references: [id])
+  location   Location    @relation(fields: [locationId], references: [id])
+  product    Product     @relation(fields: [productId], references: [id])
+  orderItems OrderItem[]
 
   @@unique([tenantId, sku])
-  @@map("retail_skus")
+  @@unique([tenantId, locationId, productId])
+  @@map("stock_levels")
+}
+
+model StockReservation {
+  id          String            @id @default(uuid()) @db.Uuid
+  tenantId    String            @map("tenant_id") @db.Uuid
+  stockUnitId String            @map("stock_unit_id") @db.Uuid
+  orderItemId String?           @map("order_item_id") @db.Uuid
+  startDate   DateTime          @map("start_date") @db.Date
+  endDate     DateTime          @map("end_date") @db.Date
+  status      ReservationStatus @default(held)
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id])
+  stockUnit StockUnit  @relation(fields: [stockUnitId], references: [id])
+  orderItem OrderItem? @relation(fields: [orderItemId], references: [id])
+
+  @@index([stockUnitId, startDate, endDate])
+  @@map("stock_reservations")
+}
+
+model StockMovement {
+  id          String          @id @default(uuid()) @db.Uuid
+  tenantId    String          @map("tenant_id") @db.Uuid
+  stockUnitId String          @map("stock_unit_id") @db.Uuid
+  fromStatus  StockUnitStatus? @map("from_status")
+  toStatus    StockUnitStatus @map("to_status")
+  reason      String?
+  orderId     String?         @map("order_id") @db.Uuid
+  actorUserId String?         @map("actor_user_id") @db.Uuid
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  stockUnit StockUnit @relation(fields: [stockUnitId], references: [id])
+  actor     User?     @relation(fields: [actorUserId], references: [id])
+
+  @@map("stock_movements")
 }
 
 model PurchaseOrder {
@@ -601,278 +834,258 @@ model PurchaseOrder {
   @@map("purchase_orders")
 }
 
-// ─── Orders / POS ───────────────────────────────────────────────────────────
+// ─── Orders / payments / POS ────────────────────────────────────────────────
 
-model RentalOrder {
+model Order {
   id            String      @id @default(uuid()) @db.Uuid
   tenantId      String      @map("tenant_id") @db.Uuid
-  storeId       String      @map("store_id") @db.Uuid
-  customerId    String      @map("customer_id") @db.Uuid
-  partyId       String?     @map("party_id") @db.Uuid
+  locationId    String      @map("location_id") @db.Uuid
+  customerId    String?     @map("customer_id") @db.Uuid
   orderNumber   String      @map("order_number")
-  status        OrderStatus @default(quote)
-  eventDate     DateTime?   @map("event_date") @db.Date
-  pickupDate    DateTime?   @map("pickup_date") @db.Date
-  returnDueDate DateTime?   @map("return_due_date") @db.Date
-  createdById   String?     @map("created_by") @db.Uuid
+  kind          OrderKind   @default(sale)
+  status        OrderStatus @default(draft)
+  currencyCode  String      @default("INR") @map("currency_code") @db.Char(3)
   subtotal      Decimal     @default(0) @db.Decimal(12, 2)
   taxTotal      Decimal     @default(0) @map("tax_total") @db.Decimal(12, 2)
+  discountTotal Decimal     @default(0) @map("discount_total") @db.Decimal(12, 2)
   depositTotal  Decimal     @default(0) @map("deposit_total") @db.Decimal(12, 2)
   balanceDue    Decimal     @default(0) @map("balance_due") @db.Decimal(12, 2)
+  createdById   String?     @map("created_by") @db.Uuid
+  meta          Json        @default("{}")
   createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt     DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant       Tenant            @relation(fields: [tenantId], references: [id])
-  store        Store             @relation(fields: [storeId], references: [id])
-  customer     Customer          @relation(fields: [customerId], references: [id])
-  party        Party?            @relation(fields: [partyId], references: [id])
+  location     Location          @relation(fields: [locationId], references: [id])
+  customer     Customer?         @relation(fields: [customerId], references: [id])
   createdBy    User?             @relation("OrderCreatedBy", fields: [createdById], references: [id])
   items        OrderItem[]
   appointments Appointment[]
   payments     Payment[]
-  layaways     LayawaySchedule[]
   fees         OrderFee[]
   invoices     Invoice[]
   returnEvents ReturnEvent[]
   documents    Document[]
+  rentalExt    ModRentalOrder?
+  layaways     LayawaySchedule[]
 
   @@unique([tenantId, orderNumber])
-  @@index([tenantId, status, pickupDate, returnDueDate])
-  @@map("rental_orders")
+  @@index([tenantId, status, kind])
+  @@map("orders")
 }
 
 model OrderItem {
-  id                String        @id @default(uuid()) @db.Uuid
-  tenantId          String        @map("tenant_id") @db.Uuid
-  orderId           String        @map("order_id") @db.Uuid
-  itemType          OrderItemType @map("item_type")
-  inventoryUnitId   String?       @map("inventory_unit_id") @db.Uuid
-  retailSkuId       String?       @map("retail_sku_id") @db.Uuid
-  wearerCustomerId  String?       @map("wearer_customer_id") @db.Uuid
-  size              String?
-  unitPrice         Decimal       @default(0) @map("unit_price") @db.Decimal(12, 2)
-  discount          Decimal       @default(0) @db.Decimal(12, 2)
-  taxAmount         Decimal       @default(0) @map("tax_amount") @db.Decimal(12, 2)
-  taxSplit          Json          @default("{}") @map("tax_split")
-  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id            String        @id @default(uuid()) @db.Uuid
+  tenantId      String        @map("tenant_id") @db.Uuid
+  orderId       String        @map("order_id") @db.Uuid
+  itemKind      OrderItemKind @map("item_kind")
+  productId     String?       @map("product_id") @db.Uuid
+  stockUnitId   String?       @map("stock_unit_id") @db.Uuid
+  stockLevelId  String?       @map("stock_level_id") @db.Uuid
+  wearerCustomerId String?    @map("wearer_customer_id") @db.Uuid
+  description   String?
+  quantity      Decimal       @default(1) @db.Decimal(12, 3)
+  unitPrice     Decimal       @default(0) @map("unit_price") @db.Decimal(12, 2)
+  lineTotal     Decimal       @default(0) @map("line_total") @db.Decimal(12, 2)
+  taxAmount     Decimal       @default(0) @map("tax_amount") @db.Decimal(12, 2)
+  meta          Json          @default("{}")
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant        Tenant            @relation(fields: [tenantId], references: [id])
-  order         RentalOrder       @relation(fields: [orderId], references: [id])
-  inventoryUnit InventoryUnit?    @relation(fields: [inventoryUnitId], references: [id])
-  retailSku     RetailSku?        @relation(fields: [retailSkuId], references: [id])
-  wearer        Customer?         @relation("ItemWearer", fields: [wearerCustomerId], references: [id])
-  reservations  UnitReservation[]
+  tenant      Tenant             @relation(fields: [tenantId], references: [id])
+  order       Order              @relation(fields: [orderId], references: [id])
+  product     Product?           @relation(fields: [productId], references: [id])
+  stockUnit   StockUnit?         @relation(fields: [stockUnitId], references: [id])
+  stockLevel  StockLevel?        @relation(fields: [stockLevelId], references: [id])
+  wearer      Customer?          @relation("ItemWearer", fields: [wearerCustomerId], references: [id])
+  reservations StockReservation[]
 
+  @@index([orderId])
   @@map("order_items")
 }
 
-model Appointment {
-  id               String          @id @default(uuid()) @db.Uuid
-  tenantId         String          @map("tenant_id") @db.Uuid
-  storeId          String          @map("store_id") @db.Uuid
-  customerId       String          @map("customer_id") @db.Uuid
-  orderId          String?         @map("order_id") @db.Uuid
-  aptType          AppointmentType @map("apt_type")
-  startsAt         DateTime        @map("starts_at") @db.Timestamptz(6)
-  assignedUserId   String?         @map("assigned_user_id") @db.Uuid
-  fittingNotes     String?         @map("fitting_notes")
-  alterationNeeds  String?         @map("alteration_needs")
-  status           String          @default("scheduled")
-  createdAt        DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  tenant   Tenant       @relation(fields: [tenantId], references: [id])
-  store    Store        @relation(fields: [storeId], references: [id])
-  customer Customer     @relation(fields: [customerId], references: [id])
-  order    RentalOrder? @relation(fields: [orderId], references: [id])
-  assignee User?        @relation("AppointmentAssignee", fields: [assignedUserId], references: [id])
-
-  @@map("appointments")
-}
-
 model Payment {
-  id               String        @id @default(uuid()) @db.Uuid
-  tenantId         String        @map("tenant_id") @db.Uuid
-  orderId          String        @map("order_id") @db.Uuid
-  type             PaymentType   @default(payment)
-  parentPaymentId  String?       @map("parent_payment_id") @db.Uuid
-  method           PaymentMethod
-  amount           Decimal       @db.Decimal(12, 2)
-  status           PaymentStatus @default(pending)
-  gatewayRef       String?       @map("gateway_ref")
-  idempotencyKey   String        @map("idempotency_key")
-  takenById        String?       @map("taken_by") @db.Uuid
-  paidAt           DateTime?     @map("paid_at") @db.Timestamptz(6)
-  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                    String        @id @default(uuid()) @db.Uuid
+  tenantId              String        @map("tenant_id") @db.Uuid
+  orderId               String        @map("order_id") @db.Uuid
+  type                  PaymentType   @default(payment)
+  method                PaymentMethod
+  status                PaymentStatus @default(pending)
+  amount                Decimal       @db.Decimal(12, 2)
+  currencyCode          String        @default("INR") @map("currency_code") @db.Char(3)
+  idempotencyKey        String        @map("idempotency_key")
+  gatewayRef            String?       @map("gateway_ref")
+  gatewayPayload        Json?         @map("gateway_payload")
+  takenByUserId         String?       @map("taken_by_user_id") @db.Uuid
+  createdAt             DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant        Tenant    @relation(fields: [tenantId], references: [id])
-  order         RentalOrder @relation(fields: [orderId], references: [id])
-  parentPayment Payment?  @relation("PaymentRefund", fields: [parentPaymentId], references: [id])
-  refunds       Payment[] @relation("PaymentRefund")
-  takenBy       User?     @relation(fields: [takenById], references: [id])
+  tenant  Tenant @relation(fields: [tenantId], references: [id])
+  order   Order  @relation(fields: [orderId], references: [id])
+  takenBy User?  @relation(fields: [takenByUserId], references: [id])
 
   @@unique([tenantId, idempotencyKey])
   @@map("payments")
 }
 
-model LayawaySchedule {
-  id                String   @id @default(uuid()) @db.Uuid
-  tenantId          String   @map("tenant_id") @db.Uuid
-  orderId           String   @map("order_id") @db.Uuid
-  dueBy             DateTime @map("due_by") @db.Date
-  installmentAmount Decimal  @map("installment_amount") @db.Decimal(12, 2)
-  status            String   @default("pending")
-  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  tenant Tenant      @relation(fields: [tenantId], references: [id])
-  order  RentalOrder @relation(fields: [orderId], references: [id])
-
-  @@map("layaway_schedules")
-}
-
 model OrderFee {
-  id              String  @id @default(uuid()) @db.Uuid
-  tenantId        String  @map("tenant_id") @db.Uuid
-  orderId         String  @map("order_id") @db.Uuid
-  inventoryUnitId String? @map("inventory_unit_id") @db.Uuid
-  feeType         FeeType @map("fee_type")
-  amount          Decimal @db.Decimal(12, 2)
-  reason          String?
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  orderId     String   @map("order_id") @db.Uuid
+  stockUnitId String?  @map("stock_unit_id") @db.Uuid
+  feeCode     String   @map("fee_code")
+  reason      String?
+  amount      Decimal  @db.Decimal(12, 2)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant        Tenant         @relation(fields: [tenantId], references: [id])
-  order         RentalOrder    @relation(fields: [orderId], references: [id])
-  inventoryUnit InventoryUnit? @relation(fields: [inventoryUnitId], references: [id])
+  tenant    Tenant     @relation(fields: [tenantId], references: [id])
+  order     Order      @relation(fields: [orderId], references: [id])
+  stockUnit StockUnit? @relation(fields: [stockUnitId], references: [id])
 
   @@map("order_fees")
 }
 
-model Invoice {
-  id             String   @id @default(uuid()) @db.Uuid
-  tenantId       String   @map("tenant_id") @db.Uuid
-  orderId        String   @map("order_id") @db.Uuid
-  invoiceNumber  String   @map("invoice_number")
-  gstin          String?
-  placeOfSupply  String?  @map("place_of_supply")
-  cgst           Decimal  @default(0) @db.Decimal(12, 2)
-  sgst           Decimal  @default(0) @db.Decimal(12, 2)
-  igst           Decimal  @default(0) @db.Decimal(12, 2)
-  grandTotal     Decimal  @default(0) @map("grand_total") @db.Decimal(12, 2)
-  pdfUrl         String?  @map("pdf_url")
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+model LayawaySchedule {
+  id                String    @id @default(uuid()) @db.Uuid
+  orderId           String    @map("order_id") @db.Uuid
+  dueBy             DateTime  @map("due_by") @db.Date
+  installmentAmount Decimal   @map("installment_amount") @db.Decimal(12, 2)
+  status            String    @default("pending")
+  paidAt            DateTime? @map("paid_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant Tenant      @relation(fields: [tenantId], references: [id])
-  order  RentalOrder @relation(fields: [orderId], references: [id])
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@map("layaway_schedules")
+}
+
+model Invoice {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  orderId      String   @map("order_id") @db.Uuid
+  invoiceNumber String  @map("invoice_number")
+  taxIdSnapshot String? @map("tax_id_snapshot")
+  /// Flexible tax breakdown: { cgst, sgst, igst } or { vat } etc.
+  taxBreakdown Json     @default("{}") @map("tax_breakdown")
+  cgst         Decimal  @default(0) @db.Decimal(12, 2)
+  sgst         Decimal  @default(0) @db.Decimal(12, 2)
+  igst         Decimal  @default(0) @db.Decimal(12, 2)
+  grandTotal   Decimal  @map("grand_total") @db.Decimal(12, 2)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  order  Order  @relation(fields: [orderId], references: [id])
 
   @@unique([tenantId, invoiceNumber])
   @@map("invoices")
 }
 
-// ─── Returns / docs ─────────────────────────────────────────────────────────
-
 model ReturnEvent {
-  id               String         @id @default(uuid()) @db.Uuid
-  tenantId         String         @map("tenant_id") @db.Uuid
-  orderId          String         @map("order_id") @db.Uuid
-  inventoryUnitId  String         @map("inventory_unit_id") @db.Uuid
-  receivedById     String?        @map("received_by") @db.Uuid
-  returnedAt       DateTime       @default(now()) @map("returned_at") @db.Timestamptz(6)
-  inspectStatus    InspectStatus? @map("inspect_status")
-  inspectNotes     String?        @map("inspect_notes")
-  cleaningRequired Boolean        @default(false) @map("cleaning_required")
-  approvedById     String?        @map("approved_by") @db.Uuid
-  inspectedAt      DateTime?      @map("inspected_at") @db.Timestamptz(6)
-  createdAt        DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  orderId         String   @map("order_id") @db.Uuid
+  stockUnitId     String?  @map("stock_unit_id") @db.Uuid
+  receivedById    String?  @map("received_by") @db.Uuid
+  approvedById    String?  @map("approved_by") @db.Uuid
+  notes           String?
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant        Tenant         @relation(fields: [tenantId], references: [id])
-  order         RentalOrder    @relation(fields: [orderId], references: [id])
-  inventoryUnit InventoryUnit  @relation(fields: [inventoryUnitId], references: [id])
-  receivedBy    User?          @relation("ReturnReceivedBy", fields: [receivedById], references: [id])
-  approvedBy    User?          @relation("ReturnApprovedBy", fields: [approvedById], references: [id])
-  damageRecords DamageRecord[]
-  cleaningJobs  CleaningJob[]
-  documents     Document[]
+  tenant     Tenant     @relation(fields: [tenantId], references: [id])
+  order      Order      @relation(fields: [orderId], references: [id])
+  stockUnit  StockUnit? @relation(fields: [stockUnitId], references: [id])
+  receivedBy User?      @relation("ReturnReceivedBy", fields: [receivedById], references: [id])
+  approvedBy User?      @relation("ReturnApprovedBy", fields: [approvedById], references: [id])
 
   @@map("return_events")
 }
 
-model CleaningJob {
-  id              String    @id @default(uuid()) @db.Uuid
-  tenantId        String    @map("tenant_id") @db.Uuid
-  inventoryUnitId String    @map("inventory_unit_id") @db.Uuid
-  returnEventId   String?   @map("return_event_id") @db.Uuid
-  vendor          String?
-  expectedBack    DateTime? @map("expected_back") @db.Date
-  status          String    @default("open")
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+/// Open cash drawer / register shift (POS module)
+model RegisterSession {
+  id          String    @id @default(uuid()) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  locationId  String    @map("location_id") @db.Uuid
+  openedById  String    @map("opened_by") @db.Uuid
+  openingFloat Decimal  @default(0) @map("opening_float") @db.Decimal(12, 2)
+  closingCash  Decimal? @map("closing_cash") @db.Decimal(12, 2)
+  openedAt    DateTime  @default(now()) @map("opened_at") @db.Timestamptz(6)
+  closedAt    DateTime? @map("closed_at") @db.Timestamptz(6)
+  meta        Json      @default("{}")
 
-  tenant        Tenant        @relation(fields: [tenantId], references: [id])
-  inventoryUnit InventoryUnit @relation(fields: [inventoryUnitId], references: [id])
-  returnEvent   ReturnEvent?  @relation(fields: [returnEventId], references: [id])
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  location Location @relation(fields: [locationId], references: [id])
+  openedBy User     @relation(fields: [openedById], references: [id])
 
-  @@map("cleaning_jobs")
+  @@index([tenantId, locationId, closedAt])
+  @@map("register_sessions")
 }
 
-model DamageRecord {
-  id              String   @id @default(uuid()) @db.Uuid
-  tenantId        String   @map("tenant_id") @db.Uuid
-  returnEventId   String   @map("return_event_id") @db.Uuid
-  inventoryUnitId String   @map("inventory_unit_id") @db.Uuid
-  notes           String?
-  feeAmount       Decimal  @default(0) @map("fee_amount") @db.Decimal(12, 2)
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+// ─── Appointments (generic booking — salon, fitting, clinic) ────────────────
 
-  tenant        Tenant        @relation(fields: [tenantId], references: [id])
-  returnEvent   ReturnEvent   @relation(fields: [returnEventId], references: [id])
-  inventoryUnit InventoryUnit @relation(fields: [inventoryUnitId], references: [id])
+model Appointment {
+  id           String            @id @default(uuid()) @db.Uuid
+  tenantId     String            @map("tenant_id") @db.Uuid
+  locationId   String            @map("location_id") @db.Uuid
+  customerId   String?           @map("customer_id") @db.Uuid
+  orderId      String?           @map("order_id") @db.Uuid
+  assigneeId   String?           @map("assignee_id") @db.Uuid
+  /// Free-form type: fitting | haircut | consultation | pickup …
+  type         String
+  status       AppointmentStatus @default(scheduled)
+  startsAt     DateTime          @map("starts_at") @db.Timestamptz(6)
+  endsAt       DateTime?         @map("ends_at") @db.Timestamptz(6)
+  notes        String?
+  meta         Json              @default("{}")
+  createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  @@map("damage_records")
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  location Location  @relation(fields: [locationId], references: [id])
+  customer Customer? @relation(fields: [customerId], references: [id])
+  order    Order?    @relation(fields: [orderId], references: [id])
+  assignee User?     @relation("AppointmentAssignee", fields: [assigneeId], references: [id])
+
+  @@index([tenantId, startsAt])
+  @@map("appointments")
 }
+
+// ─── Documents / notify / integrations / sync ───────────────────────────────
 
 model Document {
-  id                   String       @id @default(uuid()) @db.Uuid
-  tenantId             String       @map("tenant_id") @db.Uuid
-  orderId              String?      @map("order_id") @db.Uuid
-  customerId           String?      @map("customer_id") @db.Uuid
-  returnEventId        String?      @map("return_event_id") @db.Uuid
-  docType              DocumentType @map("doc_type")
-  storageKey           String       @map("storage_key")
-  customerAcknowledged Boolean      @default(false) @map("customer_acknowledged")
-  signedAt             DateTime?    @map("signed_at") @db.Timestamptz(6)
-  createdAt            DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt            DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id         String       @id @default(uuid()) @db.Uuid
+  tenantId   String       @map("tenant_id") @db.Uuid
+  customerId String?      @map("customer_id") @db.Uuid
+  orderId    String?      @map("order_id") @db.Uuid
+  type       DocumentType
+  storageKey String       @map("storage_key")
+  meta       Json         @default("{}")
+  createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant      Tenant       @relation(fields: [tenantId], references: [id])
-  order       RentalOrder? @relation(fields: [orderId], references: [id])
-  customer    Customer?    @relation(fields: [customerId], references: [id])
-  returnEvent ReturnEvent? @relation(fields: [returnEventId], references: [id])
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  customer Customer? @relation(fields: [customerId], references: [id])
+  order    Order?    @relation(fields: [orderId], references: [id])
 
   @@map("documents")
 }
 
-// ─── Integrations ───────────────────────────────────────────────────────────
-
 model NotificationLog {
-  id          String              @id @default(uuid()) @db.Uuid
-  tenantId    String              @map("tenant_id") @db.Uuid
-  customerId  String?             @map("customer_id") @db.Uuid
-  channel     NotificationChannel
-  templateKey String              @map("template_key")
-  status      String              @default("queued")
-  payload     Json                @default("{}")
-  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  id           String              @id @default(uuid()) @db.Uuid
+  tenantId     String              @map("tenant_id") @db.Uuid
+  customerId   String?             @map("customer_id") @db.Uuid
+  channel      NotificationChannel
+  templateKey  String              @map("template_key")
+  status       String
+  payload      Json                @default("{}")
+  createdAt    DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant   Tenant    @relation(fields: [tenantId], references: [id])
   customer Customer? @relation(fields: [customerId], references: [id])
 
+  @@index([tenantId, createdAt])
   @@map("notification_logs")
 }
 
@@ -880,7 +1093,8 @@ model WebhookEndpoint {
   id        String   @id @default(uuid()) @db.Uuid
   tenantId  String   @map("tenant_id") @db.Uuid
   url       String
-  secret    String
+  secret    String?
+  events    String[] @default([])
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -893,11 +1107,11 @@ model WebhookEndpoint {
 model ApiKey {
   id         String    @id @default(uuid()) @db.Uuid
   tenantId   String    @map("tenant_id") @db.Uuid
-  keyHash    String    @map("key_hash")
   name       String
+  keyHash    String    @map("key_hash")
   lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(6)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
   createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
@@ -905,19 +1119,186 @@ model ApiKey {
 }
 
 model OfflineSyncEvent {
-  id            String     @id @default(uuid()) @db.Uuid
-  tenantId      String     @map("tenant_id") @db.Uuid
-  storeId       String     @map("store_id") @db.Uuid
-  deviceId      String     @map("device_id")
-  clientEventId String     @map("client_event_id")
-  eventType     String     @map("event_type")
-  payload       Json
-  syncStatus    SyncStatus @default(accepted) @map("sync_status")
-  syncedAt      DateTime   @default(now()) @map("synced_at") @db.Timestamptz(6)
+  id         String     @id @default(uuid()) @db.Uuid
+  tenantId   String     @map("tenant_id") @db.Uuid
+  locationId String?    @map("location_id") @db.Uuid
+  deviceId   String     @map("device_id")
+  eventType  String     @map("event_type")
+  payload    Json
+  status     SyncStatus @default(accepted)
+  createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  location Location? @relation(fields: [locationId], references: [id])
+
+  @@index([tenantId, deviceId, createdAt])
+  @@map("offline_sync_events")
+}
+
+model OutboxEvent {
+  id          String       @id @default(uuid()) @db.Uuid
+  tenantId    String       @map("tenant_id") @db.Uuid
+  eventType   String       @map("event_type")
+  aggregateType String     @map("aggregate_type")
+  aggregateId String       @map("aggregate_id") @db.Uuid
+  payload     Json
+  status      OutboxStatus @default(pending)
+  attempts    Int          @default(0)
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  publishedAt DateTime?    @map("published_at") @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
-  store  Store  @relation(fields: [storeId], references: [id])
 
-  @@unique([tenantId, clientEventId])
-  @@map("offline_sync_events")
+  @@index([status, createdAt])
+  @@map("outbox_events")
+}
+
+// ─── Metadata / dynamic forms ───────────────────────────────────────────────
+
+model CustomFieldDefinition {
+  id         String            @id @default(uuid()) @db.Uuid
+  tenantId   String            @map("tenant_id") @db.Uuid
+  entity     CustomFieldEntity
+  fieldKey   String            @map("field_key")
+  label      String
+  dataType   String            @map("data_type")
+  required   Boolean           @default(false)
+  options    Json              @default("[]")
+  moduleCode String?           @map("module_code")
+  sortOrder  Int               @default(0) @map("sort_order")
+  createdAt  DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant             @relation(fields: [tenantId], references: [id])
+  values CustomFieldValue[]
+
+  @@unique([tenantId, entity, fieldKey])
+  @@map("custom_field_definitions")
+}
+
+model CustomFieldValue {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  definitionId String @map("definition_id") @db.Uuid
+  entityId   String   @map("entity_id") @db.Uuid
+  valueText  String?  @map("value_text")
+  valueNumber Decimal? @map("value_number") @db.Decimal(18, 4)
+  valueJson  Json?    @map("value_json")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant     Tenant                 @relation(fields: [tenantId], references: [id])
+  definition CustomFieldDefinition  @relation(fields: [definitionId], references: [id])
+
+  @@unique([definitionId, entityId])
+  @@index([tenantId, entityId])
+  @@map("custom_field_values")
+}
+
+// =============================================================================
+// MODULE: RENTAL (formal wear, bikes, cameras, costumes…)
+// Core Order + StockUnit stay generic; rental specifics live here.
+// =============================================================================
+
+model ModRentalOrder {
+  id              String               @id @default(uuid()) @db.Uuid
+  tenantId        String               @map("tenant_id") @db.Uuid
+  orderId         String               @unique @map("order_id") @db.Uuid
+  partyId         String?              @map("party_id") @db.Uuid
+  lifecycle       RentalOrderLifecycle @default(quote)
+  eventDate       DateTime?            @map("event_date") @db.Date
+  pickupDate      DateTime?            @map("pickup_date") @db.Date
+  returnDueDate   DateTime?            @map("return_due_date") @db.Date
+  createdAt       DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant         @relation(fields: [tenantId], references: [id])
+  order  Order          @relation(fields: [orderId], references: [id])
+  party  ModRentalParty? @relation(fields: [partyId], references: [id])
+
+  @@map("mod_rental_orders")
+}
+
+model ModRentalParty {
+  id                String    @id @default(uuid()) @db.Uuid
+  tenantId          String    @map("tenant_id") @db.Uuid
+  name              String
+  eventDate         DateTime? @map("event_date") @db.Date
+  primaryCustomerId String?   @map("primary_customer_id") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant          Tenant                 @relation(fields: [tenantId], references: [id])
+  primaryCustomer Customer?              @relation("RentalPartyPrimary", fields: [primaryCustomerId], references: [id])
+  members         ModRentalPartyMember[]
+  rentalOrders    ModRentalOrder[]
+
+  @@map("mod_rental_parties")
+}
+
+model ModRentalPartyMember {
+  partyId    String  @map("party_id") @db.Uuid
+  customerId String  @map("customer_id") @db.Uuid
+  roleLabel  String? @map("role_label")
+
+  party    ModRentalParty @relation(fields: [partyId], references: [id])
+  customer Customer       @relation(fields: [customerId], references: [id])
+
+  @@id([partyId, customerId])
+  @@map("mod_rental_party_members")
+}
+
+model ModRentalMeasurement {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  customerId    String   @map("customer_id") @db.Uuid
+  heightCm      Decimal? @map("height_cm") @db.Decimal(8, 2)
+  weightKg      Decimal? @map("weight_kg") @db.Decimal(8, 2)
+  chest         Decimal? @db.Decimal(8, 2)
+  waist         Decimal? @db.Decimal(8, 2)
+  inseam        Decimal? @db.Decimal(8, 2)
+  sleeve        Decimal? @db.Decimal(8, 2)
+  shoeSize      String?  @map("shoe_size")
+  extras        Json     @default("{}")
+  takenByUserId String?  @map("taken_by_user_id") @db.Uuid
+  takenAt       DateTime @default(now()) @map("taken_at") @db.Timestamptz(6)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  customer Customer @relation(fields: [customerId], references: [id])
+  takenBy  User?    @relation(fields: [takenByUserId], references: [id])
+
+  @@map("mod_rental_measurements")
+}
+
+model ModRentalCleaningJob {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  stockUnitId String   @map("stock_unit_id") @db.Uuid
+  status      String   @default("queued")
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  stockUnit StockUnit @relation(fields: [stockUnitId], references: [id])
+
+  @@map("mod_rental_cleaning_jobs")
+}
+
+model ModRentalDamageRecord {
+  id            String         @id @default(uuid()) @db.Uuid
+  tenantId      String         @map("tenant_id") @db.Uuid
+  stockUnitId   String         @map("stock_unit_id") @db.Uuid
+  inspectStatus InspectStatus  @map("inspect_status")
+  notes         String?
+  chargeAmount  Decimal?       @map("charge_amount") @db.Decimal(12, 2)
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  stockUnit StockUnit @relation(fields: [stockUnitId], references: [id])
+
+  @@map("mod_rental_damage_records")
 }

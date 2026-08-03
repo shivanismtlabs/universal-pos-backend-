@@ -1,0 +1,37 @@
+%% Overview — high level only (relationships, no heavy columns)
+%% mermaid.live → paste → zoom easily
+
+erDiagram
+  TENANTS ||--o{ STORES : has
+  TENANTS ||--o{ USERS : has
+  TENANTS ||--o{ CUSTOMERS : owns
+  TENANTS ||--o{ PRODUCT_STYLES : catalogs
+  TENANTS ||--o{ RENTAL_ORDERS : creates
+  TENANTS ||--o{ TENANT_SUBSCRIPTIONS : billed
+
+  STORES ||--o{ INVENTORY_UNITS : stocks
+  STORES ||--o{ USERS : staff
+
+  CUSTOMERS ||--o{ CUSTOMER_MEASUREMENTS : has
+  CUSTOMERS ||--o{ PARTY_MEMBERS : in
+  PARTIES ||--o{ PARTY_MEMBERS : groups
+  PARTIES ||--o{ RENTAL_ORDERS : books
+
+  CATEGORIES ||--o{ PRODUCT_STYLES : groups
+  PRODUCT_STYLES ||--o{ INVENTORY_UNITS : units
+  PRODUCT_STYLES ||--o{ RETAIL_SKUS : retail
+
+  INVENTORY_UNITS ||--o{ UNIT_RESERVATIONS : locks
+  INVENTORY_UNITS ||--o{ INVENTORY_MOVEMENTS : history
+
+  RENTAL_ORDERS ||--o{ ORDER_ITEMS : lines
+  RENTAL_ORDERS ||--o{ PAYMENTS : pays
+  RENTAL_ORDERS ||--o{ INVOICES : gst
+  RENTAL_ORDERS ||--o{ APPOINTMENTS : schedules
+  RENTAL_ORDERS ||--o{ RETURN_EVENTS : returns
+  RENTAL_ORDERS ||--o{ DOCUMENTS : files
+
+  ORDER_ITEMS ||--o| UNIT_RESERVATIONS : creates
+  ORDER_ITEMS }o--o| INVENTORY_UNITS : rents
+  SUPPLIERS ||--o{ PURCHASE_ORDERS : fulfills
+  SUPPLIERS ||--o{ INVENTORY_UNITS : sub_rental

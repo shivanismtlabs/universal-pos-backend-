@@ -1,0 +1,57 @@
+%% Universal Business Operating System — Phase 1 ERD
+%% Core is industry-agnostic. Rental is a module (mod_rental_*).
+
+erDiagram
+  PLATFORM_PLAN ||--o{ TENANT_SUBSCRIPTION : bills
+  TENANT ||--o{ TENANT_SUBSCRIPTION : has
+  TENANT ||--o{ ORGANIZATION : owns
+  TENANT ||--o{ LOCATION : operates
+  TENANT ||--o{ TENANT_MODULE : installs
+  MODULE ||--o{ TENANT_MODULE : enabled_for
+  MODULE ||--o{ MODULE : depends_on
+
+  ORGANIZATION ||--o{ LOCATION : contains
+  LOCATION ||--o{ DEPARTMENT : has
+  DEPARTMENT ||--o{ TEAM : has
+
+  TENANT ||--o{ USER : employs
+  USER ||--o{ MEMBERSHIP : assigned
+  LOCATION ||--o{ MEMBERSHIP : scopes
+  ROLE ||--o{ MEMBERSHIP : grants
+  ROLE ||--o{ ROLE_PERMISSION : has
+  PERMISSION ||--o{ ROLE_PERMISSION : listed
+
+  TENANT ||--o{ CUSTOMER : serves
+  TENANT ||--o{ CATEGORY : catalogs
+  CATEGORY ||--o{ PRODUCT : groups
+  PRODUCT ||--o{ STOCK_UNIT : serializes
+  PRODUCT ||--o{ STOCK_LEVEL : qty
+  LOCATION ||--o{ STOCK_UNIT : holds
+  LOCATION ||--o{ STOCK_LEVEL : holds
+
+  TENANT ||--o{ ORDER : books
+  LOCATION ||--o{ ORDER : at
+  CUSTOMER ||--o{ ORDER : places
+  ORDER ||--o{ ORDER_ITEM : lines
+  ORDER ||--o{ PAYMENT : pays
+  ORDER ||--o{ INVOICE : invoices
+  ORDER ||--o{ MOD_RENTAL_ORDER : extends
+
+  PRODUCT ||--o{ ORDER_ITEM : sold
+  STOCK_UNIT ||--o{ ORDER_ITEM : reserved
+  STOCK_LEVEL ||--o{ ORDER_ITEM : decremented
+
+  ORDER ||--o{ APPOINTMENT : schedules
+  CUSTOMER ||--o{ APPOINTMENT : books
+
+  TENANT ||--o{ CUSTOM_FIELD_DEF : defines
+  CUSTOM_FIELD_DEF ||--o{ CUSTOM_FIELD_VALUE : stores
+
+  TENANT ||--o{ AUDIT_LOG : records
+  TENANT ||--o{ OUTBOX_EVENT : emits
+  TENANT ||--o{ OFFLINE_SYNC_EVENT : syncs
+
+  MOD_RENTAL_ORDER ||--o{ MOD_RENTAL_PARTY : groups
+  CUSTOMER ||--o{ MOD_RENTAL_MEASUREMENT : measures
+  STOCK_UNIT ||--o{ MOD_RENTAL_CLEANING_JOB : cleans
+  STOCK_UNIT ||--o{ MOD_RENTAL_DAMAGE_RECORD : damages

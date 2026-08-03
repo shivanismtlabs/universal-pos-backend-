@@ -1,0 +1,115 @@
+%% 04 — Orders / POS / Payments / Invoices
+
+erDiagram
+  RENTAL_ORDERS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid store_id FK
+    uuid customer_id FK
+    uuid party_id FK
+    string order_number
+    string status
+    date event_date
+    date pickup_date
+    date return_due_date
+    uuid created_by FK
+    numeric subtotal
+    numeric tax_total
+    numeric deposit_total
+    numeric balance_due
+  }
+
+  ORDER_ITEMS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    string item_type
+    uuid inventory_unit_id FK
+    uuid retail_sku_id FK
+    uuid wearer_customer_id FK
+    string size
+    numeric unit_price
+    numeric discount
+    numeric tax_amount
+    jsonb tax_split
+  }
+
+  APPOINTMENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid store_id FK
+    uuid customer_id FK
+    uuid order_id FK
+    string apt_type
+    timestamptz starts_at
+    uuid assigned_user_id FK
+    text fitting_notes
+    text alteration_needs
+    string status
+  }
+
+  PAYMENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    string type
+    uuid parent_payment_id FK
+    string method
+    numeric amount
+    string status
+    string gateway_ref
+    string idempotency_key
+    uuid taken_by FK
+    timestamptz paid_at
+  }
+
+  LAYAWAY_SCHEDULES {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    date due_by
+    numeric installment_amount
+    string status
+  }
+
+  ORDER_FEES {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    uuid inventory_unit_id FK
+    string fee_type
+    numeric amount
+    text reason
+  }
+
+  INVOICES {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    string invoice_number
+    string gstin
+    string place_of_supply
+    numeric cgst
+    numeric sgst
+    numeric igst
+    numeric grand_total
+    string pdf_url
+  }
+
+  UNIT_RESERVATIONS {
+    uuid id PK
+    uuid inventory_unit_id FK
+    uuid order_item_id FK
+    date start_date
+    date end_date
+    string status
+  }
+
+  RENTAL_ORDERS ||--o{ ORDER_ITEMS : lines
+  RENTAL_ORDERS ||--o{ PAYMENTS : money
+  RENTAL_ORDERS ||--o{ LAYAWAY_SCHEDULES : installments
+  RENTAL_ORDERS ||--o{ ORDER_FEES : fees
+  RENTAL_ORDERS ||--o{ INVOICES : gst
+  RENTAL_ORDERS ||--o{ APPOINTMENTS : schedules
+  ORDER_ITEMS ||--o| UNIT_RESERVATIONS : creates
+  PAYMENTS ||--o| PAYMENTS : refund_of

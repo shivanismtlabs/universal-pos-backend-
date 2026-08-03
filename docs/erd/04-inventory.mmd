@@ -1,0 +1,96 @@
+%% 03 — Inventory (style ≠ unit, reservations, movements)
+
+erDiagram
+  CATEGORIES {
+    uuid id PK
+    uuid tenant_id FK
+    string name
+  }
+
+  PRODUCT_STYLES {
+    uuid id PK
+    uuid tenant_id FK
+    uuid category_id FK
+    string name
+    string style_code
+    string color
+    string photo_url
+    boolean is_rental
+    string hsn_sac
+    text description
+  }
+
+  INVENTORY_UNITS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid store_id FK
+    uuid product_style_id FK
+    string barcode_sku
+    string size
+    string condition
+    string availability_status
+    string ownership
+    uuid supplier_id FK
+    uuid network_source_tenant_id
+    numeric rental_price
+    numeric deposit_amount
+    numeric purchase_cost
+  }
+
+  UNIT_RESERVATIONS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid inventory_unit_id FK
+    uuid order_item_id FK
+    date start_date
+    date end_date
+    string status
+  }
+
+  INVENTORY_MOVEMENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid inventory_unit_id FK
+    string from_availability
+    string to_availability
+    string reason
+    uuid order_id FK
+    uuid actor_user_id FK
+    timestamptz created_at
+  }
+
+  RETAIL_SKUS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid store_id FK
+    uuid product_style_id FK
+    string sku
+    int qty_on_hand
+    numeric sell_price
+  }
+
+  SUPPLIERS {
+    uuid id PK
+    uuid tenant_id FK
+    string name
+    string contact
+    string phone
+  }
+
+  PURCHASE_ORDERS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid supplier_id FK
+    uuid linked_order_id FK
+    string po_type
+    date expected_delivery
+    string status
+  }
+
+  CATEGORIES ||--o{ PRODUCT_STYLES : groups
+  PRODUCT_STYLES ||--o{ INVENTORY_UNITS : physical_units
+  PRODUCT_STYLES ||--o{ RETAIL_SKUS : retail_stock
+  INVENTORY_UNITS ||--o{ UNIT_RESERVATIONS : date_locks
+  INVENTORY_UNITS ||--o{ INVENTORY_MOVEMENTS : timeline
+  SUPPLIERS ||--o{ INVENTORY_UNITS : sub_rents
+  SUPPLIERS ||--o{ PURCHASE_ORDERS : fulfills

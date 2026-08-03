@@ -1,0 +1,66 @@
+%% 05 — Returns / Cleaning / Damage / Documents
+
+erDiagram
+  RETURN_EVENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    uuid inventory_unit_id FK
+    uuid received_by FK
+    timestamptz returned_at
+    string inspect_status
+    text inspect_notes
+    boolean cleaning_required
+    uuid approved_by FK
+    timestamptz inspected_at
+  }
+
+  CLEANING_JOBS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid inventory_unit_id FK
+    uuid return_event_id FK
+    string vendor
+    date expected_back
+    string status
+  }
+
+  DAMAGE_RECORDS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid return_event_id FK
+    uuid inventory_unit_id FK
+    text notes
+    numeric fee_amount
+  }
+
+  DOCUMENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    uuid customer_id FK
+    uuid return_event_id FK
+    string doc_type
+    string storage_key
+    boolean customer_acknowledged
+    timestamptz signed_at
+  }
+
+  RENTAL_ORDERS {
+    uuid id PK
+    string order_number
+  }
+
+  INVENTORY_UNITS {
+    uuid id PK
+    string barcode_sku
+    string availability_status
+  }
+
+  RENTAL_ORDERS ||--o{ RETURN_EVENTS : returns
+  INVENTORY_UNITS ||--o{ RETURN_EVENTS : returned_as
+  RETURN_EVENTS ||--o| DAMAGE_RECORDS : may_damage
+  RETURN_EVENTS ||--o| CLEANING_JOBS : may_clean
+  INVENTORY_UNITS ||--o{ CLEANING_JOBS : cleaning
+  RENTAL_ORDERS ||--o{ DOCUMENTS : agreements
+  RETURN_EVENTS ||--o{ DOCUMENTS : photos

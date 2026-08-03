@@ -1,0 +1,454 @@
+%% Walit POS — Concrete ERD (FRD/BRD + agreed ChatGPT improvements)
+%% Open in https://mermaid.live — Export PNG/SVG (free, no Plus needed)
+%% Or: npx @mermaid-js/mermaid-cli -i walit-pos-erd.mmd -o walit-pos-erd.svg
+
+erDiagram
+  TENANTS {
+    uuid id PK
+    string name
+    string slug
+    string gstin
+    string status
+    jsonb branding
+    jsonb settings
+    timestamptz created_at
+  }
+
+  STORES {
+    uuid id PK
+    uuid tenant_id FK
+    string name
+    string code
+    string address
+    string state_code
+    boolean is_active
+  }
+
+  PLANS {
+    uuid id PK
+    string code
+    string name
+    jsonb limits
+    jsonb features
+    numeric price_inr
+  }
+
+  TENANT_SUBSCRIPTIONS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid plan_id FK
+    string status
+    timestamptz current_period_end
+    int seats_used
+    int locations_used
+  }
+
+  FEATURE_FLAGS {
+    uuid id PK
+    uuid tenant_id FK
+    string key
+    boolean enabled
+  }
+
+  USERS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid primary_store_id FK
+    string email
+    string phone
+    string password_hash
+    string full_name
+    boolean is_active
+  }
+
+  ROLES {
+    uuid id PK
+    uuid tenant_id FK
+    string code
+  }
+
+  PERMISSIONS {
+    uuid id PK
+    string code
+  }
+
+  USER_ROLES {
+    uuid user_id FK
+    uuid role_id FK
+    uuid store_id FK
+  }
+
+  ROLE_PERMISSIONS {
+    uuid role_id FK
+    uuid permission_id FK
+  }
+
+  AUDIT_LOGS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid actor_user_id FK
+    string entity_type
+    uuid entity_id
+    string action
+    jsonb before_after
+    string ip
+    string device
+    string user_agent
+    timestamptz created_at
+  }
+
+  TENANTS ||--o{ STORES : has
+  TENANTS ||--o{ USERS : has
+  TENANTS ||--o{ TENANT_SUBSCRIPTIONS : has
+  TENANTS ||--o{ FEATURE_FLAGS : has
+  PLANS ||--o{ TENANT_SUBSCRIPTIONS : defines
+  USERS ||--o{ USER_ROLES : assigned
+  ROLES ||--o{ USER_ROLES : grants
+  ROLES ||--o{ ROLE_PERMISSIONS : has
+  PERMISSIONS ||--o{ ROLE_PERMISSIONS : used_in
+  TENANTS ||--o{ AUDIT_LOGS : audited
+
+  CUSTOMERS {
+    uuid id PK
+    uuid tenant_id FK
+    string full_name
+    string phone
+    string email
+    date event_date
+    text notes
+    boolean marketing_opt_in
+    timestamptz consent_at
+    timestamptz deleted_at
+  }
+
+  CUSTOMER_MEASUREMENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid customer_id FK
+    numeric height_cm
+    numeric weight_kg
+    numeric chest
+    numeric waist
+    numeric inseam
+    numeric sleeve
+    string shoe_size
+    jsonb extras
+    uuid taken_by_user_id FK
+    timestamptz taken_at
+  }
+
+  PARTIES {
+    uuid id PK
+    uuid tenant_id FK
+    string name
+    date event_date
+    uuid primary_customer_id FK
+  }
+
+  PARTY_MEMBERS {
+    uuid party_id FK
+    uuid customer_id FK
+    string role_label
+  }
+
+  CUSTOMERS ||--o{ CUSTOMER_MEASUREMENTS : history
+  CUSTOMERS ||--o{ PARTY_MEMBERS : member
+  PARTIES ||--o{ PARTY_MEMBERS : includes
+  PARTIES }o--|| CUSTOMERS : primary
+
+  CATEGORIES {
+    uuid id PK
+    uuid tenant_id FK
+    string name
+  }
+
+  PRODUCT_STYLES {
+    uuid id PK
+    uuid tenant_id FK
+    uuid category_id FK
+    string name
+    string style_code
+    string color
+    string photo_url
+    boolean is_rental
+    string hsn_sac
+    text description
+  }
+
+  INVENTORY_UNITS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid store_id FK
+    uuid product_style_id FK
+    string barcode_sku
+    string size
+    string condition
+    string availability_status
+    string ownership
+    uuid supplier_id FK
+    uuid network_source_tenant_id
+    numeric rental_price
+    numeric deposit_amount
+    numeric purchase_cost
+  }
+
+  UNIT_RESERVATIONS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid inventory_unit_id FK
+    uuid order_item_id FK
+    date start_date
+    date end_date
+    string status
+  }
+
+  INVENTORY_MOVEMENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid inventory_unit_id FK
+    string from_availability
+    string to_availability
+    string reason
+    uuid order_id FK
+    uuid actor_user_id FK
+    timestamptz created_at
+  }
+
+  RETAIL_SKUS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid store_id FK
+    uuid product_style_id FK
+    string sku
+    int qty_on_hand
+    numeric sell_price
+  }
+
+  SUPPLIERS {
+    uuid id PK
+    uuid tenant_id FK
+    string name
+    string contact
+    string phone
+  }
+
+  PURCHASE_ORDERS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid supplier_id FK
+    uuid linked_order_id FK
+    string po_type
+    date expected_delivery
+    string status
+  }
+
+  CATEGORIES ||--o{ PRODUCT_STYLES : groups
+  PRODUCT_STYLES ||--o{ INVENTORY_UNITS : physical_units
+  PRODUCT_STYLES ||--o{ RETAIL_SKUS : retail_stock
+  STORES ||--o{ INVENTORY_UNITS : stocks
+  INVENTORY_UNITS ||--o{ UNIT_RESERVATIONS : date_locks
+  INVENTORY_UNITS ||--o{ INVENTORY_MOVEMENTS : timeline
+  SUPPLIERS ||--o{ INVENTORY_UNITS : sub_rents
+  SUPPLIERS ||--o{ PURCHASE_ORDERS : fulfills
+
+  RENTAL_ORDERS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid store_id FK
+    uuid customer_id FK
+    uuid party_id FK
+    string order_number
+    string status
+    date event_date
+    date pickup_date
+    date return_due_date
+    uuid created_by FK
+    numeric subtotal
+    numeric tax_total
+    numeric deposit_total
+    numeric balance_due
+  }
+
+  ORDER_ITEMS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    string item_type
+    uuid inventory_unit_id FK
+    uuid retail_sku_id FK
+    uuid wearer_customer_id FK
+    string size
+    numeric unit_price
+    numeric discount
+    numeric tax_amount
+    jsonb tax_split
+  }
+
+  APPOINTMENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid store_id FK
+    uuid customer_id FK
+    uuid order_id FK
+    string apt_type
+    timestamptz starts_at
+    uuid assigned_user_id FK
+    text fitting_notes
+    text alteration_needs
+    string status
+  }
+
+  PAYMENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    string type
+    uuid parent_payment_id FK
+    string method
+    numeric amount
+    string status
+    string gateway_ref
+    string idempotency_key
+    uuid taken_by FK
+    timestamptz paid_at
+  }
+
+  LAYAWAY_SCHEDULES {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    date due_by
+    numeric installment_amount
+    string status
+  }
+
+  ORDER_FEES {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    uuid inventory_unit_id FK
+    string fee_type
+    numeric amount
+    text reason
+  }
+
+  INVOICES {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    string invoice_number
+    string gstin
+    string place_of_supply
+    numeric cgst
+    numeric sgst
+    numeric igst
+    numeric grand_total
+    string pdf_url
+  }
+
+  RENTAL_ORDERS ||--o{ ORDER_ITEMS : lines
+  RENTAL_ORDERS ||--o{ PAYMENTS : money
+  RENTAL_ORDERS ||--o{ LAYAWAY_SCHEDULES : installments
+  RENTAL_ORDERS ||--o{ ORDER_FEES : fees
+  RENTAL_ORDERS ||--o{ INVOICES : gst
+  RENTAL_ORDERS ||--o{ APPOINTMENTS : schedules
+  ORDER_ITEMS ||--o| UNIT_RESERVATIONS : creates
+  ORDER_ITEMS }o--o| INVENTORY_UNITS : rents
+  PAYMENTS ||--o| PAYMENTS : refund_of
+
+  RETURN_EVENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    uuid inventory_unit_id FK
+    uuid received_by FK
+    timestamptz returned_at
+    string inspect_status
+    text inspect_notes
+    boolean cleaning_required
+    uuid approved_by FK
+    timestamptz inspected_at
+  }
+
+  CLEANING_JOBS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid inventory_unit_id FK
+    uuid return_event_id FK
+    string vendor
+    date expected_back
+    string status
+  }
+
+  DAMAGE_RECORDS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid return_event_id FK
+    uuid inventory_unit_id FK
+    text notes
+    numeric fee_amount
+  }
+
+  RENTAL_ORDERS ||--o{ RETURN_EVENTS : returns
+  INVENTORY_UNITS ||--o{ RETURN_EVENTS : returned_as
+  RETURN_EVENTS ||--o| DAMAGE_RECORDS : may_damage
+  RETURN_EVENTS ||--o| CLEANING_JOBS : may_clean
+  INVENTORY_UNITS ||--o{ CLEANING_JOBS : cleaning
+
+  DOCUMENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid order_id FK
+    uuid customer_id FK
+    uuid return_event_id FK
+    string doc_type
+    string storage_key
+    boolean customer_acknowledged
+    timestamptz signed_at
+  }
+
+  NOTIFICATION_LOGS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid customer_id FK
+    string channel
+    string template_key
+    string status
+    jsonb payload
+    timestamptz created_at
+  }
+
+  WEBHOOK_ENDPOINTS {
+    uuid id PK
+    uuid tenant_id FK
+    string url
+    string secret
+    boolean is_active
+  }
+
+  API_KEYS {
+    uuid id PK
+    uuid tenant_id FK
+    string key_hash
+    string name
+    timestamptz last_used_at
+  }
+
+  OFFLINE_SYNC_EVENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid store_id FK
+    string device_id
+    string client_event_id
+    string event_type
+    jsonb payload
+    string sync_status
+    timestamptz synced_at
+  }
+
+  RENTAL_ORDERS ||--o{ DOCUMENTS : files
+  RETURN_EVENTS ||--o{ DOCUMENTS : photos
+  CUSTOMERS ||--o{ NOTIFICATION_LOGS : notified
+  TENANTS ||--o{ WEBHOOK_ENDPOINTS : hooks
+  TENANTS ||--o{ API_KEYS : integrates
+  STORES ||--o{ OFFLINE_SYNC_EVENTS : syncs

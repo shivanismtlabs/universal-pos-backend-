@@ -1,0 +1,109 @@
+%% 01 — Platform / SaaS / Auth
+%% Open alone in mermaid.live for readable zoom
+
+erDiagram
+  TENANTS {
+    uuid id PK
+    string name
+    string slug
+    string gstin
+    string status
+    jsonb branding
+    jsonb settings
+    timestamptz created_at
+  }
+
+  STORES {
+    uuid id PK
+    uuid tenant_id FK
+    string name
+    string code
+    string address
+    string state_code
+    boolean is_active
+  }
+
+  PLANS {
+    uuid id PK
+    string code
+    string name
+    jsonb limits
+    jsonb features
+    numeric price_inr
+  }
+
+  TENANT_SUBSCRIPTIONS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid plan_id FK
+    string status
+    timestamptz current_period_end
+    int seats_used
+    int locations_used
+  }
+
+  FEATURE_FLAGS {
+    uuid id PK
+    uuid tenant_id FK
+    string key
+    boolean enabled
+  }
+
+  USERS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid primary_store_id FK
+    string email
+    string phone
+    string password_hash
+    string full_name
+    boolean is_active
+  }
+
+  ROLES {
+    uuid id PK
+    uuid tenant_id FK
+    string code
+  }
+
+  PERMISSIONS {
+    uuid id PK
+    string code
+  }
+
+  USER_ROLES {
+    uuid user_id FK
+    uuid role_id FK
+    uuid store_id FK
+  }
+
+  ROLE_PERMISSIONS {
+    uuid role_id FK
+    uuid permission_id FK
+  }
+
+  AUDIT_LOGS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid actor_user_id FK
+    string entity_type
+    uuid entity_id
+    string action
+    jsonb before_after
+    string ip
+    string device
+    string user_agent
+    timestamptz created_at
+  }
+
+  TENANTS ||--o{ STORES : has
+  TENANTS ||--o{ USERS : has
+  TENANTS ||--o{ TENANT_SUBSCRIPTIONS : has
+  TENANTS ||--o{ FEATURE_FLAGS : has
+  TENANTS ||--o{ AUDIT_LOGS : audited
+  PLANS ||--o{ TENANT_SUBSCRIPTIONS : defines
+  STORES ||--o{ USERS : primary_store
+  USERS ||--o{ USER_ROLES : assigned
+  ROLES ||--o{ USER_ROLES : grants
+  ROLES ||--o{ ROLE_PERMISSIONS : has
+  PERMISSIONS ||--o{ ROLE_PERMISSIONS : used_in

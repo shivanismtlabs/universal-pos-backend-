@@ -1,0 +1,50 @@
+%% 02 — Customers / Parties / Measurements
+
+erDiagram
+  CUSTOMERS {
+    uuid id PK
+    uuid tenant_id FK
+    string full_name
+    string phone
+    string email
+    date event_date
+    text notes
+    boolean marketing_opt_in
+    timestamptz consent_at
+    timestamptz deleted_at
+  }
+
+  CUSTOMER_MEASUREMENTS {
+    uuid id PK
+    uuid tenant_id FK
+    uuid customer_id FK
+    numeric height_cm
+    numeric weight_kg
+    numeric chest
+    numeric waist
+    numeric inseam
+    numeric sleeve
+    string shoe_size
+    jsonb extras
+    uuid taken_by_user_id FK
+    timestamptz taken_at
+  }
+
+  PARTIES {
+    uuid id PK
+    uuid tenant_id FK
+    string name
+    date event_date
+    uuid primary_customer_id FK
+  }
+
+  PARTY_MEMBERS {
+    uuid party_id FK
+    uuid customer_id FK
+    string role_label
+  }
+
+  CUSTOMERS ||--o{ CUSTOMER_MEASUREMENTS : history
+  CUSTOMERS ||--o{ PARTY_MEMBERS : member
+  PARTIES ||--o{ PARTY_MEMBERS : includes
+  PARTIES }o--|| CUSTOMERS : primary_customer

@@ -1,0 +1,459 @@
+{
+  "info": {
+    "_postman_id": "walit-pos-api-001",
+    "name": "Walit POS API",
+    "description": "Walit POS — NestJS multi-tenant rental POS API.\n\nBase URL: `{{baseUrl}}` (default http://localhost:3001/v1)\n\n**Response envelope**\n- Success: `{ success: true, data: ... }`\n- Error: `{ success: false, statusCode, error, message }`\n\nFlow:\n1. Register Tenant (or Login)\n2. Tokens auto-save from `data.*`\n3. Use Me / Logout with Bearer token",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3001/v1" },
+    { "key": "accessToken", "value": "" },
+    { "key": "refreshToken", "value": "" },
+    { "key": "tenantSlug", "value": "demo-shop-2" },
+    { "key": "adminEmail", "value": "admin@demo-shop-2.com" },
+    { "key": "adminPassword", "value": "Password123!" },
+    { "key": "customerId", "value": "" },
+    { "key": "partyId", "value": "" },
+    { "key": "storeId", "value": "" },
+    { "key": "styleId", "value": "" },
+    { "key": "unitId", "value": "" },
+    { "key": "reservationId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/health",
+            "description": "Public health check"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register Tenant",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  const data = json.data || json;",
+                  "  if (data.accessToken) pm.collectionVariables.set('accessToken', data.accessToken);",
+                  "  if (data.refreshToken) pm.collectionVariables.set('refreshToken', data.refreshToken);",
+                  "  if (data.tenant && data.tenant.slug) pm.collectionVariables.set('tenantSlug', data.tenant.slug);",
+                  "  if (data.user && data.user.email) pm.collectionVariables.set('adminEmail', data.user.email);",
+                  "  if (data.store && data.store.id) pm.collectionVariables.set('storeId', data.store.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantName\": \"Demo Tuxedo Shop 2\",\n  \"tenantSlug\": \"{{tenantSlug}}\",\n  \"storeName\": \"Main Store\",\n  \"adminFullName\": \"Shop Admin\",\n  \"adminEmail\": \"{{adminEmail}}\",\n  \"adminPassword\": \"{{adminPassword}}\",\n  \"adminPhone\": \"9876543210\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/register-tenant",
+            "description": "Creates tenant + MAIN store + admin user.\nPassword must include upper, lower, number, special (8–72)."
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  const data = json.data || json;",
+                  "  if (data.accessToken) pm.collectionVariables.set('accessToken', data.accessToken);",
+                  "  if (data.refreshToken) pm.collectionVariables.set('refreshToken', data.refreshToken);",
+                  "  if (data.user && data.user.storeId) pm.collectionVariables.set('storeId', data.user.storeId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantSlug\": \"{{tenantSlug}}\",\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/login",
+            "description": "Login. 5 failed attempts → 15 min lock."
+          }
+        },
+        {
+          "name": "Refresh Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  const data = json.data || json;",
+                  "  if (data.accessToken) pm.collectionVariables.set('accessToken', data.accessToken);",
+                  "  if (data.refreshToken) pm.collectionVariables.set('refreshToken', data.refreshToken);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/refresh",
+            "description": "Rotates refresh token and returns new access + refresh."
+          }
+        },
+        {
+          "name": "Me",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/auth/me",
+            "description": "Current user (requires Bearer accessToken)."
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/auth/logout",
+            "description": "Revokes refresh token server-side."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Customers",
+      "item": [
+        {
+          "name": "Create Customer",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  const data = json.data || json;",
+                  "  if (data.id) pm.collectionVariables.set('customerId', data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fullName\": \"Amit Kumar\",\n  \"phone\": \"9876543210\",\n  \"email\": \"amit@example.com\",\n  \"eventDate\": \"2026-12-15\",\n  \"notes\": \"Wedding rental\",\n  \"marketingOptIn\": true\n}"
+            },
+            "url": "{{baseUrl}}/customers"
+          }
+        },
+        {
+          "name": "List Customers",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "url": "{{baseUrl}}/customers?q=Amit&page=1&limit=20"
+          }
+        },
+        {
+          "name": "Get Customer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "url": "{{baseUrl}}/customers/{{customerId}}"
+          }
+        },
+        {
+          "name": "Update Customer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"notes\": \"Updated notes\"\n}"
+            },
+            "url": "{{baseUrl}}/customers/{{customerId}}"
+          }
+        },
+        {
+          "name": "Add Measurement",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"heightCm\": 175,\n  \"chest\": 40,\n  \"waist\": 34,\n  \"inseam\": 32,\n  \"sleeve\": 25,\n  \"shoeSize\": \"9\"\n}"
+            },
+            "url": "{{baseUrl}}/customers/{{customerId}}/measurements"
+          }
+        },
+        {
+          "name": "List Measurements",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "url": "{{baseUrl}}/customers/{{customerId}}/measurements"
+          }
+        },
+        {
+          "name": "Create Party",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  const data = json.data || json;",
+                  "  if (data.id) pm.collectionVariables.set('partyId', data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Sharma Wedding Party\",\n  \"eventDate\": \"2026-12-15\",\n  \"primaryCustomerId\": \"{{customerId}}\",\n  \"members\": [\n    { \"customerId\": \"{{customerId}}\", \"roleLabel\": \"groom\" }\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/parties"
+          }
+        },
+        {
+          "name": "List Parties",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "url": "{{baseUrl}}/parties"
+          }
+        },
+        {
+          "name": "Soft Delete Customer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "DELETE",
+            "url": "{{baseUrl}}/customers/{{customerId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Inventory",
+      "item": [
+        {
+          "name": "Create Category",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Tuxedo\"\n}"
+            },
+            "url": "{{baseUrl}}/categories"
+          }
+        },
+        {
+          "name": "Create Product Style",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const j = pm.response.json();",
+                  "  const data = j.data || j;",
+                  "  if (data.id) pm.collectionVariables.set('styleId', data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Classic Black Tux\",\n  \"styleCode\": \"TBX-BLK-01\",\n  \"color\": \"Black\",\n  \"isRental\": true,\n  \"hsnSac\": \"9988\"\n}"
+            },
+            "url": "{{baseUrl}}/product-styles"
+          }
+        },
+        {
+          "name": "Create Inventory Unit",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const j = pm.response.json();",
+                  "  const data = j.data || j;",
+                  "  if (data.id) pm.collectionVariables.set('unitId', data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"storeId\": \"{{storeId}}\",\n  \"productStyleId\": \"{{styleId}}\",\n  \"barcodeSku\": \"UNIT-0001\",\n  \"size\": \"42\",\n  \"condition\": \"GOOD\",\n  \"ownership\": \"own\",\n  \"rentalPrice\": 2500,\n  \"depositAmount\": 5000\n}"
+            },
+            "url": "{{baseUrl}}/inventory-units",
+            "description": "Set storeId from login/register store.id"
+          }
+        },
+        {
+          "name": "Check Availability",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "url": "{{baseUrl}}/inventory/availability?startDate=2026-12-10&endDate=2026-12-12&productStyleId={{styleId}}&size=42"
+          }
+        },
+        {
+          "name": "Reserve Unit",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const j = pm.response.json();",
+                  "  const data = j.data || j;",
+                  "  if (data.id) pm.collectionVariables.set('reservationId', data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"inventoryUnitId\": \"{{unitId}}\",\n  \"startDate\": \"2026-12-10\",\n  \"endDate\": \"2026-12-12\"\n}"
+            },
+            "url": "{{baseUrl}}/inventory/reservations"
+          }
+        },
+        {
+          "name": "Release Reservation",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Customer cancelled\"\n}"
+            },
+            "url": "{{baseUrl}}/inventory/reservations/{{reservationId}}/release"
+          }
+        }
+      ]
+    }
+  ]
+}

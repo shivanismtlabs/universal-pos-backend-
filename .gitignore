@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+
+# Logs / OS
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+
+# Prisma
+node_modules/.prisma/

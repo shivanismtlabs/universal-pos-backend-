@@ -19,11 +19,30 @@ const USER_SELECT = {
   fullName: true,
   phone: true,
   isActive: true,
-  primaryStoreId: true,
+  primaryLocationId: true,
   lastLoginAt: true,
   createdAt: true,
+  employee: {
+    select: {
+      id: true,
+      employeeCode: true,
+      jobTitle: true,
+      status: true,
+    },
+  },
   userRoles: {
-    select: { role: { select: { id: true, code: true } }, storeId: true },
+    select: {
+      role: { select: { id: true, code: true } },
+      locationId: true,
+    },
+  },
+  memberships: {
+    where: { status: 'active' },
+    select: {
+      id: true,
+      locationId: true,
+      role: { select: { code: true } },
+    },
   },
 } satisfies Prisma.UserSelect;
 
@@ -31,7 +50,11 @@ function toUserView(
   user: Prisma.UserGetPayload<{ select: typeof USER_SELECT }>,
 ) {
   const { userRoles, ...rest } = user;
-  return { ...rest, roles: userRoles.map((ur) => ur.role.code) };
+  return {
+    ...rest,
+    primaryStoreId: rest.primaryLocationId,
+    roles: userRoles.map((ur) => ur.role.code),
+  };
 }
 
 @Injectable()
@@ -41,6 +64,7 @@ export class UsersService {
   async create(user: AuthUser, dto: CreateUserDto) {
     const email = dto.email.trim().toLowerCase();
     const roleCode = (dto.roleCode ?? DEFAULT_ROLE_CODE).trim().toLowerCase();
+    const locationId = dto.primaryLocationId ?? dto.primaryStoreId;
 
     const existing = await this.prisma.user.findFirst({
       where: { tenantId: user.tenantId, email },
@@ -50,17 +74,26 @@ export class UsersService {
       throw new ConflictException('User with this email already exists');
     }
 
-    if (dto.primaryStoreId) {
-      await this.assertStore(user.tenantId, dto.primaryStoreId);
+    if (locationId) {
+      await this.assertLocation(user.tenantId, locationId);
     }
 
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
+    const employeeCount = await this.prisma.employee.count({
+      where: { tenantId: user.tenantId },
+    });
 
     try {
       const created = await this.prisma.$transaction(async (tx) => {
         const role = await tx.role.upsert({
-          where: { tenantId_code: { tenantId: user.tenantId, code: roleCode } },
-          create: { tenantId: user.tenantId, code: roleCode },
+          where: {
+            tenantId_code: { tenantId: user.tenantId, code: roleCode },
+          },
+          create: {
+            tenantId: user.tenantId,
+            code: roleCode,
+            name: roleCode,
+          },
           update: {},
         });
 
@@ -71,9 +104,20 @@ export class UsersService {
             phone: dto.phone,
             fullName: dto.fullName.trim(),
             passwordHash,
-            primaryStoreId: dto.primaryStoreId,
+            primaryLocationId: locationId,
             isActive: true,
             passwordChangedAt: new Date(),
+          },
+        });
+
+        await tx.employee.create({
+          data: {
+            tenantId: user.tenantId,
+            userId: newUser.id,
+            employeeCode: `E${String(employeeCount + 1).padStart(3, '0')}`,
+            status: 'active',
+            hiredAt: new Date(),
+            jobTitle: dto.jobTitle?.trim(),
           },
         });
 
@@ -81,9 +125,21 @@ export class UsersService {
           data: {
             userId: newUser.id,
             roleId: role.id,
-            storeId: dto.primaryStoreId,
+            locationId: locationId ?? null,
           },
         });
+
+        if (locationId) {
+          await tx.membership.create({
+            data: {
+              tenantId: user.tenantId,
+              userId: newUser.id,
+              locationId,
+              roleId: role.id,
+              status: 'active',
+            },
+          });
+        }
 
         return tx.user.findUniqueOrThrow({
           where: { id: newUser.id },
@@ -122,44 +178,63 @@ export class UsersService {
     });
     if (!existing) throw new NotFoundException('User not found');
 
-    if (dto.primaryStoreId) {
-      await this.assertStore(user.tenantId, dto.primaryStoreId);
+    const locationId = dto.primaryLocationId ?? dto.primaryStoreId;
+    if (locationId) {
+      await this.assertLocation(user.tenantId, locationId);
     }
 
     const data: Prisma.UserUpdateInput = {};
     if (dto.fullName !== undefined) data.fullName = dto.fullName.trim();
     if (dto.phone !== undefined) data.phone = dto.phone;
-    if (dto.primaryStoreId !== undefined) {
-      data.primaryStore = { connect: { id: dto.primaryStoreId } };
+    if (locationId !== undefined) {
+      data.primaryLocation = { connect: { id: locationId } };
     }
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
 
     await this.prisma.user.update({ where: { id }, data });
+
+    if (dto.jobTitle !== undefined) {
+      await this.prisma.employee.updateMany({
+        where: { userId: id, tenantId: user.tenantId },
+        data: { jobTitle: dto.jobTitle.trim() },
+      });
+    }
+
     return this.getById(user, id);
   }
 
   async assignRole(user: AuthUser, id: string, dto: AssignRoleDto) {
     const existing = await this.prisma.user.findFirst({
       where: { id, tenantId: user.tenantId },
-      select: { id: true, primaryStoreId: true },
+      select: { id: true, primaryLocationId: true },
     });
     if (!existing) throw new NotFoundException('User not found');
 
     const roleCode = dto.roleCode.trim().toLowerCase();
+    const locationId = dto.locationId ?? existing.primaryLocationId ?? null;
+
+    if (locationId) {
+      await this.assertLocation(user.tenantId, locationId);
+    }
 
     await this.prisma.$transaction(async (tx) => {
       const role = await tx.role.upsert({
-        where: { tenantId_code: { tenantId: user.tenantId, code: roleCode } },
-        create: { tenantId: user.tenantId, code: roleCode },
+        where: {
+          tenantId_code: { tenantId: user.tenantId, code: roleCode },
+        },
+        create: {
+          tenantId: user.tenantId,
+          code: roleCode,
+          name: roleCode,
+        },
         update: {},
       });
 
-      const storeId = existing.primaryStoreId ?? null;
       const already = await tx.userRole.findFirst({
         where: {
           userId: id,
           roleId: role.id,
-          storeId,
+          locationId,
         },
         select: { id: true },
       });
@@ -168,20 +243,44 @@ export class UsersService {
           data: {
             userId: id,
             roleId: role.id,
-            storeId,
+            locationId,
           },
         });
+      }
+
+      if (locationId) {
+        const mem = await tx.membership.findFirst({
+          where: {
+            userId: id,
+            locationId,
+            roleId: role.id,
+            status: 'active',
+          },
+        });
+        if (!mem) {
+          await tx.membership.create({
+            data: {
+              tenantId: user.tenantId,
+              userId: id,
+              locationId,
+              roleId: role.id,
+              status: 'active',
+            },
+          });
+        }
       }
     });
 
     return this.getById(user, id);
   }
 
-  private async assertStore(tenantId: string, storeId: string) {
-    const store = await this.prisma.store.findFirst({
-      where: { id: storeId, tenantId, isActive: true },
+  private async assertLocation(tenantId: string, locationId: string) {
+    const location = await this.prisma.location.findFirst({
+      where: { id: locationId, tenantId, isActive: true },
       select: { id: true },
     });
-    if (!store) throw new NotFoundException('Store not found or inactive');
+    if (!location) {
+      throw new NotFoundException('Location not found or inactive');
+    }
   }
 }

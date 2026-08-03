@@ -13,8 +13,9 @@ import { Roles } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
 import {
-  CreateStoreDto,
-  UpdateStoreDto,
+  CreateLocationDto,
+  CreateOrganizationDto,
+  UpdateLocationDto,
   UpdateTenantDto,
 } from './dto/tenants.dto';
 import { TenantsService } from './tenants.service';
@@ -32,6 +33,15 @@ export class TenantsController {
     return this.tenantsService.getMe(user);
   }
 
+  @Get('tenants/me/bootstrap')
+  @Roles(...RoleGroup.all)
+  @ApiOperation({
+    summary: 'Bootstrap payload: tenant, orgs, locations, modules, nav',
+  })
+  bootstrap(@CurrentUser() user: AuthUser) {
+    return this.tenantsService.bootstrap(user);
+  }
+
   @Patch('tenants/me')
   @Roles(...RoleGroup.ownerOnly)
   @ApiOperation({ summary: 'Update current tenant (admin only)' })
@@ -39,23 +49,75 @@ export class TenantsController {
     return this.tenantsService.updateMe(user, dto);
   }
 
+  @Get('organizations')
+  @Roles(...RoleGroup.all)
+  @ApiOperation({ summary: 'List organizations' })
+  listOrganizations(@CurrentUser() user: AuthUser) {
+    return this.tenantsService.listOrganizations(user);
+  }
+
+  @Post('organizations')
+  @Roles(...RoleGroup.ownerOnly)
+  @ApiOperation({ summary: 'Create organization' })
+  createOrganization(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateOrganizationDto,
+  ) {
+    return this.tenantsService.createOrganization(user, dto);
+  }
+
+  @Get('locations')
+  @Roles(...RoleGroup.all)
+  @ApiOperation({ summary: 'List locations (stores/warehouses/…)' })
+  listLocations(@CurrentUser() user: AuthUser) {
+    return this.tenantsService.listLocations(user);
+  }
+
+  @Post('locations')
+  @Roles(...RoleGroup.ownerOnly)
+  @ApiOperation({ summary: 'Create location' })
+  createLocation(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateLocationDto,
+  ) {
+    return this.tenantsService.createLocation(user, dto);
+  }
+
+  @Get('locations/:id')
+  @Roles(...RoleGroup.all)
+  getLocation(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.tenantsService.getLocation(user, id);
+  }
+
+  @Patch('locations/:id')
+  @Roles(...RoleGroup.lead)
+  updateLocation(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateLocationDto,
+  ) {
+    return this.tenantsService.updateLocation(user, id, dto);
+  }
+
+  /** Compat aliases — same as locations */
   @Get('stores')
   @Roles(...RoleGroup.all)
-  @ApiOperation({ summary: 'List stores for current tenant' })
+  @ApiOperation({ summary: 'List stores (alias of locations)' })
   listStores(@CurrentUser() user: AuthUser) {
     return this.tenantsService.listStores(user);
   }
 
   @Post('stores')
   @Roles(...RoleGroup.ownerOnly)
-  @ApiOperation({ summary: 'Create a store' })
-  createStore(@CurrentUser() user: AuthUser, @Body() dto: CreateStoreDto) {
+  createStore(@CurrentUser() user: AuthUser, @Body() dto: CreateLocationDto) {
     return this.tenantsService.createStore(user, dto);
   }
 
   @Get('stores/:id')
   @Roles(...RoleGroup.all)
-  @ApiOperation({ summary: 'Get store by id' })
   getStore(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
@@ -65,11 +127,10 @@ export class TenantsController {
 
   @Patch('stores/:id')
   @Roles(...RoleGroup.lead)
-  @ApiOperation({ summary: 'Update store' })
   updateStore(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: UpdateStoreDto,
+    @Body() dto: UpdateLocationDto,
   ) {
     return this.tenantsService.updateStore(user, id, dto);
   }

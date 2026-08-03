@@ -39,17 +39,29 @@ export class CreateUserDto {
   @IsStrongPassword()
   password!: string;
 
-  @ApiPropertyOptional({ example: 'staff', default: 'staff' })
+  @ApiPropertyOptional({ example: 'cashier', default: 'staff' })
   @IsOptional()
   @IsString()
   @MinLength(2)
   @MaxLength(50)
   roleCode?: string;
 
+  @ApiPropertyOptional({ description: 'Preferred field' })
+  @IsOptional()
+  @IsUUID()
+  primaryLocationId?: string;
+
+  /** @deprecated use primaryLocationId */
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
   primaryStoreId?: string;
+
+  @ApiPropertyOptional({ example: 'Cashier' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  jobTitle?: string;
 }
 
 export class UpdateUserDto {
@@ -71,12 +83,24 @@ export class UpdateUserDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
+  primaryLocationId?: string;
+
+  /** @deprecated use primaryLocationId */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
   primaryStoreId?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  jobTitle?: string;
 }
 
 export class AssignRoleDto {
@@ -85,4 +109,9 @@ export class AssignRoleDto {
   @MinLength(2)
   @MaxLength(50)
   roleCode!: string;
+
+  @ApiPropertyOptional({ description: 'Scope role to a location' })
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
 }

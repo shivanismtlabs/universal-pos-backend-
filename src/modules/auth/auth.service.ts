@@ -9,6 +9,7 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomUUID } from 'crypto';
 import { PrismaService } from '../../database/database.module';
+import { provisionTenantWithAdmin } from '../../common/provision-tenant';
 import type {
   LoginDto,
   RefreshTokenDto,
@@ -16,20 +17,6 @@ import type {
 } from './dto/auth.dto';
 import { RESERVED_TENANT_SLUGS } from './password.policy';
 import type { AuthUser, JwtPayload } from './types';
-
-const DEFAULT_ROLES = [
-  'admin',
-  'manager',
-  'cashier',
-  'fitter',
-  'inventory',
-] as const;
-
-const DEFAULT_PERMISSIONS = [
-  'refund',
-  'discount_override',
-  'price_change',
-] as const;
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
@@ -52,7 +39,8 @@ export class AuthService {
     const email = dto.adminEmail.trim().toLowerCase();
     const fullName = dto.adminFullName.trim();
     const tenantName = dto.tenantName.trim();
-    const storeName = dto.storeName.trim();
+    const locationName = dto.storeName.trim();
+    const taxId = dto.gstin?.trim() || dto.taxId?.trim();
 
     if (RESERVED_TENANT_SLUGS.has(slug)) {
       throw new BadRequestException('This tenant slug is reserved');
@@ -73,99 +61,27 @@ export class AuthService {
     }
 
     const passwordHash = await bcrypt.hash(dto.adminPassword, BCRYPT_ROUNDS);
-    const now = new Date();
 
-    const result = await this.prisma.$transaction(async (tx) => {
-      const tenant = await tx.tenant.create({
-        data: {
-          name: tenantName,
-          slug,
-          gstin: dto.gstin?.toUpperCase(),
-          status: 'active',
-        },
-      });
-
-      const store = await tx.store.create({
-        data: {
-          tenantId: tenant.id,
-          name: storeName,
-          code: 'MAIN',
-          isActive: true,
-        },
-      });
-
-      for (const code of DEFAULT_PERMISSIONS) {
-        await tx.permission.upsert({
-          where: { code },
-          create: { code },
-          update: {},
-        });
-      }
-
-      const roleRecords = [];
-      for (const code of DEFAULT_ROLES) {
-        const role = await tx.role.create({
-          data: { tenantId: tenant.id, code },
-        });
-        roleRecords.push(role);
-      }
-
-      const adminRole = roleRecords.find((r) => r.code === 'admin')!;
-      const allPermissions = await tx.permission.findMany({
-        where: { code: { in: [...DEFAULT_PERMISSIONS] } },
-      });
-
-      for (const permission of allPermissions) {
-        await tx.rolePermission.create({
-          data: {
-            roleId: adminRole.id,
-            permissionId: permission.id,
-          },
-        });
-      }
-
-      const user = await tx.user.create({
-        data: {
-          tenantId: tenant.id,
-          primaryStoreId: store.id,
-          email,
-          phone: dto.adminPhone,
-          passwordHash,
-          fullName,
-          isActive: true,
-          passwordChangedAt: now,
-          failedLoginAttempts: 0,
-        },
-      });
-
-      await tx.userRole.create({
-        data: {
-          userId: user.id,
-          roleId: adminRole.id,
-          storeId: store.id,
-        },
-      });
-
-      await tx.auditLog.create({
-        data: {
-          tenantId: tenant.id,
-          actorUserId: user.id,
-          entityType: 'tenant',
-          entityId: tenant.id,
-          action: 'tenant.registered',
-          beforeAfter: { slug, storeId: store.id },
-        },
-      });
-
-      return { tenant, store, user, roles: ['admin'] };
-    });
+    const result = await this.prisma.$transaction(async (tx) =>
+      provisionTenantWithAdmin(tx, {
+        tenantName,
+        slug,
+        taxId,
+        locationName,
+        adminEmail: email,
+        adminFullName: fullName,
+        adminPhone: dto.adminPhone,
+        passwordHash,
+      }),
+    );
 
     const tokens = await this.issueTokens({
       userId: result.user.id,
       tenantId: result.tenant.id,
       email: result.user.email,
       fullName: result.user.fullName,
-      storeId: result.store.id,
+      locationId: result.location.id,
+      storeId: result.location.id,
       roles: result.roles,
     });
 
@@ -175,10 +91,22 @@ export class AuthService {
         name: result.tenant.name,
         slug: result.tenant.slug,
       },
+      organization: {
+        id: result.organization.id,
+        name: result.organization.name,
+        code: result.organization.code,
+      },
+      location: {
+        id: result.location.id,
+        name: result.location.name,
+        code: result.location.code,
+        type: result.location.type,
+      },
+      /** @deprecated alias — use location */
       store: {
-        id: result.store.id,
-        name: result.store.name,
-        code: result.store.code,
+        id: result.location.id,
+        name: result.location.name,
+        code: result.location.code,
       },
       user: {
         id: result.user.id,
@@ -205,7 +133,6 @@ export class AuthService {
           })
         : null;
 
-    // Always burn bcrypt time (user enumeration / timing)
     const hash = user?.passwordHash ?? DUMMY_PASSWORD_HASH;
     const passwordOk = await bcrypt.compare(password, hash);
 
@@ -265,12 +192,14 @@ export class AuthService {
     }
 
     const roles = user.userRoles.map((ur) => ur.role.code);
+    const locationId = user.primaryLocationId;
     const authUser: AuthUser = {
       userId: user.id,
       tenantId: user.tenantId,
       email: user.email,
       fullName: user.fullName,
-      storeId: user.primaryStoreId,
+      locationId,
+      storeId: locationId,
       roles,
     };
 
@@ -301,7 +230,8 @@ export class AuthService {
         email: user.email,
         fullName: user.fullName,
         roles,
-        storeId: user.primaryStoreId,
+        locationId,
+        storeId: locationId,
         tenantId: user.tenantId,
       },
       ...tokens,
@@ -343,7 +273,6 @@ export class AuthService {
 
     const incomingHash = this.hashToken(dto.refreshToken);
     if (incomingHash !== user.refreshTokenHash) {
-      // Possible reuse / theft → revoke
       await this.clearRefreshToken(user.id);
       await this.prisma.auditLog.create({
         data: {
@@ -357,16 +286,17 @@ export class AuthService {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
+    const locationId = user.primaryLocationId;
     const authUser: AuthUser = {
       userId: user.id,
       tenantId: user.tenantId,
       email: user.email,
       fullName: user.fullName,
-      storeId: user.primaryStoreId,
+      locationId,
+      storeId: locationId,
       roles: user.userRoles.map((ur) => ur.role.code),
     };
 
-    // Rotate refresh token
     return this.issueTokens(authUser);
   }
 
@@ -388,17 +318,61 @@ export class AuthService {
     const dbUser = await this.prisma.user.findFirst({
       where: { id: user.userId, tenantId: user.tenantId, isActive: true },
       include: {
-        tenant: { select: { id: true, name: true, slug: true, status: true } },
-        primaryStore: {
-          select: { id: true, name: true, code: true },
+        tenant: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            status: true,
+            currencyCode: true,
+            locale: true,
+            timezone: true,
+            taxMode: true,
+            branding: true,
+          },
+        },
+        primaryLocation: {
+          select: { id: true, name: true, code: true, type: true },
+        },
+        employee: {
+          select: {
+            id: true,
+            employeeCode: true,
+            jobTitle: true,
+            status: true,
+          },
         },
         userRoles: { include: { role: true } },
+        memberships: {
+          where: { status: 'active' },
+          select: {
+            id: true,
+            locationId: true,
+            departmentId: true,
+            teamId: true,
+            role: { select: { code: true } },
+          },
+        },
       },
     });
 
     if (!dbUser || dbUser.tenant.status !== 'active') {
       throw new UnauthorizedException();
     }
+
+    const modules = await this.prisma.tenantModule.findMany({
+      where: { tenantId: user.tenantId, status: 'enabled' },
+      include: {
+        module: {
+          select: {
+            code: true,
+            name: true,
+            navSchema: true,
+            dependsOn: true,
+          },
+        },
+      },
+    });
 
     return {
       id: dbUser.id,
@@ -407,19 +381,31 @@ export class AuthService {
       phone: dbUser.phone,
       roles: dbUser.userRoles.map((ur) => ur.role.code),
       tenant: dbUser.tenant,
-      store: dbUser.primaryStore,
+      location: dbUser.primaryLocation,
+      store: dbUser.primaryLocation,
+      employee: dbUser.employee,
+      memberships: dbUser.memberships,
+      modules: modules.map((m) => ({
+        code: m.module.code,
+        name: m.module.name,
+        navSchema: m.module.navSchema,
+        dependsOn: m.module.dependsOn,
+        config: m.config,
+      })),
       lastLoginAt: dbUser.lastLoginAt,
     };
   }
 
   private async issueTokens(user: AuthUser) {
     const jti = randomUUID();
+    const locationId = user.locationId ?? user.storeId ?? null;
     const base = {
       sub: user.userId,
       tenantId: user.tenantId,
       email: user.email,
       roles: user.roles,
-      storeId: user.storeId ?? null,
+      locationId,
+      storeId: locationId,
     };
 
     const accessTtl = this.config.get<string>('JWT_ACCESS_TTL', '15m');

@@ -39,12 +39,14 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       throw new UnauthorizedException('User not found');
     }
 
+    const locationId = user.primaryLocationId;
     return {
       userId: user.id,
       tenantId: user.tenantId,
       email: user.email,
       fullName: user.fullName,
-      storeId: user.primaryStoreId,
+      locationId,
+      storeId: locationId,
       roles: user.userRoles.map((ur) => ur.role.code),
     };
   }

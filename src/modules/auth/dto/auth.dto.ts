@@ -30,7 +30,10 @@ export class RegisterTenantDto {
   @MaxLength(50)
   tenantSlug!: string;
 
-  @ApiPropertyOptional({ example: '27AAAAA0000A1Z5' })
+  @ApiPropertyOptional({
+    example: '27AAAAA0000A1Z5',
+    description: 'Legacy GSTIN field — mapped to taxId',
+  })
   @IsOptional()
   @IsString()
   @Matches(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/i, {
@@ -39,7 +42,16 @@ export class RegisterTenantDto {
   @MaxLength(15)
   gstin?: string;
 
-  @ApiProperty({ example: 'Main Store' })
+  @ApiPropertyOptional({
+    example: '29AABCU9603R1ZM',
+    description: 'Universal tax id (GSTIN / VAT / EIN)',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  taxId?: string;
+
+  @ApiProperty({ example: 'Main Store', description: 'Primary location name' })
   @IsString()
   @MinLength(2)
   @MaxLength(100)

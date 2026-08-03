@@ -1,16 +1,18 @@
 import { ApiPropertyOptional, ApiProperty } from '@nestjs/swagger';
 import {
   IsBoolean,
+  IsIn,
   IsObject,
   IsOptional,
   IsString,
+  IsUUID,
   Matches,
   MaxLength,
   MinLength,
 } from 'class-validator';
 
 export class UpdateTenantDto {
-  @ApiPropertyOptional({ example: 'Demo Tuxedo Shop' })
+  @ApiPropertyOptional({ example: 'Demo Shop' })
   @IsOptional()
   @IsString()
   @MinLength(2)
@@ -25,6 +27,31 @@ export class UpdateTenantDto {
   })
   @MaxLength(15)
   gstin?: string;
+
+  @ApiPropertyOptional({ example: '29AABCU9603R1ZM' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  taxId?: string;
+
+  @ApiPropertyOptional({ example: 'INR' })
+  @IsOptional()
+  @IsString()
+  @MinLength(3)
+  @MaxLength(3)
+  currencyCode?: string;
+
+  @ApiPropertyOptional({ example: 'en-IN' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  locale?: string;
+
+  @ApiPropertyOptional({ example: 'Asia/Kolkata' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  timezone?: string;
 
   @ApiPropertyOptional({
     description: 'Arbitrary branding JSON (logo, colors, etc)',
@@ -43,7 +70,32 @@ export class UpdateTenantDto {
   settings?: Record<string, unknown>;
 }
 
-export class CreateStoreDto {
+export class CreateOrganizationDto {
+  @ApiProperty({ example: 'Crown Retail Pvt Ltd' })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  name!: string;
+
+  @ApiProperty({ example: 'LEGAL1' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(50)
+  code!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  taxId?: string;
+
+  @ApiPropertyOptional({ default: false })
+  @IsOptional()
+  @IsBoolean()
+  isDefault?: boolean;
+}
+
+export class CreateLocationDto {
   @ApiProperty({ example: 'Downtown Branch' })
   @IsString()
   @MinLength(2)
@@ -57,23 +109,44 @@ export class CreateStoreDto {
   @MaxLength(50)
   code?: string;
 
+  @ApiPropertyOptional({
+    enum: ['store', 'branch', 'warehouse', 'clinic', 'kitchen', 'office', 'other'],
+    default: 'store',
+  })
+  @IsOptional()
+  @IsIn(['store', 'branch', 'warehouse', 'clinic', 'kitchen', 'office', 'other'])
+  type?: 'store' | 'branch' | 'warehouse' | 'clinic' | 'kitchen' | 'office' | 'other';
+
   @ApiPropertyOptional({ example: '123 MG Road, Bengaluru' })
   @IsOptional()
   @IsString()
   @MaxLength(500)
   address?: string;
 
+  @ApiPropertyOptional({ example: '29' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  regionCode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  organizationId?: string;
+
   @ApiPropertyOptional({
     default: false,
-    description:
-      'Marks this as the main store; defaults code to MAIN when no code is given',
+    description: 'Defaults code to MAIN when no code is given',
   })
   @IsOptional()
   @IsBoolean()
   isMain?: boolean;
 }
 
-export class UpdateStoreDto {
+/** @deprecated Use CreateLocationDto */
+export class CreateStoreDto extends CreateLocationDto {}
+
+export class UpdateLocationDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -91,4 +164,20 @@ export class UpdateStoreDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  regionCode?: string;
+
+  @ApiPropertyOptional({
+    enum: ['store', 'branch', 'warehouse', 'clinic', 'kitchen', 'office', 'other'],
+  })
+  @IsOptional()
+  @IsIn(['store', 'branch', 'warehouse', 'clinic', 'kitchen', 'office', 'other'])
+  type?: 'store' | 'branch' | 'warehouse' | 'clinic' | 'kitchen' | 'office' | 'other';
 }
+
+/** @deprecated Use UpdateLocationDto */
+export class UpdateStoreDto extends UpdateLocationDto {}

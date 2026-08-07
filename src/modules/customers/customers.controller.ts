@@ -93,7 +93,7 @@ export class CustomersController {
   }
 
   @Post('parties')
-  @ApiOperation({ summary: 'Create wedding/group party' })
+  @ApiOperation({ summary: 'Create customer group / party' })
   createParty(@CurrentUser() user: AuthUser, @Body() dto: CreatePartyDto) {
     return this.customersService.createParty(user, dto);
   }

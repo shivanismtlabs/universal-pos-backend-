@@ -128,12 +128,16 @@ export class RegisterUserDto {
 }
 
 export class LoginDto {
-  @ApiProperty({ example: 'demo-shop' })
+  @ApiPropertyOptional({
+    example: 'demo-shop',
+    description: 'Optional — if omitted, login resolves tenant from email',
+  })
+  @IsOptional()
   @Transform(toLowerTrim)
   @IsString()
   @MinLength(2)
   @MaxLength(50)
-  tenantSlug!: string;
+  tenantSlug?: string;
 
   @ApiProperty({ example: 'admin@demo-shop.com' })
   @Transform(toLowerTrim)

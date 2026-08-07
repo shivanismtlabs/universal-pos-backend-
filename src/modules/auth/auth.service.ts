@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomUUID } from 'crypto';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/database.module';
 import { provisionTenantWithAdmin } from '../../common/provision-tenant';
 import type {
@@ -268,25 +269,62 @@ export class AuthService {
   }
 
   async login(dto: LoginDto) {
-    const slug = dto.tenantSlug.trim().toLowerCase();
     const email = dto.email.trim().toLowerCase();
     const password = dto.password;
+    const slug = dto.tenantSlug?.trim().toLowerCase();
 
-    const tenant = await this.prisma.tenant.findUnique({ where: { slug } });
+    type UserWithTenant = Prisma.UserGetPayload<{
+      include: { userRoles: { include: { role: true } }; tenant: true };
+    }>;
 
-    const user =
-      tenant && tenant.status === 'active'
-        ? await this.prisma.user.findFirst({
-            where: { tenantId: tenant.id, email },
-            include: { userRoles: { include: { role: true } } },
-          })
-        : null;
+    let user: UserWithTenant | null = null;
+    let passwordOk = false;
 
-    const hash = user?.passwordHash ?? DUMMY_PASSWORD_HASH;
-    const passwordOk = await bcrypt.compare(password, hash);
+    if (slug) {
+      const tenant = await this.prisma.tenant.findUnique({ where: { slug } });
+      user =
+        tenant && tenant.status === 'active'
+          ? await this.prisma.user.findFirst({
+              where: { tenantId: tenant.id, email },
+              include: {
+                userRoles: { include: { role: true } },
+                tenant: true,
+              },
+            })
+          : null;
+      const hash = user?.passwordHash ?? DUMMY_PASSWORD_HASH;
+      passwordOk = await bcrypt.compare(password, hash);
+    } else {
+      const candidates = await this.prisma.user.findMany({
+        where: {
+          email,
+          isActive: true,
+          tenant: { status: 'active' },
+        },
+        include: {
+          userRoles: { include: { role: true } },
+          tenant: true,
+        },
+        take: 8,
+      });
+      for (const candidate of candidates) {
+        const ok = await bcrypt.compare(password, candidate.passwordHash);
+        if (ok) {
+          user = candidate;
+          passwordOk = true;
+          break;
+        }
+      }
+      if (!user) {
+        // Keep timing consistent + enable lockout on known email
+        await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
+        user = candidates[0] ?? null;
+        passwordOk = false;
+      }
+    }
 
-    if (!tenant || tenant.status !== 'active' || !user || !user.isActive) {
-      await this.safeAuditFailedLogin(tenant?.id, email, 'user_or_tenant');
+    if (!user || !user.isActive || user.tenant.status !== 'active') {
+      await this.safeAuditFailedLogin(user?.tenantId, email, 'user_or_tenant');
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -382,6 +420,11 @@ export class AuthService {
         locationId,
         storeId: locationId,
         tenantId: user.tenantId,
+      },
+      tenant: {
+        id: user.tenant.id,
+        slug: user.tenant.slug,
+        name: user.tenant.name,
       },
       ...tokens,
     };

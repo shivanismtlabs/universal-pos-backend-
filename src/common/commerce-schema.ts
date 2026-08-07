@@ -64,7 +64,7 @@ export const SALE_PRODUCT_FIELDS: CommerceFieldKey[] = [
     label: 'SKU / code',
     required: true,
     type: 'string',
-    hint: 'Letters, numbers, . _ - / (e.g. RICE-1KG)',
+    hint: 'Required · 15–18 chars · letters, numbers, . _ - /',
   },
   {
     key: 'sellUnit',
@@ -126,6 +126,7 @@ export const RENTAL_PRODUCT_FIELDS: CommerceFieldKey[] = [
     label: 'SKU / style code',
     required: true,
     type: 'string',
+    hint: 'Required · 15–18 characters',
   },
   {
     key: 'rentalPrice',
@@ -191,6 +192,7 @@ export const SERVICE_PRODUCT_FIELDS: CommerceFieldKey[] = [
     label: 'Service code',
     required: true,
     type: 'string',
+    hint: 'Required · 15–18 characters',
   },
   {
     key: 'price',
@@ -238,6 +240,7 @@ export const SUBSCRIPTION_PRODUCT_FIELDS: CommerceFieldKey[] = [
     label: 'Plan code',
     required: true,
     type: 'string',
+    hint: 'Required · 15–18 characters',
   },
   {
     key: 'price',

@@ -103,10 +103,10 @@ export class CreateCatalogItemDto {
   @IsUUID()
   categoryId!: string;
 
-  @ApiProperty({ example: 'ACC-USBC-1' })
+  @ApiProperty({ example: 'ACC-USBC-CABLE-01', minLength: 15, maxLength: 18 })
   @IsString()
-  @MinLength(1)
-  @MaxLength(100)
+  @MinLength(15)
+  @MaxLength(18)
   sku!: string;
 
   @ApiPropertyOptional({ description: 'Location for stock (defaults MAIN)' })

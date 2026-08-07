@@ -28,6 +28,33 @@ import {
 } from '../../common/sell-units';
 import { saveProductImage } from '../../common/product-image';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
+
+const MAX_PRODUCT_IMAGES = 8;
+
+function asMeta(meta: unknown): Record<string, unknown> {
+  return meta && typeof meta === 'object' && !Array.isArray(meta)
+    ? { ...(meta as Record<string, unknown>) }
+    : {};
+}
+
+/** Gallery URLs from meta.images + cover photoUrl */
+function productImageList(
+  photoUrl: string | null | undefined,
+  meta: unknown,
+): string[] {
+  const m = asMeta(meta);
+  const fromMeta = Array.isArray(m.images)
+    ? m.images.filter((x): x is string => typeof x === 'string' && !!x.trim())
+    : [];
+  const urls: string[] = [];
+  for (const u of fromMeta) {
+    if (!urls.includes(u)) urls.push(u);
+  }
+  if (photoUrl?.trim() && !urls.includes(photoUrl.trim())) {
+    urls.unshift(photoUrl.trim());
+  }
+  return urls;
+}
 import {
   buildTaxProfile,
   computeLineTax,
@@ -299,6 +326,7 @@ export class PosService {
             skuCode: true,
             description: true,
             photoUrl: true,
+            meta: true,
             isActive: true,
             basePrice: true,
             category: { select: { id: true, name: true } },
@@ -310,20 +338,25 @@ export class PosService {
     return {
       locationId,
       fields: SALE_PRODUCT_FIELDS,
-      items: rows.map((r) => ({
-        id: r.id,
-        productId: r.productId,
-        sku: r.sku,
-        title: r.product.name,
-        description: r.product.description,
-        image: r.product.photoUrl,
-        photoUrl: r.product.photoUrl,
-        price: r.sellPrice,
-        qty: Number(r.qtyOnHand),
-        sellUnit: r.sellUnit,
-        isActive: r.product.isActive,
-        category: r.product.category,
-      })),
+      items: rows.map((r) => {
+        const images = productImageList(r.product.photoUrl, r.product.meta);
+        const cover = images[0] ?? r.product.photoUrl ?? null;
+        return {
+          id: r.id,
+          productId: r.productId,
+          sku: r.sku,
+          title: r.product.name,
+          description: r.product.description,
+          image: cover,
+          photoUrl: cover,
+          images,
+          price: r.sellPrice,
+          qty: Number(r.qtyOnHand),
+          sellUnit: r.sellUnit,
+          isActive: r.product.isActive,
+          category: r.product.category,
+        };
+      }),
     };
   }
 
@@ -452,6 +485,7 @@ export class PosService {
             skuCode: true,
             description: true,
             photoUrl: true,
+            meta: true,
             isActive: true,
             category: { select: { id: true, name: true } },
           },
@@ -459,14 +493,20 @@ export class PosService {
       },
     });
     if (!level) throw new NotFoundException('Product not found');
+    const images = productImageList(
+      level.product.photoUrl,
+      level.product.meta,
+    );
+    const cover = images[0] ?? level.product.photoUrl ?? null;
     return {
       id: level.id,
       productId: level.productId,
       sku: level.sku,
       title: level.product.name,
       description: level.product.description,
-      image: level.product.photoUrl,
-      photoUrl: level.product.photoUrl,
+      image: cover,
+      photoUrl: cover,
+      images,
       price: level.sellPrice,
       qty: Number(level.qtyOnHand),
       sellUnit: level.sellUnit,
@@ -475,7 +515,7 @@ export class PosService {
     };
   }
 
-  /** Upload / replace product image (universal — any sale category) */
+  /** Append a product image (up to MAX_PRODUCT_IMAGES). Cover = first. */
   async uploadSaleProductImage(
     user: AuthUser,
     stockLevelId: string,
@@ -491,10 +531,61 @@ export class PosService {
       throw new BadRequestException('Not a sale product');
     }
 
+    const existing = productImageList(
+      level.product.photoUrl,
+      level.product.meta,
+    );
+    if (existing.length >= MAX_PRODUCT_IMAGES) {
+      throw new BadRequestException(
+        `Maximum ${MAX_PRODUCT_IMAGES} images per product`,
+      );
+    }
+
     const photoUrl = await saveProductImage(user.tenantId, dto.imageBase64);
+    // Newest upload becomes cover; keep prior gallery after it
+    const images = [photoUrl, ...existing.filter((u) => u !== photoUrl)];
+    const meta = asMeta(level.product.meta);
     await this.prisma.product.update({
       where: { id: level.productId },
-      data: { photoUrl },
+      data: {
+        photoUrl,
+        meta: { ...meta, images } as Prisma.InputJsonValue,
+      },
+    });
+
+    return this.getSaleProduct(user, stockLevelId);
+  }
+
+  /** Remove one gallery image by URL */
+  async removeSaleProductImage(
+    user: AuthUser,
+    stockLevelId: string,
+    imageUrl: string,
+  ) {
+    await this.assertSaleShop(user.tenantId);
+    const url = imageUrl?.trim();
+    if (!url) throw new BadRequestException('imageUrl is required');
+
+    const level = await this.prisma.stockLevel.findFirst({
+      where: { id: stockLevelId, tenantId: user.tenantId },
+      include: { product: true },
+    });
+    if (!level) throw new NotFoundException('Product not found');
+    if (level.product.fulfillmentMode !== FulfillmentMode.sale) {
+      throw new BadRequestException('Not a sale product');
+    }
+
+    const images = productImageList(
+      level.product.photoUrl,
+      level.product.meta,
+    ).filter((u) => u !== url);
+    const meta = asMeta(level.product.meta);
+    await this.prisma.product.update({
+      where: { id: level.productId },
+      data: {
+        photoUrl: images[0] ?? null,
+        meta: { ...meta, images } as Prisma.InputJsonValue,
+      },
     });
 
     return this.getSaleProduct(user, stockLevelId);
@@ -708,6 +799,7 @@ export class PosService {
             skuCode: true,
             description: true,
             photoUrl: true,
+            meta: true,
             category: { select: { id: true, name: true } },
           },
         },
@@ -721,6 +813,8 @@ export class PosService {
       maxQty: opts.lowStock ? threshold : undefined,
       items: items.map((row) => {
         const qty = Number(row.qtyOnHand);
+        const images = productImageList(row.product.photoUrl, row.product.meta);
+        const cover = images[0] ?? row.product.photoUrl ?? null;
         return {
           id: row.id,
           sku: row.sku,
@@ -731,8 +825,9 @@ export class PosService {
           name: row.product.name,
           productSku: row.product.skuCode,
           description: row.product.description,
-          image: row.product.photoUrl,
-          photoUrl: row.product.photoUrl,
+          image: cover,
+          photoUrl: cover,
+          images,
           category: row.product.category,
           location: row.location,
         };
@@ -922,9 +1017,12 @@ export class PosService {
 
       const lineSum = await tx.orderItem.aggregate({
         where: { orderId: created.id, tenantId: user.tenantId },
-        _sum: { lineTotal: true },
+        _sum: { lineTotal: true, taxAmount: true },
       });
-      const merchandise = Number(lineSum._sum.lineTotal ?? 0);
+      // Pre-discount ticket total (net + tax) — same base cashiers see on counter
+      const merchandise =
+        Number(lineSum._sum.lineTotal ?? 0) +
+        Number(lineSum._sum.taxAmount ?? 0);
       this.assertDiscountAllowed(
         user,
         tenant.settings,
@@ -1125,18 +1223,8 @@ export class PosService {
       if (!customer) throw new NotFoundException('Customer not found');
     }
 
-    const payTotal = dto.payments.reduce((s, p) => s + Number(p.amount), 0);
-    if (payTotal <= 0) {
-      throw new BadRequestException('Payment amount must be greater than 0');
-    }
-
-    const hasCash = dto.payments.some((p) => p.method === PaymentMethod.cash);
-    if (hasCash && dto.cashTendered !== undefined) {
-      if (Number(dto.cashTendered) + 1e-9 < payTotal) {
-        throw new BadRequestException(
-          'Cash tendered is less than payment total',
-        );
-      }
+    if (!dto.payments.length) {
+      throw new BadRequestException('At least one payment is required');
     }
 
     // Idempotency: if primary key already paid a closed sale, return it
@@ -1263,9 +1351,11 @@ export class PosService {
 
       const lineSum = await tx.orderItem.aggregate({
         where: { orderId: created.id, tenantId: user.tenantId },
-        _sum: { lineTotal: true },
+        _sum: { lineTotal: true, taxAmount: true },
       });
-      const merchandise = Number(lineSum._sum.lineTotal ?? 0);
+      const merchandise =
+        Number(lineSum._sum.lineTotal ?? 0) +
+        Number(lineSum._sum.taxAmount ?? 0);
       this.assertDiscountAllowed(
         user,
         tenant.settings,
@@ -1336,15 +1426,35 @@ export class PosService {
         throw new BadRequestException('Sale total must be greater than 0');
       }
 
-      const paidSum = money(payTotal);
-      if (paidSum.lt(due)) {
+      // Single cash tender: always settle the server due (avoids FE/BE rounding drift)
+      const singleCash =
+        dto.payments.length === 1 &&
+        dto.payments[0]!.method === PaymentMethod.cash;
+      const paymentLines = dto.payments.map((p) => ({
+        ...p,
+        amount: singleCash ? Number(due.toFixed(2)) : Number(p.amount),
+      }));
+      const paidSum = paymentLines.reduce((s, p) => s + p.amount, 0);
+      if (paidSum <= 0) {
+        throw new BadRequestException('Payment amount must be greater than 0');
+      }
+      if (money(paidSum).lt(due)) {
         throw new BadRequestException(
-          `Payment ${paidSum.toFixed(2)} is less than balance due ${due.toFixed(2)}`,
+          `Payment ${money(paidSum).toFixed(2)} is less than balance due ${due.toFixed(2)}`,
         );
       }
 
+      const hasCash = paymentLines.some((p) => p.method === PaymentMethod.cash);
+      if (hasCash && dto.cashTendered !== undefined) {
+        if (Number(dto.cashTendered) + 1e-9 < Number(due.toFixed(2))) {
+          throw new BadRequestException(
+            'Cash tendered is less than payment total',
+          );
+        }
+      }
+
       const payments = [];
-      for (const p of dto.payments) {
+      for (const p of paymentLines) {
         const status = IMMEDIATE_PAY.includes(p.method)
           ? PaymentStatus.succeeded
           : PaymentStatus.pending;
@@ -1400,18 +1510,18 @@ export class PosService {
           payload: {
             orderId: created.id,
             orderNumber,
-            payTotal,
+            payTotal: paidSum,
           },
         },
       });
 
-      return { orderId: created.id, payments };
+      return { orderId: created.id, payments, paidSum };
     });
 
     const order = await this.loadOrder(user.tenantId, result.orderId);
     const receipt = await this.getReceipt(user, result.orderId);
 
-    const cashPaid = dto.payments
+    const cashPaid = result.payments
       .filter((p) => p.method === PaymentMethod.cash)
       .reduce((s, p) => s + Number(p.amount), 0);
     const tendered =
@@ -1539,6 +1649,7 @@ export class PosService {
       totals: {
         subtotal: order.subtotal,
         taxTotal: order.taxTotal,
+        discountTotal: order.discountTotal,
         depositTotal: order.depositTotal,
         balanceDue: order.balanceDue,
       },

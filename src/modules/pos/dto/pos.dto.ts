@@ -193,10 +193,10 @@ export class AddSaleProductDto {
   @IsUUID()
   categoryId!: string;
 
-  @ApiProperty({ example: 'ACC-USBC-1' })
+  @ApiProperty({ example: 'ACC-USBC-CABLE-01', minLength: 15, maxLength: 18 })
   @IsString()
-  @MinLength(1)
-  @MaxLength(100)
+  @MinLength(15)
+  @MaxLength(18)
   sku!: string;
 
   @ApiProperty({
@@ -320,6 +320,14 @@ export class UploadSaleImageDto {
   imageBase64!: string;
 }
 
+export class RemoveSaleImageDto {
+  @ApiProperty({ description: 'Image URL to remove from the gallery' })
+  @IsString()
+  @MinLength(4)
+  @MaxLength(2000)
+  imageUrl!: string;
+}
+
 /** Restock / reduce — delta can be negative */
 export class AdjustSaleStockDto {
   @ApiProperty({ example: 10, description: 'Add (+) or remove (−) quantity' })
@@ -354,10 +362,10 @@ export class AddRentalProductDto {
   @IsUUID()
   categoryId!: string;
 
-  @ApiProperty({ example: 'BIKE-TRAIL' })
+  @ApiProperty({ example: 'BIKE-TRAIL-RENT-01', minLength: 15, maxLength: 18 })
   @IsString()
-  @MinLength(1)
-  @MaxLength(100)
+  @MinLength(15)
+  @MaxLength(18)
   sku!: string;
 
   @ApiProperty({ example: 800 })

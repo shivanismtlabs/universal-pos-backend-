@@ -85,18 +85,27 @@ export class TenantsService {
         prevTax.receiptFooter = dto.tax.receiptFooter;
       prevSettings.tax = prevTax;
     }
-    if (dto.maxCashierDiscountPercent !== undefined) {
+    if (
+      dto.maxCashierDiscountPercent !== undefined ||
+      dto.pinSwitchEnabled !== undefined
+    ) {
       const prevPos =
         prevSettings.pos && typeof prevSettings.pos === 'object'
           ? { ...(prevSettings.pos as Record<string, unknown>) }
           : {};
-      prevPos.maxCashierDiscountPercent = dto.maxCashierDiscountPercent;
+      if (dto.maxCashierDiscountPercent !== undefined) {
+        prevPos.maxCashierDiscountPercent = dto.maxCashierDiscountPercent;
+      }
+      if (dto.pinSwitchEnabled !== undefined) {
+        prevPos.pinSwitchEnabled = dto.pinSwitchEnabled;
+      }
       prevSettings.pos = prevPos;
     }
     if (
       dto.settings !== undefined ||
       dto.tax !== undefined ||
-      dto.maxCashierDiscountPercent !== undefined
+      dto.maxCashierDiscountPercent !== undefined ||
+      dto.pinSwitchEnabled !== undefined
     ) {
       data.settings = prevSettings as Prisma.InputJsonValue;
     }

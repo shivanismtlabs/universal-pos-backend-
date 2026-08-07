@@ -87,6 +87,14 @@ export class UpdateTenantDto {
   @Max(100)
   maxCashierDiscountPercent?: number;
 
+  @ApiPropertyOptional({
+    example: true,
+    description: 'Enable PIN staff-switch on shared POS counters (default true)',
+  })
+  @IsOptional()
+  @IsBoolean()
+  pinSwitchEnabled?: boolean;
+
   @ApiPropertyOptional({ example: 'INR' })
   @IsOptional()
   @IsString()

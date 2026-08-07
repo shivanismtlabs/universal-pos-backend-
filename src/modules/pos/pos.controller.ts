@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -36,6 +37,7 @@ import {
   SaleReturnDto,
   UpdateRentalProductDto,
   UpdateRentalUnitDto,
+  RemoveSaleImageDto,
   UpdateSaleProductDto,
   UploadSaleImageDto,
 } from './dto/pos.dto';
@@ -161,13 +163,27 @@ export class PosController {
 
   @Post('sale/products/:id/image')
   @Roles(...RoleGroup.catalogWrite)
-  @ApiOperation({ summary: 'Upload product image (JPEG/PNG/WebP/GIF, max 4MB)' })
+  @ApiOperation({
+    summary: 'Add product image to gallery (JPEG/PNG/WebP/GIF, max 4MB, up to 8)',
+  })
   uploadSaleProductImage(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UploadSaleImageDto,
   ) {
     return this.posService.uploadSaleProductImage(user, id, dto);
+  }
+
+  @Post('sale/products/:id/image/remove')
+  @Roles(...RoleGroup.catalogWrite)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Remove one image from product gallery' })
+  removeSaleProductImage(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RemoveSaleImageDto,
+  ) {
+    return this.posService.removeSaleProductImage(user, id, dto.imageUrl);
   }
 
   @Post('sale/products/:id/adjust-stock')

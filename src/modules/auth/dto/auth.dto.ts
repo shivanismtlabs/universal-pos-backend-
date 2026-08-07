@@ -2,8 +2,10 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
   IsEmail,
+  IsIn,
   IsOptional,
   IsString,
+  IsUUID,
   Matches,
   MaxLength,
   MinLength,
@@ -174,4 +176,53 @@ export class RefreshTokenDto {
   @IsString()
   @MinLength(20)
   refreshToken!: string;
+}
+
+export class GoogleAuthDto {
+  @ApiProperty({ description: 'Google ID token from GIS' })
+  @IsString()
+  @MinLength(20)
+  idToken!: string;
+
+  @ApiProperty({ enum: ['login', 'register'] })
+  @IsIn(['login', 'register'])
+  mode!: 'login' | 'register';
+
+  @ApiPropertyOptional({
+    description: 'Required when mode=register — new shop name',
+    example: 'City Furniture',
+  })
+  @ValidateIf((o: GoogleAuthDto) => o.mode === 'register')
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  tenantName?: string;
+}
+
+export class SetPinDto {
+  @ApiProperty({
+    example: '482915',
+    description: '4–6 digit staff PIN (never logged)',
+  })
+  @IsString()
+  @Matches(/^\d{4,6}$/, { message: 'PIN must be 4–6 digits' })
+  pin!: string;
+}
+
+export class PinLoginDto {
+  @ApiProperty({ description: 'Counter location id' })
+  @IsUUID()
+  locationId!: string;
+
+  @ApiProperty({ description: 'Staff user to switch to' })
+  @IsUUID()
+  userId!: string;
+
+  @ApiProperty({
+    example: '482915',
+    description: 'Staff PIN (never logged)',
+  })
+  @IsString()
+  @Matches(/^\d{4,6}$/, { message: 'PIN must be 4–6 digits' })
+  pin!: string;
 }

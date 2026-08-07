@@ -24,6 +24,7 @@ import {
   ListUnitsQueryDto,
   ReleaseReservationDto,
   ReserveUnitDto,
+  TransferStockDto,
   UpdateUnitStatusDto,
 } from './dto/inventory.dto';
 import { InventoryService } from './inventory.service';
@@ -179,5 +180,33 @@ export class InventoryController {
     @Query() query: ListRetailSkusQueryDto,
   ) {
     return this.inventoryService.listRetailSkus(user, query);
+  }
+
+  @Get('stock-levels')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({
+    summary:
+      'List quantity stock at a location (any sale product type with trackQty)',
+  })
+  listStockAtLocation(
+    @CurrentUser() user: AuthUser,
+    @Query('locationId', ParseUUIDPipe) locationId: string,
+    @Query('q') q?: string,
+  ) {
+    return this.inventoryService.listStockAtLocation(user, locationId, q);
+  }
+
+  @Post('stock-transfers')
+  @HttpCode(200)
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({
+    summary:
+      'Transfer quantity-tracked stock between locations (multi-store, business-agnostic)',
+  })
+  transferStock(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: TransferStockDto,
+  ) {
+    return this.inventoryService.transferStock(user, dto);
   }
 }

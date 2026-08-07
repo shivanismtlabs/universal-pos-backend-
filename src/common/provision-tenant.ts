@@ -177,6 +177,9 @@ export async function provisionTenantWithAdmin(
       settings: {
         // Empty until onboarding multi-select (CommerceModeGate)
         commerceModes: [],
+        pos: {
+          pinSwitchEnabled: true,
+        },
       },
       branding: {
         productName: input.tenantName,

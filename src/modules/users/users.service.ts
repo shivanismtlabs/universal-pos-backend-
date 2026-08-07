@@ -28,6 +28,7 @@ const USER_SELECT = {
   phone: true,
   isActive: true,
   primaryLocationId: true,
+  pinHash: true,
   lastLoginAt: true,
   createdAt: true,
   employee: {
@@ -57,11 +58,12 @@ const USER_SELECT = {
 function toUserView(
   user: Prisma.UserGetPayload<{ select: typeof USER_SELECT }>,
 ) {
-  const { userRoles, ...rest } = user;
+  const { userRoles, pinHash, ...rest } = user;
   return {
     ...rest,
     primaryStoreId: rest.primaryLocationId,
     roles: userRoles.map((ur) => ur.role.code),
+    pinSet: Boolean(pinHash),
   };
 }
 

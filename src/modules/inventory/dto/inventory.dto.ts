@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { OwnershipType, StockUnitCondition } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
+  IsArray,
   IsBoolean,
   IsDateString,
   IsEnum,
@@ -14,6 +15,8 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ArrayMinSize,
+  ValidateNested,
 } from 'class-validator';
 import { PaginationQueryDto } from '../../../common/dto/pagination.dto';
 
@@ -365,4 +368,48 @@ export class ListRetailSkusQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsUUID()
   productId?: string;
+}
+
+/** One line of a multi-location quantity transfer (any product type) */
+export class StockTransferLineDto {
+  @ApiProperty({ description: 'Catalog product id' })
+  @IsUUID()
+  productId!: string;
+
+  @ApiProperty({
+    example: 2,
+    description: 'Quantity to move (supports fractional for kg/L)',
+  })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.001)
+  qty!: number;
+}
+
+/**
+ * Move on-hand quantity between locations.
+ * Works for any business (grocery, retail, hybrid) that tracks qty per stock level.
+ * Serial-only assets (stock units) are not moved here — use unit reassignment later.
+ */
+export class TransferStockDto {
+  @ApiProperty()
+  @IsUUID()
+  fromLocationId!: string;
+
+  @ApiProperty()
+  @IsUUID()
+  toLocationId!: string;
+
+  @ApiProperty({ type: [StockTransferLineDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => StockTransferLineDto)
+  lines!: StockTransferLineDto[];
+
+  @ApiPropertyOptional({ example: 'Rebalance for weekend branch' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
 }

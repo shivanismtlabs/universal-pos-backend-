@@ -1,3 +1,5 @@
+export type JwtTokenTyp = 'access' | 'refresh' | 'station' | 'pin_access';
+
 export type JwtPayload = {
   sub: string;
   tenantId: string;
@@ -7,7 +9,7 @@ export type JwtPayload = {
   locationId?: string | null;
   /** @deprecated alias of locationId for older clients */
   storeId?: string | null;
-  typ: 'access' | 'refresh';
+  typ: JwtTokenTyp;
 };
 
 export type AuthUser = {
@@ -19,4 +21,6 @@ export type AuthUser = {
   /** @deprecated alias of locationId */
   storeId?: string | null;
   fullName: string;
+  /** JWT typ that authenticated this request */
+  tokenTyp?: JwtTokenTyp;
 };

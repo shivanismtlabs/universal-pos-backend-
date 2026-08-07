@@ -5,6 +5,8 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PrismaService } from '../../../database/database.module';
 import type { AuthUser, JwtPayload } from '../types';
 
+const ACTING_TYPES = new Set(['access', 'pin_access', 'station']);
+
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor(
@@ -19,7 +21,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   }
 
   async validate(payload: JwtPayload): Promise<AuthUser> {
-    if (payload.typ !== 'access') {
+    if (!payload.typ || !ACTING_TYPES.has(payload.typ)) {
       throw new UnauthorizedException('Invalid token type');
     }
 
@@ -48,6 +50,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       locationId,
       storeId: locationId,
       roles: user.userRoles.map((ur) => ur.role.code),
+      tokenTyp: payload.typ,
     };
   }
 }

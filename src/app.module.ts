@@ -18,6 +18,7 @@ import { PlatformBillingModule } from './modules/platform-billing/platform-billi
 import { PosModule } from './modules/pos/pos.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { ReturnsModule } from './modules/returns/returns.module';
+import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 import { SuppliersModule } from './modules/suppliers/suppliers.module';
 import { SyncModule } from './modules/sync/sync.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
@@ -47,6 +48,7 @@ const enableQueues = process.env.ENABLE_QUEUES === 'true';
     SuppliersModule,
     SyncModule,
     PosModule,
+    SubscriptionsModule,
     ReturnsModule,
     ReportsModule,
     NotifyModule,

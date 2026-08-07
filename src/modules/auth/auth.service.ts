@@ -1,33 +1,57 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { Prisma } from '@prisma/client';
+import { RoleGroup } from '../../common/roles';
 import { PrismaService } from '../../database/database.module';
 import { provisionTenantWithAdmin } from '../../common/provision-tenant';
 import type {
+  GoogleAuthDto,
   LoginDto,
+  PinLoginDto,
   RefreshTokenDto,
   RegisterTenantDto,
   RegisterUserDto,
+  SetPinDto,
 } from './dto/auth.dto';
+import { assertPinAllowed, isPinSwitchEnabled } from './pin.policy';
 import { RESERVED_TENANT_SLUGS } from './password.policy';
-import type { AuthUser, JwtPayload } from './types';
+import type { AuthUser, JwtPayload, JwtTokenTyp } from './types';
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
+const MAX_PIN_FAILED_ATTEMPTS = 5;
+const PIN_LOCK_MINUTES = 15;
 const BCRYPT_ROUNDS = 12;
 const DEFAULT_SELF_REGISTER_ROLE = 'staff';
+/** Burst of failed PIN attempts at one station before temporary station lock */
+const STATION_PIN_BURST_LIMIT = 20;
+const STATION_PIN_BURST_WINDOW_MS = 10 * 60 * 1000;
 
 /** Valid bcrypt hash used only to keep login timing consistent */
 const DUMMY_PASSWORD_HASH =
   '$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW';
+/** Same dummy shape for PIN compare-on-miss */
+const DUMMY_PIN_HASH = DUMMY_PASSWORD_HASH;
+
+type StationPinBucket = { count: number; resetAt: number };
+const stationPinFailures = new Map<string, StationPinBucket>();
+
+type GoogleTokenInfo = {
+  aud?: string;
+  email?: string;
+  email_verified?: string | boolean;
+  name?: string;
+  sub?: string;
+};
 
 @Injectable()
 export class AuthService {
@@ -284,6 +308,143 @@ export class AuthService {
     };
   }
 
+  async googleAuth(dto: GoogleAuthDto) {
+    const profile = await this.verifyGoogleIdToken(dto.idToken);
+    const email = profile.email!.trim().toLowerCase();
+    const fullName = (profile.name || email.split('@')[0] || 'Owner').trim();
+
+    if (dto.mode === 'register') {
+      const tenantName = dto.tenantName?.trim();
+      if (!tenantName || tenantName.length < 2) {
+        throw new BadRequestException('Shop name is required for Google sign-up');
+      }
+      const existing = await this.prisma.user.findFirst({
+        where: { email, isActive: true, tenant: { status: 'active' } },
+      });
+      if (existing) {
+        throw new ConflictException(
+          'This Google account already has a shop. Sign in instead.',
+        );
+      }
+      // Strong random password — user can reset later; Google is the login path
+      const password =
+        randomBytes(24).toString('base64url') + 'Aa1!';
+      return this.registerTenant({
+        tenantName,
+        adminFullName: fullName,
+        adminEmail: email,
+        adminPassword: password,
+      });
+    }
+
+    const user = await this.prisma.user.findFirst({
+      where: {
+        email,
+        isActive: true,
+        tenant: { status: 'active' },
+      },
+      include: {
+        userRoles: { include: { role: true } },
+        tenant: true,
+      },
+      orderBy: { lastLoginAt: 'desc' },
+    });
+
+    if (!user || user.tenant.status !== 'active') {
+      throw new UnauthorizedException(
+        'No shop found for this Google account. Create a shop first.',
+      );
+    }
+
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      throw new UnauthorizedException(
+        'Account temporarily locked. Try again later.',
+      );
+    }
+
+    const roles = user.userRoles.map((ur) => ur.role.code);
+    const locationId = user.primaryLocationId;
+    const authUser: AuthUser = {
+      userId: user.id,
+      tenantId: user.tenantId,
+      email: user.email,
+      fullName: user.fullName,
+      locationId,
+      storeId: locationId,
+      roles,
+    };
+    const tokens = await this.issueTokens(authUser);
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        lastLoginAt: new Date(),
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: user.tenantId,
+        actorUserId: user.id,
+        entityType: 'user',
+        entityId: user.id,
+        action: 'auth.login_google',
+      },
+    });
+
+    return {
+      user: {
+        id: user.id,
+        email: user.email,
+        fullName: user.fullName,
+        roles,
+        locationId,
+        storeId: locationId,
+        tenantId: user.tenantId,
+      },
+      tenant: {
+        id: user.tenant.id,
+        slug: user.tenant.slug,
+        name: user.tenant.name,
+      },
+      ...tokens,
+    };
+  }
+
+  private async verifyGoogleIdToken(idToken: string): Promise<GoogleTokenInfo> {
+    const clientId =
+      this.config.get<string>('GOOGLE_CLIENT_ID')?.trim() ||
+      this.config.get<string>('NEXT_PUBLIC_GOOGLE_CLIENT_ID')?.trim();
+    if (!clientId) {
+      throw new BadRequestException(
+        'Google sign-in is not configured on the server (GOOGLE_CLIENT_ID)',
+      );
+    }
+
+    const url = `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`;
+    let res: Response;
+    try {
+      res = await fetch(url);
+    } catch {
+      throw new UnauthorizedException('Could not verify Google token');
+    }
+    if (!res.ok) {
+      throw new UnauthorizedException('Invalid Google token');
+    }
+    const payload = (await res.json()) as GoogleTokenInfo;
+    if (!payload.email || payload.aud !== clientId) {
+      throw new UnauthorizedException('Google token audience mismatch');
+    }
+    const verified =
+      payload.email_verified === true || payload.email_verified === 'true';
+    if (!verified) {
+      throw new UnauthorizedException('Google email is not verified');
+    }
+    return payload;
+  }
+
   async login(dto: LoginDto) {
     const email = dto.email.trim().toLowerCase();
     const password = dto.password;
@@ -436,6 +597,7 @@ export class AuthService {
         locationId,
         storeId: locationId,
         tenantId: user.tenantId,
+        pinSet: Boolean(user.pinHash),
       },
       tenant: {
         id: user.tenant.id,
@@ -537,6 +699,7 @@ export class AuthService {
             timezone: true,
             taxMode: true,
             branding: true,
+            settings: true,
           },
         },
         primaryLocation: {
@@ -582,13 +745,17 @@ export class AuthService {
       },
     });
 
+    const { settings: tenantSettings, ...tenantRest } = dbUser.tenant;
+
     return {
       id: dbUser.id,
       email: dbUser.email,
       fullName: dbUser.fullName,
       phone: dbUser.phone,
       roles: dbUser.userRoles.map((ur) => ur.role.code),
-      tenant: dbUser.tenant,
+      pinSet: Boolean(dbUser.pinHash),
+      pinSwitchEnabled: isPinSwitchEnabled(tenantSettings),
+      tenant: tenantRest,
       location: dbUser.primaryLocation,
       store: dbUser.primaryLocation,
       employee: dbUser.employee,
@@ -604,6 +771,339 @@ export class AuthService {
     };
   }
 
+  async setOwnPin(actor: AuthUser, dto: SetPinDto) {
+    await this.assertPinSwitchOn(actor.tenantId);
+    assertPinAllowed(dto.pin);
+    const locationId = actor.locationId ?? null;
+    await this.applyPinToUser({
+      tenantId: actor.tenantId,
+      targetUserId: actor.userId,
+      pin: dto.pin,
+      locationId,
+      actorUserId: actor.userId,
+      action: 'auth.pin_set_self',
+    });
+    return { pinSet: true };
+  }
+
+  async setUserPin(actor: AuthUser, targetUserId: string, dto: SetPinDto) {
+    await this.assertPinSwitchOn(actor.tenantId);
+    const canManage = RoleGroup.staff.some((r) => actor.roles.includes(r));
+    if (!canManage) {
+      throw new ForbiddenException('Only admin/manager can set staff PINs');
+    }
+    assertPinAllowed(dto.pin);
+
+    const target = await this.prisma.user.findFirst({
+      where: {
+        id: targetUserId,
+        tenantId: actor.tenantId,
+        isActive: true,
+      },
+      select: { id: true, primaryLocationId: true },
+    });
+    if (!target) {
+      throw new BadRequestException('Staff member not found');
+    }
+
+    await this.applyPinToUser({
+      tenantId: actor.tenantId,
+      targetUserId: target.id,
+      pin: dto.pin,
+      locationId: target.primaryLocationId,
+      actorUserId: actor.userId,
+      action: 'auth.pin_set_by_manager',
+    });
+    return { pinSet: true };
+  }
+
+  async listPinStaff(actor: AuthUser, locationId: string) {
+    await this.assertPinSwitchOn(actor.tenantId);
+    if (actor.tokenTyp !== 'station' && actor.tokenTyp !== 'access') {
+      // pin_access may list peers at the same counter
+      if (actor.tokenTyp !== 'pin_access') {
+        throw new UnauthorizedException('Station session required');
+      }
+    }
+
+    const location = await this.prisma.location.findFirst({
+      where: { id: locationId, tenantId: actor.tenantId, isActive: true },
+      select: { id: true },
+    });
+    if (!location) {
+      throw new BadRequestException('Location not found');
+    }
+
+    const rows = await this.prisma.user.findMany({
+      where: {
+        tenantId: actor.tenantId,
+        isActive: true,
+        primaryLocationId: locationId,
+      },
+      orderBy: { fullName: 'asc' },
+      select: {
+        id: true,
+        fullName: true,
+        email: true,
+        pinHash: true,
+        userRoles: { select: { role: { select: { code: true } } } },
+      },
+    });
+
+    return rows.map((u) => ({
+      id: u.id,
+      fullName: u.fullName,
+      email: u.email,
+      roles: u.userRoles.map((ur) => ur.role.code),
+      pinSet: Boolean(u.pinHash),
+    }));
+  }
+
+  async pinLogin(actor: AuthUser, dto: PinLoginDto) {
+    if (actor.tokenTyp !== 'station') {
+      throw new UnauthorizedException(
+        'PIN login requires an unlocked station session',
+      );
+    }
+    await this.assertPinSwitchOn(actor.tenantId);
+
+    const stationKey = `${actor.tenantId}:${dto.locationId}`;
+    this.assertStationPinNotBurstLocked(stationKey);
+
+    const location = await this.prisma.location.findFirst({
+      where: {
+        id: dto.locationId,
+        tenantId: actor.tenantId,
+        isActive: true,
+      },
+      select: { id: true },
+    });
+    if (!location) {
+      throw new BadRequestException('Location not found');
+    }
+
+    const target = await this.prisma.user.findFirst({
+      where: {
+        id: dto.userId,
+        tenantId: actor.tenantId,
+        isActive: true,
+        primaryLocationId: dto.locationId,
+      },
+      include: {
+        userRoles: { include: { role: true } },
+        tenant: { select: { id: true, slug: true, name: true, status: true } },
+      },
+    });
+
+    const hash = target?.pinHash ?? DUMMY_PIN_HASH;
+    const pinOk = await bcrypt.compare(dto.pin, hash);
+
+    if (
+      !target ||
+      !target.pinHash ||
+      target.tenant.status !== 'active' ||
+      !pinOk
+    ) {
+      this.recordStationPinFailure(stationKey);
+      if (target?.pinHash) {
+        await this.bumpPinFailures(target);
+      } else {
+        await bcrypt.compare(dto.pin, DUMMY_PIN_HASH);
+      }
+      await this.prisma.auditLog.create({
+        data: {
+          tenantId: actor.tenantId,
+          actorUserId: actor.userId,
+          entityType: 'auth',
+          entityId: dto.userId,
+          action: 'auth.pin_login_failed',
+          beforeAfter: { locationId: dto.locationId },
+        },
+      });
+      throw new UnauthorizedException('Invalid PIN');
+    }
+
+    if (target.pinLockedUntil && target.pinLockedUntil > new Date()) {
+      throw new UnauthorizedException(
+        'PIN temporarily locked. Ask a manager to reset, or try later.',
+      );
+    }
+
+    const roles = target.userRoles.map((ur) => ur.role.code);
+    const authUser: AuthUser = {
+      userId: target.id,
+      tenantId: target.tenantId,
+      email: target.email,
+      fullName: target.fullName,
+      locationId: target.primaryLocationId,
+      storeId: target.primaryLocationId,
+      roles,
+    };
+
+    const accessToken = await this.signAccessLike(
+      authUser,
+      'pin_access',
+      this.config.get<string>('JWT_PIN_ACCESS_TTL', '10h'),
+    );
+
+    await this.prisma.user.update({
+      where: { id: target.id },
+      data: {
+        failedPinAttempts: 0,
+        pinLockedUntil: null,
+        lastLoginAt: new Date(),
+      },
+    });
+
+    this.clearStationPinFailures(stationKey);
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: actor.tenantId,
+        actorUserId: target.id,
+        entityType: 'user',
+        entityId: target.id,
+        action: 'auth.pin_login',
+        beforeAfter: { locationId: dto.locationId },
+      },
+    });
+
+    // Do NOT open RegisterSession — only attribute via acting JWT userId
+    return {
+      user: {
+        id: target.id,
+        email: target.email,
+        fullName: target.fullName,
+        roles,
+        locationId: target.primaryLocationId,
+        storeId: target.primaryLocationId,
+        tenantId: target.tenantId,
+        pinSet: true,
+      },
+      accessToken,
+    };
+  }
+
+  private async assertPinSwitchOn(tenantId: string) {
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { settings: true, status: true },
+    });
+    if (!tenant || tenant.status !== 'active') {
+      throw new UnauthorizedException();
+    }
+    if (!isPinSwitchEnabled(tenant.settings)) {
+      throw new BadRequestException('PIN staff switch is disabled for this shop');
+    }
+  }
+
+  private async applyPinToUser(args: {
+    tenantId: string;
+    targetUserId: string;
+    pin: string;
+    locationId: string | null;
+    actorUserId: string;
+    action: string;
+  }) {
+    if (args.locationId) {
+      const peers = await this.prisma.user.findMany({
+        where: {
+          tenantId: args.tenantId,
+          isActive: true,
+          primaryLocationId: args.locationId,
+          id: { not: args.targetUserId },
+          pinHash: { not: null },
+        },
+        select: { id: true, pinHash: true },
+      });
+      for (const peer of peers) {
+        if (!peer.pinHash) continue;
+        const same = await bcrypt.compare(args.pin, peer.pinHash);
+        if (same) {
+          throw new ConflictException(
+            'Another staff member at this location already uses this PIN',
+          );
+        }
+      }
+    }
+
+    const pinHash = await bcrypt.hash(args.pin, BCRYPT_ROUNDS);
+    await this.prisma.user.update({
+      where: { id: args.targetUserId },
+      data: {
+        pinHash,
+        pinSetAt: new Date(),
+        failedPinAttempts: 0,
+        pinLockedUntil: null,
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: args.tenantId,
+        actorUserId: args.actorUserId,
+        entityType: 'user',
+        entityId: args.targetUserId,
+        action: args.action,
+        // Never store the PIN value
+        beforeAfter: { pinSet: true },
+      },
+    });
+  }
+
+  private async bumpPinFailures(
+    user: { id: string; tenantId: string; failedPinAttempts: number },
+  ) {
+    const attempts = user.failedPinAttempts + 1;
+    const pinLockedUntil =
+      attempts >= MAX_PIN_FAILED_ATTEMPTS
+        ? new Date(Date.now() + PIN_LOCK_MINUTES * 60 * 1000)
+        : null;
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        failedPinAttempts: attempts,
+        pinLockedUntil: pinLockedUntil ?? undefined,
+      },
+    });
+    if (pinLockedUntil) {
+      throw new UnauthorizedException(
+        'Too many failed PIN attempts. Locked for 15 minutes.',
+      );
+    }
+  }
+
+  private assertStationPinNotBurstLocked(stationKey: string) {
+    const bucket = stationPinFailures.get(stationKey);
+    if (!bucket) return;
+    if (Date.now() > bucket.resetAt) {
+      stationPinFailures.delete(stationKey);
+      return;
+    }
+    if (bucket.count >= STATION_PIN_BURST_LIMIT) {
+      throw new UnauthorizedException(
+        'Too many PIN attempts at this counter. Wait a few minutes.',
+      );
+    }
+  }
+
+  private recordStationPinFailure(stationKey: string) {
+    const now = Date.now();
+    const existing = stationPinFailures.get(stationKey);
+    if (!existing || now > existing.resetAt) {
+      stationPinFailures.set(stationKey, {
+        count: 1,
+        resetAt: now + STATION_PIN_BURST_WINDOW_MS,
+      });
+      return;
+    }
+    existing.count += 1;
+  }
+
+  private clearStationPinFailures(stationKey: string) {
+    stationPinFailures.delete(stationKey);
+  }
+
   private async issueTokens(user: AuthUser) {
     const jti = randomUUID();
     const locationId = user.locationId ?? user.storeId ?? null;
@@ -617,13 +1117,27 @@ export class AuthService {
     };
 
     const accessTtl = this.config.get<string>('JWT_ACCESS_TTL', '15m');
+    const stationTtl = this.config.get<string>('JWT_STATION_TTL', '12h');
     const refreshTtl = this.config.get<string>('JWT_REFRESH_TTL', '7d');
+    const accessSecret = this.config.getOrThrow<string>('JWT_ACCESS_SECRET');
 
     const accessToken = await this.jwt.signAsync(
       { ...base, typ: 'access', jti } as JwtPayload & { jti: string },
       {
-        secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+        secret: accessSecret,
         expiresIn: accessTtl as `${number}m` | `${number}d` | `${number}h`,
+      },
+    );
+
+    const stationToken = await this.jwt.signAsync(
+      {
+        ...base,
+        typ: 'station',
+        jti: randomUUID(),
+      } as JwtPayload & { jti: string },
+      {
+        secret: accessSecret,
+        expiresIn: stationTtl as `${number}m` | `${number}d` | `${number}h`,
       },
     );
 
@@ -644,7 +1158,31 @@ export class AuthService {
       },
     });
 
-    return { accessToken, refreshToken };
+    return { accessToken, stationToken, refreshToken };
+  }
+
+  private async signAccessLike(
+    user: AuthUser,
+    typ: Extract<JwtTokenTyp, 'access' | 'pin_access'>,
+    ttl: string,
+  ) {
+    const locationId = user.locationId ?? user.storeId ?? null;
+    return this.jwt.signAsync(
+      {
+        sub: user.userId,
+        tenantId: user.tenantId,
+        email: user.email,
+        roles: user.roles,
+        locationId,
+        storeId: locationId,
+        typ,
+        jti: randomUUID(),
+      } as JwtPayload & { jti: string },
+      {
+        secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+        expiresIn: ttl as `${number}m` | `${number}d` | `${number}h`,
+      },
+    );
   }
 
   private hashToken(token: string) {

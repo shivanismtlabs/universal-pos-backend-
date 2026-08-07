@@ -105,8 +105,16 @@ enum OrderKind {
   sale
   rental
   service
+  subscription
   mixed
   return_order
+}
+
+enum CustomerSubscriptionStatus {
+  active
+  paused
+  cancelled
+  expired
 }
 
 enum OrderStatus {
@@ -285,16 +293,17 @@ model Tenant {
   purchaseOrderLines PurchaseOrderLine[]
   orders             Order[]
   orderItems         OrderItem[]
-  appointments       Appointment[]
-  payments           Payment[]
-  orderFees          OrderFee[]
-  invoices           Invoice[]
-  returnEvents       ReturnEvent[]
-  documents          Document[]
-  notificationLogs   NotificationLog[]
-  webhookEndpoints   WebhookEndpoint[]
-  apiKeys            ApiKey[]
-  offlineSyncEvents  OfflineSyncEvent[]
+  appointments            Appointment[]
+  payments                Payment[]
+  orderFees               OrderFee[]
+  invoices                Invoice[]
+  returnEvents            ReturnEvent[]
+  documents               Document[]
+  notificationLogs        NotificationLog[]
+  webhookEndpoints        WebhookEndpoint[]
+  apiKeys                 ApiKey[]
+  offlineSyncEvents       OfflineSyncEvent[]
+  customerSubscriptions   CustomerSubscription[]
   customFieldDefs    CustomFieldDefinition[]
   customFieldValues  CustomFieldValue[]
   outboxEvents       OutboxEvent[]
@@ -477,6 +486,10 @@ model User {
   isActive              Boolean   @default(true) @map("is_active")
   failedLoginAttempts   Int       @default(0) @map("failed_login_attempts")
   lockedUntil           DateTime? @map("locked_until") @db.Timestamptz(6)
+  pinHash               String?   @map("pin_hash")
+  pinSetAt              DateTime? @map("pin_set_at") @db.Timestamptz(6)
+  failedPinAttempts     Int       @default(0) @map("failed_pin_attempts")
+  pinLockedUntil        DateTime? @map("pin_locked_until") @db.Timestamptz(6)
   refreshTokenHash      String?   @map("refresh_token_hash")
   refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at") @db.Timestamptz(6)
   passwordChangedAt     DateTime? @map("password_changed_at") @db.Timestamptz(6)
@@ -654,8 +667,11 @@ model Customer {
   rentalPartyPrimary ModRentalParty[]     @relation("RentalPartyPrimary")
   rentalPartyMemberships ModRentalPartyMember[]
   rentalMeasurements ModRentalMeasurement[]
+  customerSubscriptions CustomerSubscription[]
 
   @@unique([tenantId, phone])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, fullName])
   @@map("customers")
 }
 
@@ -683,7 +699,8 @@ model Product {
   tenantId        String          @map("tenant_id") @db.Uuid
   categoryId      String?         @map("category_id") @db.Uuid
   name            String
-  skuCode         String          @map("sku_code")
+  /// Required shop SKU — app enforces 15–18 chars on create
+  skuCode         String          @map("sku_code") @db.VarChar(18)
   kind            ProductKind     @default(physical)
   fulfillmentMode FulfillmentMode @default(sale) @map("fulfillment_mode")
   description     String?
@@ -699,12 +716,41 @@ model Product {
 
   tenant      Tenant       @relation(fields: [tenantId], references: [id])
   category    Category?    @relation(fields: [categoryId], references: [id])
-  stockUnits  StockUnit[]
-  stockLevels StockLevel[]
-  orderItems  OrderItem[]
+  stockUnits            StockUnit[]
+  stockLevels           StockLevel[]
+  orderItems            OrderItem[]
+  customerSubscriptions CustomerSubscription[]
 
   @@unique([tenantId, skuCode])
   @@map("products")
+}
+
+/// Customer enrolled in a shop plan (commerce subscription mode — not SaaS billing)
+model CustomerSubscription {
+  id                 String                      @id @default(uuid()) @db.Uuid
+  tenantId           String                      @map("tenant_id") @db.Uuid
+  customerId         String                      @map("customer_id") @db.Uuid
+  productId          String                      @map("product_id") @db.Uuid
+  status             CustomerSubscriptionStatus  @default(active)
+  billingPeriodDays  Int                         @map("billing_period_days")
+  price              Decimal                     @db.Decimal(12, 2)
+  startsAt           DateTime                    @map("starts_at") @db.Timestamptz(6)
+  currentPeriodStart DateTime                    @map("current_period_start") @db.Timestamptz(6)
+  currentPeriodEnd   DateTime                    @map("current_period_end") @db.Timestamptz(6)
+  cancelledAt        DateTime?                   @map("cancelled_at") @db.Timestamptz(6)
+  lastOrderId        String?                     @map("last_order_id") @db.Uuid
+  meta               Json                        @default("{}")
+  createdAt          DateTime                    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  customer Customer @relation(fields: [customerId], references: [id])
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@index([tenantId, status])
+  @@index([tenantId, customerId])
+  @@index([tenantId, productId])
+  @@map("customer_subscriptions")
 }
 
 model Supplier {
@@ -765,7 +811,8 @@ model StockLevel {
   tenantId  String   @map("tenant_id") @db.Uuid
   locationId String  @map("location_id") @db.Uuid
   productId String   @map("product_id") @db.Uuid
-  sku       String
+  /// Required — same code as product.skuCode (15–18 on create)
+  sku       String   @db.VarChar(18)
   /// pcs | pack | kg | g | L | ml — drives qty validation & POS labels
   sellUnit  String   @default("pcs") @map("sell_unit") @db.VarChar(8)
   /// Fractional OK for kg/L (e.g. 2.500); whole numbers for pcs/pack/g/ml
@@ -780,8 +827,10 @@ model StockLevel {
   orderItems         OrderItem[]
   purchaseOrderLines PurchaseOrderLine[]
 
-  @@unique([tenantId, sku])
   @@unique([tenantId, locationId, productId])
+  /// Same product SKU may exist at multiple locations (multi-store)
+  @@unique([tenantId, locationId, sku])
+  @@index([tenantId, productId])
   @@map("stock_levels")
 }
 

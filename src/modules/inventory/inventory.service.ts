@@ -24,6 +24,7 @@ import {
   ListUnitsQueryDto,
   ReleaseReservationDto,
   ReserveUnitDto,
+  TransferStockDto,
   UpdateUnitStatusDto,
 } from './dto/inventory.dto';
 
@@ -415,6 +416,210 @@ export class InventoryService {
       this.prisma.stockLevel.count({ where }),
     ]);
     return { items, meta: pageMeta(total, page, limit) };
+  }
+
+  /**
+   * Multi-location qty transfer (business-agnostic).
+   * Moves StockLevel on-hand from A → B; creates dest row if missing.
+   */
+  async transferStock(user: AuthUser, dto: TransferStockDto) {
+    if (dto.fromLocationId === dto.toLocationId) {
+      throw new BadRequestException(
+        'Source and destination locations must be different',
+      );
+    }
+    if (!dto.lines?.length) {
+      throw new BadRequestException('Add at least one transfer line');
+    }
+
+    await this.assertLocation(user.tenantId, dto.fromLocationId);
+    await this.assertLocation(user.tenantId, dto.toLocationId);
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const moved: Array<{
+        productId: string;
+        productName: string;
+        sku: string;
+        qty: number;
+        fromQtyOnHand: number;
+        toQtyOnHand: number;
+      }> = [];
+
+      for (const line of dto.lines) {
+        const qty = Number(line.qty);
+        if (!Number.isFinite(qty) || qty <= 0) {
+          throw new BadRequestException('Transfer qty must be greater than 0');
+        }
+
+        const product = await tx.product.findFirst({
+          where: {
+            id: line.productId,
+            tenantId: user.tenantId,
+            isActive: true,
+          },
+          select: {
+            id: true,
+            name: true,
+            skuCode: true,
+            trackQty: true,
+            basePrice: true,
+          },
+        });
+        if (!product) {
+          throw new NotFoundException(`Product ${line.productId} not found`);
+        }
+        if (!product.trackQty) {
+          throw new BadRequestException(
+            `"${product.name}" is not quantity-tracked. Serial-only items need unit move (not bulk transfer).`,
+          );
+        }
+
+        const fromLevel = await tx.stockLevel.findFirst({
+          where: {
+            tenantId: user.tenantId,
+            locationId: dto.fromLocationId,
+            productId: product.id,
+          },
+        });
+        if (!fromLevel) {
+          throw new BadRequestException(
+            `No stock for "${product.name}" at source location`,
+          );
+        }
+        const fromQty = Number(fromLevel.qtyOnHand);
+        if (fromQty + 1e-9 < qty) {
+          throw new BadRequestException(
+            `Insufficient stock for "${product.name}" (have ${fromQty}, need ${qty})`,
+          );
+        }
+
+        const updatedFrom = await tx.stockLevel.update({
+          where: { id: fromLevel.id },
+          data: { qtyOnHand: { decrement: qty } },
+        });
+
+        let toLevel = await tx.stockLevel.findFirst({
+          where: {
+            tenantId: user.tenantId,
+            locationId: dto.toLocationId,
+            productId: product.id,
+          },
+        });
+
+        if (toLevel) {
+          toLevel = await tx.stockLevel.update({
+            where: { id: toLevel.id },
+            data: { qtyOnHand: { increment: qty } },
+          });
+        } else {
+          toLevel = await tx.stockLevel.create({
+            data: {
+              tenantId: user.tenantId,
+              locationId: dto.toLocationId,
+              productId: product.id,
+              sku: product.skuCode,
+              sellUnit: fromLevel.sellUnit,
+              sellPrice: fromLevel.sellPrice,
+              qtyOnHand: qty,
+            },
+          });
+        }
+
+        moved.push({
+          productId: product.id,
+          productName: product.name,
+          sku: product.skuCode,
+          qty,
+          fromQtyOnHand: Number(updatedFrom.qtyOnHand),
+          toQtyOnHand: Number(toLevel.qtyOnHand),
+        });
+      }
+
+      await tx.auditLog.create({
+        data: {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          entityType: 'stock_transfer',
+          action: 'inventory.stock_transfer',
+          beforeAfter: {
+            fromLocationId: dto.fromLocationId,
+            toLocationId: dto.toLocationId,
+            notes: dto.notes ?? null,
+            lines: moved.map((m) => ({
+              productId: m.productId,
+              sku: m.sku,
+              qty: m.qty,
+            })),
+          },
+        },
+      });
+
+      return moved;
+    });
+
+    return {
+      fromLocationId: dto.fromLocationId,
+      toLocationId: dto.toLocationId,
+      notes: dto.notes ?? null,
+      lines: result,
+    };
+  }
+
+  async listStockAtLocation(user: AuthUser, locationId: string, q?: string) {
+    await this.assertLocation(user.tenantId, locationId);
+    const term = q?.trim();
+    const rows = await this.prisma.stockLevel.findMany({
+      where: {
+        tenantId: user.tenantId,
+        locationId,
+        qtyOnHand: { gt: 0 },
+        ...(term
+          ? {
+              OR: [
+                { sku: { contains: term, mode: 'insensitive' } },
+                {
+                  product: {
+                    name: { contains: term, mode: 'insensitive' },
+                  },
+                },
+                {
+                  product: {
+                    skuCode: { contains: term, mode: 'insensitive' },
+                  },
+                },
+              ],
+            }
+          : {}),
+      },
+      orderBy: { product: { name: 'asc' } },
+      take: 80,
+      include: {
+        product: {
+          select: {
+            id: true,
+            name: true,
+            skuCode: true,
+            trackQty: true,
+            photoUrl: true,
+            fulfillmentMode: true,
+          },
+        },
+      },
+    });
+
+    return rows.map((r) => ({
+      stockLevelId: r.id,
+      productId: r.productId,
+      sku: r.sku,
+      sellUnit: r.sellUnit,
+      qtyOnHand: Number(r.qtyOnHand),
+      sellPrice: r.sellPrice,
+      name: r.product.name,
+      productSku: r.product.skuCode,
+      trackQty: r.product.trackQty,
+      fulfillmentMode: r.product.fulfillmentMode,
+      photoUrl: r.product.photoUrl,
+    }));
   }
 
   private toStockStatus(value: string): StockUnitStatus {

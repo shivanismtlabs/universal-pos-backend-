@@ -257,13 +257,11 @@ export class AppsService {
     const limits = (planSub?.plan.limits ?? {}) as Record<string, unknown>;
     const features = (planSub?.plan.features ?? {}) as Record<string, unknown>;
 
-    // Universal POS: every shop gets the same default product stack
-    const commerceParsed = await this.ensureUniversalCommerce(user, tenant);
+    // Read-only: never sync/enable modules on bootstrap (that was the login lag).
+    const commerceParsed = parseCommerceModes(tenant.settings);
     const commerceModes = commerceParsed.modes;
-
-    const modulesAfter = await this.listTenantModules(user);
-    const enabledAfter = modulesAfter.filter((m) => m.status === 'enabled');
-    const navAfter = enabledAfter.flatMap((m) => {
+    const enabled = modules.filter((m) => m.status === 'enabled');
+    const navAfter = enabled.flatMap((m) => {
       const schema = m.navSchema;
       if (!Array.isArray(schema)) return [];
       return schema.map((item) => {
@@ -271,6 +269,13 @@ export class AppsService {
         return { ...row, module: m.code };
       });
     });
+
+    // Lightweight mode catalog for onboarding UI (not full field schemas)
+    const modeCatalog = Object.values(COMMERCE_SCHEMAS).map((s) => ({
+      mode: s.mode,
+      label: s.label,
+      description: s.description,
+    }));
 
     return {
       tenant: { ...tenant, gstin: tenant.taxId },
@@ -286,7 +291,7 @@ export class AppsService {
         : null,
       organizations,
       locations,
-      modules: modulesAfter,
+      modules,
       featureFlags: flags,
       nav: navAfter,
       capabilities: {
@@ -298,7 +303,7 @@ export class AppsService {
         setupComplete: commerceParsed.setupComplete,
         modes: commerceModes,
         registeredModes: Object.keys(COMMERCE_SCHEMAS),
-        schemas: COMMERCE_SCHEMAS,
+        modeCatalog,
         rentalLifecycle: [...RENTAL_LIFECYCLE_STATES],
       },
     };
@@ -378,24 +383,6 @@ export class AppsService {
       rentalLifecycle: [...RENTAL_LIFECYCLE_STATES],
       modules: await this.listTenantModules(user),
     };
-  }
-
-  /**
-   * Bootstrap helper: sync modules for already-chosen modes.
-   * Does NOT invent modes — empty setup → FE onboarding (CommerceModeGate).
-   */
-  private async ensureUniversalCommerce(
-    user: AuthUser,
-    tenant: { id: string; settings: unknown },
-  ) {
-    const parsed = parseCommerceModes(tenant.settings);
-    if (!parsed.setupComplete || !parsed.modes.length) {
-      return { modes: [] as CommerceMode[], setupComplete: false };
-    }
-    for (const mode of parsed.modes) {
-      await this.syncCommerceModules(user, mode);
-    }
-    return { modes: parsed.modes, setupComplete: true };
   }
 
   /**
@@ -738,15 +725,28 @@ export class AppsService {
     if (!row) throw new NotFoundException('Category not found');
   }
 
-  /** Enable module pack for a registered commerce mode (from COMMERCE_SCHEMAS). */
+  /**
+   * Enable module pack for a registered commerce mode — batched, skips already-on.
+   * Called from setCommerceModes only (never from bootstrap).
+   */
   private async syncCommerceModules(user: AuthUser, mode: CommerceMode) {
     if (!isCommerceMode(mode)) return;
     const stack = moduleStackForMode(mode);
-    for (const code of stack) {
+    const installed = await this.prisma.tenantModule.findMany({
+      where: { tenantId: user.tenantId, status: ModuleStatus.enabled },
+      select: { module: { select: { code: true } } },
+    });
+    const enabled = new Set(installed.map((t) => t.module.code));
+    const missing = stack.filter((code) => !enabled.has(code));
+    if (!missing.length) return;
+
+    // One enable() per missing root is enough — each resolves dependsOn.
+    // Prefer enabling deepest-needed codes; enabling each missing is OK and rare.
+    for (const code of missing) {
       try {
         await this.enable(user, code);
       } catch {
-        /* plan limits / already enabled */
+        /* plan limits / race */
       }
     }
   }

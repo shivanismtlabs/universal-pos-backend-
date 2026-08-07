@@ -8,11 +8,11 @@ const BASE = process.env.SMOKE_API_URL ?? 'http://127.0.0.1:3001/v1';
 const PASS = process.env.SMOKE_OWNER_PASSWORD ?? 'WalitShop@2026';
 
 const users = [
-  { email: 'owner@crown.demo', role: 'admin' },
-  { email: 'manager@crown.demo', role: 'manager' },
-  { email: 'cashier@crown.demo', role: 'cashier' },
-  { email: 'fitter@crown.demo', role: 'fitter' },
-  { email: 'stock@crown.demo', role: 'inventory' },
+  { email: 'owner@demo.shop', role: 'admin' },
+  { email: 'manager@demo.shop', role: 'manager' },
+  { email: 'cashier@demo.shop', role: 'cashier' },
+  { email: 'fitter@demo.shop', role: 'fitter' },
+  { email: 'stock@demo.shop', role: 'inventory' },
 ];
 
 /** path → roles that MUST succeed (others MUST get 403) */

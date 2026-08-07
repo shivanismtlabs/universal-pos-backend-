@@ -77,11 +77,11 @@ export class StripeService {
   }
 
   async createPaymentIntent(user: AuthUser, dto: CreateStripeIntentDto) {
-    const order = await this.prisma.rentalOrder.findFirst({
+    const order = await this.prisma.order.findFirst({
       where: { id: dto.orderId, tenantId: user.tenantId },
       include: {
         customer: { select: { fullName: true, phone: true, email: true } },
-        store: { select: { name: true } },
+        location: { select: { name: true } },
       },
     });
     if (!order) {
@@ -99,11 +99,12 @@ export class StripeService {
     const type = dto.type ?? PaymentType.payment;
     const stripe = this.getClient();
 
-    const intent = await stripe.paymentIntents.create({
+    // Card-only for card checkouts — automatic_payment_methods enables Link /
+    // wallets which often return generic "A processing error occurred" on
+    // confirm in INR test mode. UPI intents stay UPI-only.
+    const intentParams: Stripe.PaymentIntentCreateParams = {
       amount: amountPaise,
       currency: 'inr',
-      // Shows methods enabled for this Stripe account (India: enable UPI in Dashboard)
-      automatic_payment_methods: { enabled: true },
       metadata: {
         walitOrderId: order.id,
         orderNumber: order.orderNumber,
@@ -112,8 +113,16 @@ export class StripeService {
         method,
       },
       description: `${order.orderNumber} · ${type}`,
-      receipt_email: order.customer.email ?? undefined,
-    });
+      receipt_email: order.customer?.email ?? undefined,
+    };
+
+    if (method === PaymentMethod.upi) {
+      intentParams.payment_method_types = ['upi'];
+    } else {
+      intentParams.payment_method_types = ['card'];
+    }
+
+    const intent = await stripe.paymentIntents.create(intentParams);
 
     if (!intent.client_secret) {
       throw new BadRequestException('Stripe did not return a client secret');
@@ -127,9 +136,9 @@ export class StripeService {
       amount: dto.amount,
       amountPaise,
       currency: 'inr',
-      name: order.store.name,
+      name: order.location.name,
       description: `${order.orderNumber} · ${type}`,
-      customerName: order.customer.fullName,
+      customerName: order.customer?.fullName ?? 'Walk-in',
     };
   }
 
@@ -167,6 +176,18 @@ export class StripeService {
       type: dto.type ?? PaymentType.payment,
       idempotencyKey: `stripe_${dto.paymentIntentId}`,
       gatewayRef: dto.paymentIntentId,
+    }).then(async (payment) => {
+      const order = await this.prisma.order.findFirst({
+        where: { id: dto.orderId, tenantId: user.tenantId },
+        select: { kind: true, meta: true, balanceDue: true },
+      });
+      const meta = (order?.meta ?? {}) as Record<string, unknown>;
+      return {
+        payment,
+        needsSaleFinalize:
+          order?.kind === 'sale' && Boolean(meta.awaitingStripePayment),
+        balanceDue: order?.balanceDue ?? null,
+      };
     });
   }
 }

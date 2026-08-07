@@ -15,13 +15,13 @@ const TEMPLATES: Record<
   (vars: Record<string, unknown>) => string
 > = {
   order_ready_for_pickup: (v) =>
-    `Hi ${String(v.customerName ?? 'there')}, your order ${String(v.orderNumber ?? '')} is ready for pickup at Tuxedo. See you soon!`,
+    `Hi ${String(v.customerName ?? 'there')}, your order ${String(v.orderNumber ?? '')} is ready for pickup. See you soon!`,
   fitting_reminder: (v) =>
-    `Reminder: fitting for ${String(v.customerName ?? 'you')} is scheduled${v.startsAt ? ` at ${String(v.startsAt)}` : ''}. — Tuxedo`,
+    `Reminder: your appointment${v.startsAt ? ` at ${String(v.startsAt)}` : ''} is coming up.`,
   payment_received: (v) =>
-    `Payment of ₹${String(v.amount ?? '')} received for ${String(v.orderNumber ?? 'your order')}. Thank you! — Tuxedo`,
+    `Payment of ₹${String(v.amount ?? '')} received for ${String(v.orderNumber ?? 'your order')}. Thank you!`,
   return_due: (v) =>
-    `Gentle reminder: return for ${String(v.orderNumber ?? 'your rental')} is due${v.returnDueDate ? ` on ${String(v.returnDueDate)}` : ''}. — Tuxedo`,
+    `Gentle reminder: return for ${String(v.orderNumber ?? 'your rental')} is due${v.returnDueDate ? ` on ${String(v.returnDueDate)}` : ''}.`,
   custom: (v) => String(v.message ?? v.text ?? '').trim(),
 };
 

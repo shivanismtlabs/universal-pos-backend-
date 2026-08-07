@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -12,6 +13,13 @@ import { AssignRoleDto, CreateUserDto, UpdateUserDto } from './dto/users.dto';
 
 const BCRYPT_ROUNDS = 12;
 const DEFAULT_ROLE_CODE = 'staff';
+const ASSIGNABLE_BY_MANAGER = new Set([
+  'cashier',
+  'fitter',
+  'inventory',
+  'manager',
+  'staff',
+]);
 
 const USER_SELECT = {
   id: true,
@@ -61,9 +69,28 @@ function toUserView(
 export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /** Only shop admin may grant admin. Managers may invite day-ops roles only. */
+  private assertCanAssignRole(actor: AuthUser, roleCode: string) {
+    const code = roleCode.trim().toLowerCase();
+    const isAdmin = actor.roles.includes('admin');
+    if (code === 'admin') {
+      if (!isAdmin) {
+        throw new BadRequestException(
+          'Only the shop owner (admin) can grant admin access',
+        );
+      }
+      return;
+    }
+    if (isAdmin) return;
+    if (!ASSIGNABLE_BY_MANAGER.has(code)) {
+      throw new BadRequestException(`Cannot assign role: ${code}`);
+    }
+  }
+
   async create(user: AuthUser, dto: CreateUserDto) {
     const email = dto.email.trim().toLowerCase();
     const roleCode = (dto.roleCode ?? DEFAULT_ROLE_CODE).trim().toLowerCase();
+    this.assertCanAssignRole(user, roleCode);
     const locationId = dto.primaryLocationId ?? dto.primaryStoreId;
 
     const existing = await this.prisma.user.findFirst({
@@ -178,6 +205,30 @@ export class UsersService {
     });
     if (!existing) throw new NotFoundException('User not found');
 
+    if (dto.isActive === false) {
+      if (id === user.userId) {
+        throw new BadRequestException('You cannot deactivate your own account');
+      }
+      const targetRoles = await this.prisma.userRole.findMany({
+        where: { userId: id },
+        include: { role: true },
+      });
+      const isAdmin = targetRoles.some((r) => r.role.code === 'admin');
+      if (isAdmin) {
+        const otherAdmins = await this.prisma.userRole.count({
+          where: {
+            role: { tenantId: user.tenantId, code: 'admin' },
+            user: { isActive: true, id: { not: id } },
+          },
+        });
+        if (otherAdmins === 0) {
+          throw new BadRequestException(
+            'Cannot deactivate the last active admin',
+          );
+        }
+      }
+    }
+
     const locationId = dto.primaryLocationId ?? dto.primaryStoreId;
     if (locationId) {
       await this.assertLocation(user.tenantId, locationId);
@@ -211,6 +262,7 @@ export class UsersService {
     if (!existing) throw new NotFoundException('User not found');
 
     const roleCode = dto.roleCode.trim().toLowerCase();
+    this.assertCanAssignRole(user, roleCode);
     const locationId = dto.locationId ?? existing.primaryLocationId ?? null;
 
     if (locationId) {

@@ -1,26 +1,37 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { AppointmentType } from '@prisma/client';
+import { AppointmentStatus } from '@prisma/client';
 import {
   IsEnum,
   IsISO8601,
+  IsIn,
   IsOptional,
   IsString,
   IsUUID,
   MaxLength,
+  ValidateIf,
 } from 'class-validator';
 import { PaginationQueryDto } from '../../../common/dto/pagination.dto';
 
-export enum AppointmentStatus {
-  scheduled = 'scheduled',
-  completed = 'completed',
-  cancelled = 'cancelled',
-  no_show = 'no_show',
-}
+const APPOINTMENT_TYPES = [
+  'fitting',
+  'pickup',
+  'return',
+  'consultation',
+  'other',
+] as const;
 
 export class CreateAppointmentDto {
-  @ApiProperty()
+  /** Preferred universal field */
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsUUID()
-  storeId!: string;
+  locationId?: string;
+
+  /** Legacy FE / smoke compat — maps to locationId */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  storeId?: string;
 
   @ApiProperty()
   @IsUUID()
@@ -31,9 +42,19 @@ export class CreateAppointmentDto {
   @IsUUID()
   orderId?: string;
 
-  @ApiProperty({ enum: AppointmentType, example: AppointmentType.fitting })
-  @IsEnum(AppointmentType)
-  aptType!: AppointmentType;
+  /** Preferred universal field */
+  @ApiPropertyOptional({ example: 'pickup' })
+  @ValidateIf((o: CreateAppointmentDto) => !o.aptType)
+  @IsString()
+  @IsIn([...APPOINTMENT_TYPES])
+  type?: string;
+
+  /** Legacy FE / smoke compat — maps to type */
+  @ApiPropertyOptional({ example: 'fitting' })
+  @ValidateIf((o: CreateAppointmentDto) => !o.type)
+  @IsString()
+  @IsIn([...APPOINTMENT_TYPES])
+  aptType?: string;
 
   @ApiProperty({ example: '2026-12-10T10:30:00.000Z' })
   @IsISO8601()
@@ -41,9 +62,26 @@ export class CreateAppointmentDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsISO8601()
+  endsAt?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsUUID()
   assignedUserId?: string;
 
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  assigneeId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  notes?: string;
+
+  /** Legacy FE / smoke compat — maps to notes */
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -58,6 +96,11 @@ export class CreateAppointmentDto {
 }
 
 export class ListAppointmentsQueryDto extends PaginationQueryDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
@@ -90,7 +133,7 @@ export class ListAppointmentsQueryDto extends PaginationQueryDto {
 }
 
 export class UpdateAppointmentDto {
-  @ApiPropertyOptional({ description: 'Updates fitting notes' })
+  @ApiPropertyOptional({ description: 'Updates notes' })
   @IsOptional()
   @IsString()
   @MaxLength(2000)
@@ -103,8 +146,18 @@ export class UpdateAppointmentDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsUUID()
+  assigneeId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsISO8601()
   startsAt?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsISO8601()
+  endsAt?: string;
 
   @ApiPropertyOptional({ enum: AppointmentStatus })
   @IsOptional()

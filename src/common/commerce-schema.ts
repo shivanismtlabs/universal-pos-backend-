@@ -5,12 +5,15 @@
  * Controllers / React must read COMMERCE_SCHEMAS / isCommerceMode — not hardcode unions.
  */
 
+import { SELL_UNIT_OPTIONS } from './sell-units';
+
 export type CommerceFieldKey = {
   key: string;
   label: string;
   required: boolean;
-  type: 'string' | 'text' | 'number' | 'category' | 'image';
+  type: 'string' | 'text' | 'number' | 'category' | 'image' | 'select';
   hint?: string;
+  options?: Array<{ value: string; label: string }>;
 };
 
 export type CommerceSchemaEntry = {
@@ -41,7 +44,7 @@ export const SALE_PRODUCT_FIELDS: CommerceFieldKey[] = [
     label: 'Title',
     required: true,
     type: 'string',
-    hint: 'Product name customers see',
+    hint: 'Product name customers see (e.g. Basmati rice)',
   },
   {
     key: 'description',
@@ -61,18 +64,32 @@ export const SALE_PRODUCT_FIELDS: CommerceFieldKey[] = [
     label: 'SKU / code',
     required: true,
     type: 'string',
+    hint: 'Letters, numbers, . _ - / (e.g. RICE-1KG)',
+  },
+  {
+    key: 'sellUnit',
+    label: 'Sell unit',
+    required: true,
+    type: 'select',
+    hint: 'Grocery: use kg / g / L. Packaged goods: pcs or pack',
+    options: SELL_UNIT_OPTIONS.map((o) => ({
+      value: o.value,
+      label: o.label,
+    })),
   },
   {
     key: 'price',
     label: 'Sell price',
     required: true,
     type: 'number',
+    hint: 'Price per unit (per kg if unit is kg)',
   },
   {
     key: 'qty',
     label: 'Qty on hand',
     required: true,
     type: 'number',
+    hint: 'kg/L allow decimals (2.5); pcs/pack must be whole numbers',
   },
   {
     key: 'image',

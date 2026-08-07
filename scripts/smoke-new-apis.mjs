@@ -8,7 +8,7 @@ import 'dotenv/config';
 const BASE = process.env.SMOKE_API_URL ?? 'http://127.0.0.1:3001/v1';
 const OWNER = {
   tenantSlug: process.env.SMOKE_TENANT ?? 'demo-shop',
-  email: process.env.SMOKE_OWNER_EMAIL ?? 'owner@crown.demo',
+  email: process.env.SMOKE_OWNER_EMAIL ?? 'owner@demo.shop',
   password: process.env.SMOKE_OWNER_PASSWORD ?? 'WalitShop@2026',
 };
 

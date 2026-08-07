@@ -1,10 +1,11 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { AvailabilityStatus, Ownership, UnitCondition } from '@prisma/client';
+import { OwnershipType, StockUnitCondition } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -58,6 +59,21 @@ export class CreateProductStyleDto {
   @IsBoolean()
   isRental?: boolean;
 
+  @ApiPropertyOptional({
+    enum: ['sale', 'rental', 'service'],
+    description: 'Preferred over isRental when set',
+  })
+  @IsOptional()
+  @IsIn(['sale', 'rental', 'service'])
+  fulfillmentMode?: 'sale' | 'rental' | 'service';
+
+  @ApiPropertyOptional({ example: 499 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  basePrice?: number;
+
   @ApiPropertyOptional({ example: '9988' })
   @IsOptional()
   @IsString()
@@ -72,13 +88,25 @@ export class CreateProductStyleDto {
 }
 
 export class CreateInventoryUnitDto {
-  @ApiProperty()
+  @ApiPropertyOptional({ description: 'Legacy alias for locationId' })
+  @IsOptional()
   @IsUUID()
-  storeId!: string;
+  storeId?: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsUUID()
-  productStyleId!: string;
+  locationId?: string;
+
+  @ApiPropertyOptional({ description: 'Legacy alias for productId' })
+  @IsOptional()
+  @IsUUID()
+  productStyleId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  productId?: string;
 
   @ApiProperty({ example: 'UNIT-0001' })
   @IsString()
@@ -86,21 +114,37 @@ export class CreateInventoryUnitDto {
   @MaxLength(100)
   barcodeSku!: string;
 
-  @ApiProperty({ example: '42' })
+  @ApiPropertyOptional({ example: '42', description: 'Legacy alias for variantLabel' })
+  @IsOptional()
   @IsString()
-  @MinLength(1)
   @MaxLength(50)
-  size!: string;
+  size?: string;
 
-  @ApiPropertyOptional({ enum: UnitCondition, default: UnitCondition.GOOD })
+  @ApiPropertyOptional()
   @IsOptional()
-  @IsEnum(UnitCondition)
-  condition?: UnitCondition;
+  @IsString()
+  @MaxLength(50)
+  variantLabel?: string;
 
-  @ApiPropertyOptional({ enum: Ownership, default: Ownership.own })
+  @ApiPropertyOptional({ enum: StockUnitCondition, default: StockUnitCondition.good })
   @IsOptional()
-  @IsEnum(Ownership)
-  ownership?: Ownership;
+  @IsEnum(StockUnitCondition)
+  condition?: StockUnitCondition;
+
+  @ApiPropertyOptional({ enum: OwnershipType, default: OwnershipType.own })
+  @IsOptional()
+  @IsEnum(OwnershipType)
+  ownership?: OwnershipType;
+
+  @ApiPropertyOptional({ description: 'Legacy uppercase or new lowercase status' })
+  @IsOptional()
+  @IsString()
+  availabilityStatus?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  status?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -129,7 +173,7 @@ export class CreateInventoryUnitDto {
 }
 
 export class ListUnitsQueryDto extends PaginationQueryDto {
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'Legacy alias for locationId' })
   @IsOptional()
   @IsUUID()
   storeId?: string;
@@ -137,17 +181,37 @@ export class ListUnitsQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
+  locationId?: string;
+
+  @ApiPropertyOptional({ description: 'Legacy alias for productId' })
+  @IsOptional()
+  @IsUUID()
   productStyleId?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsUUID()
+  productId?: string;
+
+  @ApiPropertyOptional({ description: 'Legacy alias for variantLabel' })
+  @IsOptional()
   @IsString()
   size?: string;
 
-  @ApiPropertyOptional({ enum: AvailabilityStatus })
+  @ApiPropertyOptional()
   @IsOptional()
-  @IsEnum(AvailabilityStatus)
-  availabilityStatus?: AvailabilityStatus;
+  @IsString()
+  variantLabel?: string;
+
+  @ApiPropertyOptional({ description: 'Legacy uppercase or new lowercase status' })
+  @IsOptional()
+  @IsString()
+  availabilityStatus?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  status?: string;
 
   @ApiPropertyOptional({ description: 'Exact barcode / SKU' })
   @IsOptional()
@@ -172,18 +236,39 @@ export class AvailabilityQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
+  productId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
   storeId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
 
   @ApiPropertyOptional({ example: '42' })
   @IsOptional()
   @IsString()
   size?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  variantLabel?: string;
 }
 
 export class ReserveUnitDto {
-  @ApiProperty()
+  @ApiPropertyOptional({ description: 'Legacy alias for stockUnitId' })
+  @IsOptional()
   @IsUUID()
-  inventoryUnitId!: string;
+  inventoryUnitId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  stockUnitId?: string;
 
   @ApiProperty({ example: '2026-12-10' })
   @IsDateString()
@@ -195,14 +280,14 @@ export class ReserveUnitDto {
 }
 
 export class UpdateUnitStatusDto {
-  @ApiProperty({ enum: AvailabilityStatus })
-  @IsEnum(AvailabilityStatus)
-  availabilityStatus!: AvailabilityStatus;
+  @ApiProperty({ description: 'Legacy uppercase or new lowercase status' })
+  @IsString()
+  availabilityStatus!: string;
 
-  @ApiPropertyOptional({ enum: UnitCondition })
+  @ApiPropertyOptional({ enum: StockUnitCondition })
   @IsOptional()
-  @IsEnum(UnitCondition)
-  condition?: UnitCondition;
+  @IsEnum(StockUnitCondition)
+  condition?: StockUnitCondition;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -220,13 +305,25 @@ export class ReleaseReservationDto {
 }
 
 export class CreateRetailSkuDto {
-  @ApiProperty()
+  @ApiPropertyOptional({ description: 'Legacy alias for locationId' })
+  @IsOptional()
   @IsUUID()
-  storeId!: string;
+  storeId?: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsUUID()
-  productStyleId!: string;
+  locationId?: string;
+
+  @ApiPropertyOptional({ description: 'Legacy alias for productId' })
+  @IsOptional()
+  @IsUUID()
+  productStyleId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  productId?: string;
 
   @ApiProperty({ example: 'BOWTIE-BLK-01' })
   @IsString()
@@ -249,7 +346,7 @@ export class CreateRetailSkuDto {
 }
 
 export class ListRetailSkusQueryDto extends PaginationQueryDto {
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'Legacy alias for locationId' })
   @IsOptional()
   @IsUUID()
   storeId?: string;
@@ -257,5 +354,15 @@ export class ListRetailSkusQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
+  locationId?: string;
+
+  @ApiPropertyOptional({ description: 'Legacy alias for productId' })
+  @IsOptional()
+  @IsUUID()
   productStyleId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  productId?: string;
 }

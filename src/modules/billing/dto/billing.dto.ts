@@ -1,12 +1,11 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { FeeType } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
   IsDateString,
-  IsEnum,
+  IsIn,
   IsNumber,
   IsOptional,
   IsPositive,
@@ -16,6 +15,9 @@ import {
   ValidateNested,
 } from 'class-validator';
 
+export const FEE_TYPES = ['late', 'damage', 'other', 'cleaning'] as const;
+export type FeeTypeCode = (typeof FEE_TYPES)[number];
+
 export enum LayawayStatus {
   pending = 'pending',
   paid = 'paid',
@@ -23,9 +25,9 @@ export enum LayawayStatus {
 }
 
 export class CreateOrderFeeDto {
-  @ApiProperty({ enum: FeeType })
-  @IsEnum(FeeType)
-  feeType!: FeeType;
+  @ApiProperty({ enum: FEE_TYPES, example: 'damage' })
+  @IsIn(FEE_TYPES)
+  feeType!: FeeTypeCode;
 
   @ApiProperty({ example: 500 })
   @Type(() => Number)
@@ -39,6 +41,12 @@ export class CreateOrderFeeDto {
   @MaxLength(500)
   reason?: string;
 
+  @ApiPropertyOptional({ description: 'Stock unit (universal rental asset)' })
+  @IsOptional()
+  @IsUUID()
+  stockUnitId?: string;
+
+  /** @deprecated use stockUnitId */
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
@@ -68,7 +76,7 @@ export class CreateLayawayDto {
 
 export class UpdateLayawayDto {
   @ApiProperty({ enum: LayawayStatus })
-  @IsEnum(LayawayStatus)
+  @IsIn(Object.values(LayawayStatus))
   status!: LayawayStatus;
 }
 

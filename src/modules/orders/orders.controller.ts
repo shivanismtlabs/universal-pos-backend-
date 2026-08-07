@@ -21,6 +21,7 @@ import {
   ListOrdersQueryDto,
   UpdateOrderDto,
   UpdateOrderStatusDto,
+  UpdateRentalLifecycleDto,
 } from './dto/orders.dto';
 import { OrdersService } from './orders.service';
 
@@ -87,12 +88,26 @@ export class OrdersController {
 
   @Post('orders/:id/status')
   @HttpCode(200)
-  @ApiOperation({ summary: 'Transition order status (lifecycle)' })
+  @ApiOperation({ summary: 'Transition Core order status' })
   changeStatus(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateOrderStatusDto,
   ) {
     return this.ordersService.changeStatus(user, id, dto);
+  }
+
+  @Post('orders/:id/rental-lifecycle')
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Advance rental module lifecycle (quote→reserved→checked_out→returned…)',
+  })
+  changeRentalLifecycle(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateRentalLifecycleDto,
+  ) {
+    return this.ordersService.changeRentalLifecycle(user, id, dto);
   }
 }

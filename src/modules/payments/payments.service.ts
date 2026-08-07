@@ -13,6 +13,7 @@ import {
 import { pageMeta, paginate } from '../../common/dto/pagination.dto';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
+import { OrdersService } from '../orders/orders.service';
 import {
   CreatePaymentDto,
   ListPaymentsQueryDto,
@@ -21,26 +22,29 @@ import {
 
 type PrismaTx = Prisma.TransactionClient;
 
-const NON_PAYABLE_STATUSES: OrderStatus[] = [
+const NON_PAYABLE: OrderStatus[] = [
   OrderStatus.cancelled,
   OrderStatus.closed,
 ];
 
-const IMMEDIATE_METHODS: PaymentMethod[] = [
+const IMMEDIATE: PaymentMethod[] = [
   PaymentMethod.cash,
   PaymentMethod.card,
   PaymentMethod.upi,
 ];
 
-const CREDIT_TYPES: PaymentType[] = [PaymentType.payment, PaymentType.deposit];
-const REFUND_TYPES: PaymentType[] = [
+const CREDIT: PaymentType[] = [PaymentType.payment, PaymentType.deposit];
+const REFUND: PaymentType[] = [
   PaymentType.refund,
   PaymentType.deposit_refund,
 ];
 
 @Injectable()
 export class PaymentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly ordersService: OrdersService,
+  ) {}
 
   async create(user: AuthUser, dto: CreatePaymentDto) {
     const existing = await this.prisma.payment.findUnique({
@@ -51,27 +55,22 @@ export class PaymentsService {
         },
       },
     });
-    if (existing) {
-      return existing;
-    }
+    if (existing) return existing;
 
     return this.prisma.$transaction(async (tx) => {
-      const order = await tx.rentalOrder.findFirst({
+      const order = await tx.order.findFirst({
         where: { id: dto.orderId, tenantId: user.tenantId },
         select: { id: true, status: true },
       });
-      if (!order) {
-        throw new NotFoundException('Order not found');
-      }
-      if (NON_PAYABLE_STATUSES.includes(order.status)) {
+      if (!order) throw new NotFoundException('Order not found');
+      if (NON_PAYABLE.includes(order.status)) {
         throw new BadRequestException(
           `Cannot record payment for a ${order.status} order`,
         );
       }
 
       const type = dto.type ?? PaymentType.payment;
-      const isImmediate = IMMEDIATE_METHODS.includes(dto.method);
-      const status = isImmediate
+      const status = IMMEDIATE.includes(dto.method)
         ? PaymentStatus.succeeded
         : PaymentStatus.pending;
 
@@ -87,8 +86,7 @@ export class PaymentsService {
             status,
             gatewayRef: dto.gatewayRef,
             idempotencyKey: dto.idempotencyKey,
-            takenById: user.userId,
-            paidAt: isImmediate ? new Date() : null,
+            takenByUserId: user.userId,
           },
         });
       } catch (e) {
@@ -110,7 +108,20 @@ export class PaymentsService {
       }
 
       if (status === PaymentStatus.succeeded) {
-        await this.recalculateBalance(tx, user.tenantId, dto.orderId);
+        await this.ordersService.recalculateTotals(
+          tx,
+          user.tenantId,
+          dto.orderId,
+        );
+        await tx.outboxEvent.create({
+          data: {
+            tenantId: user.tenantId,
+            eventType: 'payment.completed',
+            aggregateType: 'payment',
+            aggregateId: payment.id,
+            payload: { orderId: dto.orderId, amount: dto.amount },
+          },
+        });
       }
 
       return payment;
@@ -119,12 +130,10 @@ export class PaymentsService {
 
   async list(user: AuthUser, query: ListPaymentsQueryDto) {
     const { page, limit, skip } = paginate(query.page, query.limit);
-
     const where: Prisma.PaymentWhereInput = {
       tenantId: user.tenantId,
       ...(query.orderId ? { orderId: query.orderId } : {}),
     };
-
     const [items, total] = await this.prisma.$transaction([
       this.prisma.payment.findMany({
         where,
@@ -134,20 +143,14 @@ export class PaymentsService {
       }),
       this.prisma.payment.count({ where }),
     ]);
-
     return { items, meta: pageMeta(total, page, limit) };
   }
 
   async getById(user: AuthUser, id: string) {
     const payment = await this.prisma.payment.findFirst({
       where: { id, tenantId: user.tenantId },
-      include: {
-        refunds: { orderBy: { createdAt: 'desc' } },
-      },
     });
-    if (!payment) {
-      throw new NotFoundException('Payment not found');
-    }
+    if (!payment) throw new NotFoundException('Payment not found');
     return payment;
   }
 
@@ -160,41 +163,40 @@ export class PaymentsService {
         },
       },
     });
-    if (existing) {
-      return existing;
-    }
+    if (existing) return existing;
 
     return this.prisma.$transaction(async (tx) => {
       const parent = await tx.payment.findFirst({
         where: { id: parentId, tenantId: user.tenantId },
       });
-      if (!parent) {
-        throw new NotFoundException('Payment not found');
-      }
+      if (!parent) throw new NotFoundException('Payment not found');
       if (
         parent.status !== PaymentStatus.succeeded ||
-        !CREDIT_TYPES.includes(parent.type)
+        !CREDIT.includes(parent.type)
       ) {
         throw new BadRequestException(
           'Only a succeeded payment/deposit can be refunded',
         );
       }
 
-      const alreadyRefunded = await tx.payment.aggregate({
+      const already = await tx.payment.aggregate({
         where: {
           tenantId: user.tenantId,
-          parentPaymentId: parent.id,
+          orderId: parent.orderId,
           status: PaymentStatus.succeeded,
-          type: { in: REFUND_TYPES },
+          type: { in: REFUND },
+          gatewayPayload: {
+            path: ['parentPaymentId'],
+            equals: parent.id,
+          },
         },
         _sum: { amount: true },
       });
-      const refundedSoFar = Number(alreadyRefunded._sum.amount ?? 0);
+      const refundedSoFar = Number(already._sum.amount ?? 0);
       const refundable = Number(parent.amount) - refundedSoFar;
-
       if (dto.amount > refundable) {
         throw new BadRequestException(
-          `Refund amount exceeds refundable balance of ${refundable.toFixed(2)}`,
+          `Refund exceeds refundable ${refundable.toFixed(2)}`,
         );
       }
 
@@ -203,92 +205,32 @@ export class PaymentsService {
           ? PaymentType.deposit_refund
           : PaymentType.refund;
 
-      let refund;
-      try {
-        refund = await tx.payment.create({
-          data: {
-            tenantId: user.tenantId,
-            orderId: parent.orderId,
-            type: refundType,
-            parentPaymentId: parent.id,
-            method: parent.method,
-            amount: dto.amount.toFixed(2),
-            status: PaymentStatus.succeeded,
-            gatewayRef: dto.reason,
-            idempotencyKey: dto.idempotencyKey,
-            takenById: user.userId,
-            paidAt: new Date(),
-          },
-        });
-      } catch (e) {
-        if (
-          e instanceof Prisma.PrismaClientKnownRequestError &&
-          e.code === 'P2002'
-        ) {
-          const winner = await tx.payment.findUnique({
-            where: {
-              tenantId_idempotencyKey: {
-                tenantId: user.tenantId,
-                idempotencyKey: dto.idempotencyKey,
-              },
-            },
-          });
-          if (winner) return winner;
-        }
-        throw e;
-      }
+      const refund = await tx.payment.create({
+        data: {
+          tenantId: user.tenantId,
+          orderId: parent.orderId,
+          type: refundType,
+          method: parent.method,
+          amount: dto.amount.toFixed(2),
+          status: PaymentStatus.succeeded,
+          gatewayRef: dto.reason,
+          gatewayPayload: { parentPaymentId: parent.id },
+          idempotencyKey: dto.idempotencyKey,
+          takenByUserId: user.userId,
+        },
+      });
 
-      await this.recalculateBalance(tx, user.tenantId, parent.orderId);
-
+      await this.ordersService.recalculateTotals(
+        tx,
+        user.tenantId,
+        parent.orderId,
+      );
       return refund;
     });
   }
 
-  /** subtotal + taxTotal + fees - succeeded(payment+deposit) + succeeded(refund+deposit_refund) */
+  /** Kept for callers that still inject PaymentsService.recalculateBalance */
   async recalculateBalance(tx: PrismaTx, tenantId: string, orderId: string) {
-    const order = await tx.rentalOrder.findFirst({
-      where: { id: orderId, tenantId },
-      select: { subtotal: true, taxTotal: true },
-    });
-    if (!order) {
-      throw new NotFoundException('Order not found');
-    }
-
-    const [fees, credits, refunds] = await Promise.all([
-      tx.orderFee.aggregate({
-        where: { tenantId, orderId },
-        _sum: { amount: true },
-      }),
-      tx.payment.aggregate({
-        where: {
-          tenantId,
-          orderId,
-          status: PaymentStatus.succeeded,
-          type: { in: CREDIT_TYPES },
-        },
-        _sum: { amount: true },
-      }),
-      tx.payment.aggregate({
-        where: {
-          tenantId,
-          orderId,
-          status: PaymentStatus.succeeded,
-          type: { in: REFUND_TYPES },
-        },
-        _sum: { amount: true },
-      }),
-    ]);
-
-    const balanceDue =
-      Number(order.subtotal) +
-      Number(order.taxTotal) +
-      Number(fees._sum.amount ?? 0) -
-      Number(credits._sum.amount ?? 0) +
-      Number(refunds._sum.amount ?? 0);
-
-    return tx.rentalOrder.update({
-      where: { id: orderId },
-      data: { balanceDue: balanceDue.toFixed(2) },
-    });
+    return this.ordersService.recalculateTotals(tx, tenantId, orderId);
   }
 }

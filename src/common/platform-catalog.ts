@@ -85,7 +85,7 @@ export const PLATFORM_MODULES: Array<{
     code: 'rental',
     name: 'Rental',
     description: 'Rental lifecycle extensions',
-    dependsOn: ['inventory', 'orders', 'payments'],
+    dependsOn: ['catalog', 'inventory', 'orders', 'payments'],
     permissions: ['rental.manage'],
     isCore: false,
     navSchema: [

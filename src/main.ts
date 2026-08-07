@@ -1,3 +1,4 @@
+import fastifyStatic from '@fastify/static';
 import { NestFactory } from '@nestjs/core';
 import {
   FastifyAdapter,
@@ -5,6 +6,8 @@ import {
 } from '@nestjs/platform-fastify';
 import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { mkdirSync } from 'fs';
+import { join } from 'path';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
@@ -14,9 +17,20 @@ async function bootstrap() {
   // (logout / DELETE) don't fail when Content-Type is application/json.
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter({ logger: true }),
+    new FastifyAdapter({
+      logger: true,
+      bodyLimit: 6 * 1024 * 1024,
+    }),
     { bodyParser: false },
   );
+
+  const uploadsRoot = join(process.cwd(), 'uploads');
+  mkdirSync(uploadsRoot, { recursive: true });
+  await app.register(fastifyStatic, {
+    root: uploadsRoot,
+    prefix: '/v1/uploads/',
+    decorateReply: false,
+  });
 
   const fastify = app.getHttpAdapter().getInstance();
   fastify.addContentTypeParser(
@@ -61,9 +75,9 @@ async function bootstrap() {
   });
 
   const swaggerConfig = new DocumentBuilder()
-    .setTitle('Tuxedo POS API')
+    .setTitle('Universal POS API')
     .setDescription(
-      'Tuxedo / formal-wear rental POS — multi-tenant SaaS API (FRD/BRD).\n\n' +
+      'Universal multi-tenant Rental & Sales POS API.\n\n' +
         '**Response envelope**\n' +
         '- Success: `{ success: true, data: <payload> }`\n' +
         '- Error: `{ success: false, statusCode, error, message, path, timestamp }`',

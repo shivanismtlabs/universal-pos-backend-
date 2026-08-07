@@ -8,12 +8,12 @@ const BASE = process.env.SMOKE_API_URL ?? 'http://127.0.0.1:3001/v1';
 
 const OWNER = {
   tenantSlug: 'demo-shop',
-  email: 'owner@crown.demo',
+  email: 'owner@demo.shop',
   password: 'WalitShop@2026',
 };
 const CASHIER = {
   tenantSlug: 'demo-shop',
-  email: 'cashier@crown.demo',
+  email: 'cashier@demo.shop',
   password: 'WalitShop@2026',
 };
 
@@ -178,7 +178,7 @@ async function main() {
   const cashierCreateUser = await api('POST', '/users', {
     token: cashierToken,
     body: {
-      email: `blocked-${Date.now()}@crown.demo`,
+      email: `blocked-${Date.now()}@demo.shop`,
       fullName: 'Should Block',
       password: 'BlockedUser@2026',
       roleCode: 'cashier',
@@ -196,7 +196,7 @@ async function main() {
   const ownerCreateUser = await api('POST', '/users', {
     token: ownerToken,
     body: {
-      email: `fitter-${Date.now()}@crown.demo`,
+      email: `fitter-${Date.now()}@demo.shop`,
       fullName: 'Smoke Fitter',
       password: 'FitterUser@2026',
       roleCode: 'fitter',
@@ -234,7 +234,7 @@ async function main() {
 
   const ownerPatchTenant = await api('PATCH', '/tenants/me', {
     token: ownerToken,
-    body: { name: 'Crown Demo Tuxedo' },
+    body: { name: 'Demo Style' },
   });
   if (ownerPatchTenant.status === 200) pass('Owner can PATCH /tenants/me');
   else {

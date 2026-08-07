@@ -9,7 +9,7 @@ import Stripe from 'stripe';
 const BASE = process.env.SMOKE_API_URL ?? 'http://127.0.0.1:3001/v1';
 const OWNER = {
   tenantSlug: 'demo-shop',
-  email: 'owner@crown.demo',
+  email: 'owner@demo.shop',
   password: 'WalitShop@2026',
 };
 

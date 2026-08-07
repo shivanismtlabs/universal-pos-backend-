@@ -7,17 +7,11 @@
     "**/*spec.ts",
     "src/modules/appointments/**",
     "src/modules/billing/**",
-    "src/modules/customers/**",
     "src/modules/documents/**",
-    "src/modules/inventory/**",
     "src/modules/notify/**",
-    "src/modules/orders/**",
-    "src/modules/payments/**",
     "src/modules/platform/**",
     "src/modules/platform-billing/**",
-    "src/modules/pos/**",
     "src/modules/reports/**",
-    "src/modules/returns/**",
     "src/modules/suppliers/**",
     "src/modules/sync/**"
   ]

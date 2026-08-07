@@ -18,6 +18,14 @@ import {
   getCommerceSchema,
   parseCommerceModes,
 } from '../../common/commerce-schema';
+import {
+  normalizeQty,
+  normalizeSellUnit,
+  validateProductTitle,
+  validateSellPrice,
+  validateSellQty,
+  validateSku,
+} from '../../common/sell-units';
 import { saveProductImage } from '../../common/product-image';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import {
@@ -155,6 +163,21 @@ export class PosService {
   async addSaleProduct(user: AuthUser, dto: AddSaleProductDto) {
     await this.assertSaleShop(user.tenantId);
 
+    const titleErr = validateProductTitle(dto.title);
+    if (titleErr) throw new BadRequestException(titleErr);
+    const skuErr = validateSku(dto.sku);
+    if (skuErr) throw new BadRequestException(skuErr);
+
+    const sellUnit = normalizeSellUnit(dto.sellUnit);
+    const price = Number(dto.price);
+    const priceErr = validateSellPrice(price);
+    if (priceErr) throw new BadRequestException(priceErr);
+
+    const rawQty = Number(dto.qty);
+    const qtyErr = validateSellQty(rawQty, sellUnit);
+    if (qtyErr) throw new BadRequestException(qtyErr);
+    const qty = normalizeQty(rawQty, sellUnit);
+
     const cat = await this.prisma.category.findFirst({
       where: { id: dto.categoryId, tenantId: user.tenantId },
       select: { id: true, name: true },
@@ -186,7 +209,8 @@ export class PosService {
           fulfillmentMode: FulfillmentMode.sale,
           trackQty: true,
           trackSerial: false,
-          basePrice: Number(dto.price),
+          basePrice: price,
+          meta: { sellUnit },
         },
       });
       const level = await this.prisma.stockLevel.create({
@@ -195,8 +219,9 @@ export class PosService {
           locationId,
           productId: product.id,
           sku: dto.sku.trim().toUpperCase(),
-          qtyOnHand: dto.qty,
-          sellPrice: Number(dto.price).toFixed(2),
+          sellUnit,
+          qtyOnHand: qty,
+          sellPrice: price.toFixed(2),
         },
       });
       return {
@@ -210,12 +235,14 @@ export class PosService {
           image: product.photoUrl,
           photoUrl: product.photoUrl,
           category: cat,
+          sellUnit,
         },
         stockLevel: {
           id: level.id,
           sku: level.sku,
           sellPrice: level.sellPrice,
-          qtyOnHand: level.qtyOnHand,
+          qtyOnHand: Number(level.qtyOnHand),
+          sellUnit: level.sellUnit,
         },
         /** Ready to sell on POS immediately */
         posItem: {
@@ -223,7 +250,8 @@ export class PosService {
           sku: level.sku,
           name: product.name,
           sellPrice: level.sellPrice,
-          qtyOnHand: level.qtyOnHand,
+          qtyOnHand: Number(level.qtyOnHand),
+          sellUnit: level.sellUnit,
           image: product.photoUrl,
           photoUrl: product.photoUrl,
           category: cat,
@@ -291,7 +319,8 @@ export class PosService {
         image: r.product.photoUrl,
         photoUrl: r.product.photoUrl,
         price: r.sellPrice,
-        qty: r.qtyOnHand,
+        qty: Number(r.qtyOnHand),
+        sellUnit: r.sellUnit,
         isActive: r.product.isActive,
         category: r.product.category,
       })),
@@ -313,12 +342,31 @@ export class PosService {
       throw new BadRequestException('Not a sale product');
     }
 
+    if (dto.title !== undefined) {
+      const titleErr = validateProductTitle(dto.title);
+      if (titleErr) throw new BadRequestException(titleErr);
+    }
+
+    const sellUnit = normalizeSellUnit(dto.sellUnit ?? level.sellUnit);
+    if (dto.price !== undefined) {
+      const priceErr = validateSellPrice(Number(dto.price));
+      if (priceErr) throw new BadRequestException(priceErr);
+    }
+    let nextQty: number | undefined;
+    if (dto.qty !== undefined) {
+      const qtyErr = validateSellQty(Number(dto.qty), sellUnit);
+      if (qtyErr) throw new BadRequestException(qtyErr);
+      nextQty = normalizeQty(Number(dto.qty), sellUnit);
+    }
+
     if (dto.categoryId) {
       const cat = await this.prisma.category.findFirst({
         where: { id: dto.categoryId, tenantId: user.tenantId },
       });
       if (!cat) throw new NotFoundException('Category not found');
     }
+
+    const prevMeta = (level.product.meta ?? {}) as Record<string, unknown>;
 
     await this.prisma.$transaction(async (tx) => {
       await tx.product.update({
@@ -331,14 +379,16 @@ export class PosService {
           ...(dto.categoryId ? { categoryId: dto.categoryId } : {}),
           ...(dto.image !== undefined || dto.photoUrl !== undefined
             ? {
-                photoUrl:
-                  (dto.image ?? dto.photoUrl)?.trim() || null,
+                photoUrl: (dto.image ?? dto.photoUrl)?.trim() || null,
               }
             : {}),
           ...(dto.price !== undefined
             ? { basePrice: Number(dto.price) }
             : {}),
           ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+          ...(dto.sellUnit !== undefined
+            ? { meta: { ...prevMeta, sellUnit } }
+            : {}),
         },
       });
       await tx.stockLevel.update({
@@ -347,7 +397,8 @@ export class PosService {
           ...(dto.price !== undefined
             ? { sellPrice: Number(dto.price).toFixed(2) }
             : {}),
-          ...(dto.qty !== undefined ? { qtyOnHand: dto.qty } : {}),
+          ...(nextQty !== undefined ? { qtyOnHand: nextQty } : {}),
+          ...(dto.sellUnit !== undefined ? { sellUnit } : {}),
         },
       });
     });
@@ -366,21 +417,26 @@ export class PosService {
     });
     if (!level) throw new NotFoundException('Product not found');
 
-    const next = level.qtyOnHand + dto.delta;
+    const unit = normalizeSellUnit(level.sellUnit);
+    const next = Number(level.qtyOnHand) + Number(dto.delta);
+    const qtyErr = validateSellQty(next, unit);
+    if (qtyErr) throw new BadRequestException(qtyErr);
     if (next < 0) {
       throw new BadRequestException(
-        `Cannot reduce below 0 (have ${level.qtyOnHand})`,
+        `Cannot reduce below 0 (have ${level.qtyOnHand} ${unit})`,
       );
     }
+    const normalized = normalizeQty(next, unit);
 
     const updated = await this.prisma.stockLevel.update({
       where: { id: level.id },
-      data: { qtyOnHand: next },
+      data: { qtyOnHand: normalized },
     });
     return {
       id: updated.id,
       sku: updated.sku,
-      qty: updated.qtyOnHand,
+      qty: Number(updated.qtyOnHand),
+      sellUnit: updated.sellUnit,
       delta: dto.delta,
     };
   }
@@ -412,7 +468,8 @@ export class PosService {
       image: level.product.photoUrl,
       photoUrl: level.product.photoUrl,
       price: level.sellPrice,
-      qty: level.qtyOnHand,
+      qty: Number(level.qtyOnHand),
+      sellUnit: level.sellUnit,
       isActive: level.product.isActive,
       category: level.product.category,
     };
@@ -662,20 +719,24 @@ export class PosService {
       locationId,
       lowStock: Boolean(opts.lowStock),
       maxQty: opts.lowStock ? threshold : undefined,
-      items: items.map((row) => ({
-        id: row.id,
-        sku: row.sku,
-        sellPrice: row.sellPrice,
-        qtyOnHand: row.qtyOnHand,
-        lowStock: row.qtyOnHand > 0 && row.qtyOnHand <= threshold,
-        name: row.product.name,
-        productSku: row.product.skuCode,
-        description: row.product.description,
-        image: row.product.photoUrl,
-        photoUrl: row.product.photoUrl,
-        category: row.product.category,
-        location: row.location,
-      })),
+      items: items.map((row) => {
+        const qty = Number(row.qtyOnHand);
+        return {
+          id: row.id,
+          sku: row.sku,
+          sellPrice: row.sellPrice,
+          qtyOnHand: qty,
+          sellUnit: row.sellUnit,
+          lowStock: qty > 0 && qty <= threshold,
+          name: row.product.name,
+          productSku: row.product.skuCode,
+          description: row.product.description,
+          image: row.product.photoUrl,
+          photoUrl: row.product.photoUrl,
+          category: row.product.category,
+          location: row.location,
+        };
+      }),
     };
   }
 
@@ -715,7 +776,8 @@ export class PosService {
     });
 
     if (!row) throw new NotFoundException(`SKU not found: ${sku}`);
-    if (row.qtyOnHand < 1) {
+    const onHand = Number(row.qtyOnHand);
+    if (onHand <= 0) {
       throw new BadRequestException(`Out of stock: ${sku}`);
     }
 
@@ -723,7 +785,8 @@ export class PosService {
       id: row.id,
       sku: row.sku,
       sellPrice: row.sellPrice,
-      qtyOnHand: row.qtyOnHand,
+      qtyOnHand: onHand,
+      sellUnit: row.sellUnit,
       name: row.product.name,
       productSku: row.product.skuCode,
       image: row.product.photoUrl,
@@ -817,9 +880,16 @@ export class PosService {
             `Stock level not found: ${line.stockLevelId}`,
           );
         }
-        if (level.qtyOnHand < line.quantity) {
+        const unit = normalizeSellUnit(level.sellUnit);
+        const qty = Number(line.quantity);
+        const qtyErr = validateSellQty(qty, unit);
+        if (qtyErr) {
+          throw new BadRequestException(`${level.sku}: ${qtyErr}`);
+        }
+        const onHand = Number(level.qtyOnHand);
+        if (onHand < qty) {
           throw new BadRequestException(
-            `Insufficient stock for ${level.sku} (have ${level.qtyOnHand}, need ${line.quantity})`,
+            `Insufficient stock for ${level.sku} (have ${onHand} ${unit}, need ${qty})`,
           );
         }
 
@@ -827,7 +897,7 @@ export class PosService {
           line.unitPrice !== undefined
             ? money(line.unitPrice)
             : money(level.sellPrice);
-        const lineGross = unitPrice.mul(line.quantity);
+        const lineGross = unitPrice.mul(qty);
         const taxed = computeLineTax(taxProfile, { lineGross });
 
         await tx.orderItem.create({
@@ -838,7 +908,7 @@ export class PosService {
             productId: level.productId,
             stockLevelId: level.id,
             description: level.product.name,
-            quantity: line.quantity,
+            quantity: qty,
             unitPrice: unitPrice.toFixed(2),
             lineTotal: taxed.lineTotal.toFixed(2),
             taxAmount: taxed.taxAmount.toFixed(2),
@@ -978,7 +1048,7 @@ export class PosService {
         if (!level) {
           throw new NotFoundException(`Stock level missing for line ${item.id}`);
         }
-        if (level.qtyOnHand < qty) {
+        if (Number(level.qtyOnHand) < qty) {
           throw new BadRequestException(
             `Insufficient stock for ${level.sku} after payment (have ${level.qtyOnHand})`,
           );
@@ -1146,9 +1216,16 @@ export class PosService {
             `Stock level not found: ${line.stockLevelId}`,
           );
         }
-        if (level.qtyOnHand < line.quantity) {
+        const unit = normalizeSellUnit(level.sellUnit);
+        const qty = Number(line.quantity);
+        const qtyErr = validateSellQty(qty, unit);
+        if (qtyErr) {
+          throw new BadRequestException(`${level.sku}: ${qtyErr}`);
+        }
+        const onHand = Number(level.qtyOnHand);
+        if (onHand < qty) {
           throw new BadRequestException(
-            `Insufficient stock for ${level.sku} (have ${level.qtyOnHand}, need ${line.quantity})`,
+            `Insufficient stock for ${level.sku} (have ${onHand} ${unit}, need ${qty})`,
           );
         }
 
@@ -1156,12 +1233,12 @@ export class PosService {
           line.unitPrice !== undefined
             ? money(line.unitPrice)
             : money(level.sellPrice);
-        const lineGross = unitPrice.mul(line.quantity);
+        const lineGross = unitPrice.mul(qty);
         const taxed = computeLineTax(taxProfile, { lineGross });
 
         await tx.stockLevel.update({
           where: { id: level.id },
-          data: { qtyOnHand: { decrement: line.quantity } },
+          data: { qtyOnHand: { decrement: qty } },
         });
 
         await tx.orderItem.create({
@@ -1172,7 +1249,7 @@ export class PosService {
             productId: level.productId,
             stockLevelId: level.id,
             description: level.product.name,
-            quantity: line.quantity,
+            quantity: qty,
             unitPrice: unitPrice.toFixed(2),
             lineTotal: taxed.lineTotal.toFixed(2),
             taxAmount: taxed.taxAmount.toFixed(2),
@@ -1630,6 +1707,7 @@ export class PosService {
                 sku: true,
                 qtyOnHand: true,
                 sellPrice: true,
+                sellUnit: true,
               },
             },
             product: { select: { id: true, name: true, skuCode: true } },
@@ -1654,6 +1732,7 @@ export class PosService {
           unitPrice: Number(i.unitPrice),
           qty: Number(i.quantity),
           maxQty: Number(i.stockLevel?.qtyOnHand ?? i.quantity),
+          sellUnit: i.stockLevel?.sellUnit ?? 'pcs',
         })),
       discountAmount: Number(order.discountTotal),
       customerId: order.customerId,

@@ -282,6 +282,7 @@ model Tenant {
   stockReservations  StockReservation[]
   stockMovements     StockMovement[]
   purchaseOrders     PurchaseOrder[]
+  purchaseOrderLines PurchaseOrderLine[]
   orders             Order[]
   orderItems         OrderItem[]
   appointments       Appointment[]
@@ -758,22 +759,26 @@ model StockUnit {
   @@map("stock_units")
 }
 
-/// Quantity-tracked stock (grocery, accessories)
+/// Quantity-tracked stock (grocery kg/L, pieces, packs…)
 model StockLevel {
   id        String   @id @default(uuid()) @db.Uuid
   tenantId  String   @map("tenant_id") @db.Uuid
   locationId String  @map("location_id") @db.Uuid
   productId String   @map("product_id") @db.Uuid
   sku       String
-  qtyOnHand Int      @default(0) @map("qty_on_hand")
+  /// pcs | pack | kg | g | L | ml — drives qty validation & POS labels
+  sellUnit  String   @default("pcs") @map("sell_unit") @db.VarChar(8)
+  /// Fractional OK for kg/L (e.g. 2.500); whole numbers for pcs/pack/g/ml
+  qtyOnHand Decimal  @default(0) @map("qty_on_hand") @db.Decimal(12, 3)
   sellPrice Decimal  @default(0) @map("sell_price") @db.Decimal(12, 2)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant     Tenant      @relation(fields: [tenantId], references: [id])
-  location   Location    @relation(fields: [locationId], references: [id])
-  product    Product     @relation(fields: [productId], references: [id])
-  orderItems OrderItem[]
+  tenant             Tenant              @relation(fields: [tenantId], references: [id])
+  location           Location            @relation(fields: [locationId], references: [id])
+  product            Product             @relation(fields: [productId], references: [id])
+  orderItems         OrderItem[]
+  purchaseOrderLines PurchaseOrderLine[]
 
   @@unique([tenantId, sku])
   @@unique([tenantId, locationId, productId])
@@ -825,13 +830,35 @@ model PurchaseOrder {
   poType           PoType    @default(purchase) @map("po_type")
   expectedDelivery DateTime? @map("expected_delivery") @db.Date
   status           String    @default("draft")
+  notes            String?
   createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant   Tenant   @relation(fields: [tenantId], references: [id])
-  supplier Supplier @relation(fields: [supplierId], references: [id])
+  tenant   Tenant              @relation(fields: [tenantId], references: [id])
+  supplier Supplier            @relation(fields: [supplierId], references: [id])
+  lines    PurchaseOrderLine[]
 
   @@map("purchase_orders")
+}
+
+/// Qty lines on a purchase order — receive increments StockLevel
+model PurchaseOrderLine {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  purchaseOrderId String   @map("purchase_order_id") @db.Uuid
+  stockLevelId    String   @map("stock_level_id") @db.Uuid
+  qtyOrdered      Int      @map("qty_ordered")
+  qtyReceived     Int      @default(0) @map("qty_received")
+  unitCost        Decimal? @map("unit_cost") @db.Decimal(12, 2)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant        Tenant        @relation(fields: [tenantId], references: [id])
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  stockLevel    StockLevel    @relation(fields: [stockLevelId], references: [id])
+
+  @@index([tenantId, purchaseOrderId])
+  @@map("purchase_order_lines")
 }
 
 // ─── Orders / payments / POS ────────────────────────────────────────────────
@@ -1119,18 +1146,20 @@ model ApiKey {
 }
 
 model OfflineSyncEvent {
-  id         String     @id @default(uuid()) @db.Uuid
-  tenantId   String     @map("tenant_id") @db.Uuid
-  locationId String?    @map("location_id") @db.Uuid
-  deviceId   String     @map("device_id")
-  eventType  String     @map("event_type")
-  payload    Json
-  status     SyncStatus @default(accepted)
-  createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  id            String     @id @default(uuid()) @db.Uuid
+  tenantId      String     @map("tenant_id") @db.Uuid
+  locationId    String?    @map("location_id") @db.Uuid
+  deviceId      String     @map("device_id")
+  clientEventId String     @default(uuid()) @map("client_event_id")
+  eventType     String     @map("event_type")
+  payload       Json
+  status        SyncStatus @default(accepted)
+  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant   Tenant    @relation(fields: [tenantId], references: [id])
   location Location? @relation(fields: [locationId], references: [id])
 
+  @@unique([tenantId, clientEventId])
   @@index([tenantId, deviceId, createdAt])
   @@map("offline_sync_events")
 }

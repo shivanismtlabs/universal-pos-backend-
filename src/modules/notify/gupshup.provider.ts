@@ -24,7 +24,7 @@ export class GupshupWhatsAppProvider {
       this.config.get<string>('WHATSAPP_SOURCE_NUMBER') ?? '',
     );
     const appName =
-      this.config.get<string>('WHATSAPP_APP_NAME')?.trim() || 'TuxedoPOS';
+      this.config.get<string>('WHATSAPP_APP_NAME')?.trim() || 'UniversalPOS';
     const mockForced =
       (this.config.get<string>('WHATSAPP_MOCK') ?? '').toLowerCase() === 'true';
     const configured = Boolean(apiKey && source);

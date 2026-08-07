@@ -33,18 +33,9 @@ export class TenantsController {
     return this.tenantsService.getMe(user);
   }
 
-  @Get('tenants/me/bootstrap')
-  @Roles(...RoleGroup.all)
-  @ApiOperation({
-    summary: 'Bootstrap payload: tenant, orgs, locations, modules, nav',
-  })
-  bootstrap(@CurrentUser() user: AuthUser) {
-    return this.tenantsService.bootstrap(user);
-  }
-
   @Patch('tenants/me')
-  @Roles(...RoleGroup.ownerOnly)
-  @ApiOperation({ summary: 'Update current tenant (admin only)' })
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Update current tenant (admin / manager)' })
   updateMe(@CurrentUser() user: AuthUser, @Body() dto: UpdateTenantDto) {
     return this.tenantsService.updateMe(user, dto);
   }

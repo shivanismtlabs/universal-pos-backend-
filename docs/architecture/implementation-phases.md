@@ -10,12 +10,12 @@
 
 ```text
 Phase 1  Core Database                 ✅ DONE
-Phase 2  Identity & Organization       ← NEXT
-Phase 3  Core Commerce APIs
-Phase 4  Module Framework
-Phase 5  Retail / Pool Store Demo
-Phase 6  Rental Module Demo
-Phase 7  Dynamic Frontend Shell
+Phase 2  Identity & Organization       ✅ DONE
+Phase 3  Core Commerce APIs            ✅ DONE
+Phase 4  Module Framework              ✅ DONE
+Phase 5  Retail / Pool Store Demo      ✅ DONE
+Phase 6  Rental Module Demo            ✅ DONE
+Phase 7  Dynamic Frontend Shell        ← NEXT
 Phase 8  Enterprise Hardening
 ```
 
@@ -37,104 +37,94 @@ Schema validates; Core vs `mod_rental_*` clear; no live migrate until Phase 2–
 
 ---
 
-## Phase 2 — Identity & Organization (NEXT)
+## Phase 2 — Identity & Organization ✅ DONE
 
 **Goal:** First-class tenant org model + login + RBAC + location scope.
 
-### Steps
-1. DB migrate/push on **dev** database (reset OK for demo).
-2. Seed: platform `modules`, `plans`, default `permissions`.
-3. Nest APIs:
-   - Auth (register tenant, login, refresh) — keep strong password/lockout logic.
-   - Organizations CRUD (optional; default org on register).
-   - Locations CRUD (`store` / `warehouse` / …).
-   - Users + Employees + invite (email invite token — minimal).
-   - Roles / permissions / memberships (location-scoped).
-4. Guard: every request resolves `tenantId`; location scope on sensitive reads.
-5. Smoke: owner invites cashier → cashier only sees assigned location.
+### Done
+- [x] DB force-reset + universal schema applied
+- [x] Seed: modules, plans, permissions, demo-shop org/locations/staff
+- [x] Auth register/login → Organization + Location + Employee + Membership
+- [x] APIs: organizations, locations, stores (alias), users, bootstrap
+- [x] AppModule slimmed to IAM (commerce deferred to Phase 3)
+- [x] Smoke: login, me, bootstrap, locations, create user
 
 ### Exit criteria
-- New tenant signup creates Tenant + default Org + Location + admin User/Employee.
-- RBAC blocks cross-tenant and wrong-location access.
-- Old “demo-shop” can be re-seeded on new schema.
-
-### Do not do in this phase
-POS cart, rental flows, Pool catalog UI.
+Met — demo-shop admin login works; org + 2 locations; staff with roles.
 
 ---
 
-## Phase 3 — Core Commerce APIs
+## Phase 3 — Core Commerce APIs ✅ DONE
 
 **Goal:** Generic sell/stock/order/pay — no industry names in services.
 
-### Steps
-1. Customers CRUD (+ soft delete, custom field values API).
-2. Categories + Products (`fulfillment_mode`: sale | rental | service).
-3. Stock:
-   - `stock_levels` (qty) for retail
-   - `stock_units` (serial) for rental assets
-4. Orders + OrderItems (`kind`: sale | rental | mixed | …).
-5. Payments + idempotency (cash + Stripe gateway path).
-6. Invoices (tax via `tax_mode` / breakdown JSON).
-7. Returns (generic).
-8. Register sessions (open/close float) — basic.
-9. Outbox: emit `order.paid`, `stock.updated` (persist even if consumers thin).
+### Done
+- [x] Customers CRUD (+ rental measurements/parties via `mod_rental_*`)
+- [x] Categories + Products (legacy `product-styles` routes)
+- [x] Stock levels (retail) + stock units (serial) + reservations
+- [x] Orders + order items (`kind` sale/rental) + totals
+- [x] Payments + idempotency + refunds + Stripe adapted
+- [x] POS checkout + receipt
+- [x] Minimal returns
+- [x] Outbox events on pay / status change
+- [x] Seed: Pool Chemicals demo SKU + smoke sale (50→48 stock)
 
 ### Exit criteria
-API-only: create product → add stock → create sale order → pay → stock decrements → receipt/invoice payload.
-
-### Do not do
-Rental pickup/return UI; Pool branding FE.
+Met — create product stock → sale order → cash pay → receipt → qty decrement.
 
 ---
 
-## Phase 4 — Module Framework
+## Phase 4 — Module Framework ✅ DONE
 
 **Goal:** Installable apps + feature flags + dependency checks.
 
-### Steps
-1. Seed module catalog: `core`, `iam`, `catalog`, `inventory`, `orders`, `pos`, `payments`, `rental`, `appointments`, `notify`, `reports`.
-2. `GET/POST` tenant modules enable/disable.
-3. Enforce `dependsOn` (e.g. rental → inventory, orders, payments, customers).
-4. Feature flags inside modules (`offline_pos`, `whatsapp`, `loyalty` …).
-5. Plan limits: max locations, users, allowed module codes.
-6. `GET /me/bootstrap` → user + tenant + enabled modules + flags + nav schema.
+### Done
+- [x] Module catalog APIs (`GET /modules`, `GET /tenants/me/modules`)
+- [x] Enable/disable with `dependsOn` closure (`rental` → core,catalog,inventory,orders,payments)
+- [x] Block disable when dependents enabled
+- [x] Plan `features.modules` allow-list enforcement
+- [x] Feature flags get/set
+- [x] Bootstrap with plan, modules, flags, nav, capabilities
+- [x] Location create respects plan location limits
 
 ### Exit criteria
-Enabling `rental` auto-requires deps; plan can block a module; bootstrap drives FE later.
+Met — enable rental pulls deps; inventory disable blocked while rental on; bootstrap returns nav.
 
 ---
 
-## Phase 5 — Retail / Pool Store Demo
+## Phase 5 — Retail / Pool Store Demo ✅ DONE
 
 **Goal:** Prove universal Core with a **sale** vertical (The Pool Store style).
 
-### Steps
-1. Seed tenant e.g. `pool-store` (USD or INR — config).
-2. Enable modules: catalog, inventory, orders, pos, payments (rental **off**).
-3. Seed categories: Chemicals, Spa, Cleaners, Equipment, Grills/Outdoor…
-4. Seed 20–40 products + qty stock_levels.
-5. Minimal FE or Postman collection: search SKU → cart → pay → receipt.
-6. Optional custom fields: e.g. “Pool volume (gal)” on customer — via metadata, not new columns.
+### Done
+- [x] Seed tenant `pool-store` (USD, en-US, America/New_York, taxMode simple)
+- [x] Modules: core, iam, catalog, inventory, orders, pos, payments — rental **off**
+- [x] Categories: Chemicals, Spa, Cleaners, Filters & Pumps, Equipment, Grills & Outdoor
+- [x] 25 products + stock_levels at Valdosta Flagship
+- [x] Custom field `pool_volume_gal` on customer Jordan Hayes
+- [x] Smoke: `scripts/smoke-pool-store.mjs` (login → SKU → sale → pay → receipt → qty−1)
+- [x] Orders use tenant `currencyCode` (not hard-coded INR)
 
 ### Exit criteria
-Stakeholder can run a pool-supply checkout end-to-end on same platform code.
+Met — pool-supply checkout end-to-end on same Core APIs; rental disabled.
 
 ---
 
-## Phase 6 — Rental Module Demo
+## Phase 6 — Rental Module Demo ✅ DONE
 
 **Goal:** Port previous tuxedo/rental logic onto `mod_rental_*` + Core orders.
 
-### Steps
-1. Enable `rental` (+ deps) on `demo-shop` / formal tenant.
-2. APIs for rental extension: pickup/return dates, parties, measurements, cleaning, damage.
-3. Map old Nest rental services → new tables (reuse business rules).
-4. Status lifecycle in module config (`quote → … → returned`), not Core enums only.
-5. Seed formal-wear serial `stock_units` + rental prices.
+### Done
+- [x] Enable `rental` (+ deps) on `demo-shop`
+- [x] Seed formal-wear categories/products + serial `stock_units` + party/measurements
+- [x] `POST /orders/:id/rental-lifecycle` — quote→reserved→checked_out→returned→inspected→closed
+- [x] Reserve/checkout side-effects on `StockReservation` + `StockUnit` status
+- [x] Returns advance lifecycle + cleaning/damage on `mod_rental_*`
+- [x] Smoke: `scripts/smoke-rental.mjs`
+- [x] Core remains free of industry strings (lifecycle on module ext)
 
 ### Exit criteria
-Old rental happy path works on new schema; Core still has no “tuxedo” strings.
+Met — rental happy path on universal schema; pool-store still rental-off.
 
 ---
 
@@ -187,8 +177,7 @@ Chosen enterprise items shipped without Core table rewrites.
 
 ## Immediate next action
 
-**Start Phase 2:**  
-Dev DB reset → Prisma migrate → seed modules/plans/permissions → Auth + Org + Location + Employee/RBAC APIs → smoke invite flow.
+**Start Phase 5:** Retail / Pool Store demo tenant + richer catalog seed (FE optional).
 
 ---
 

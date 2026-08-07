@@ -6,16 +6,24 @@ import {
   IsString,
   IsUUID,
   MaxLength,
+  ValidateIf,
 } from 'class-validator';
 
 export class CreateDocumentDto {
-  @ApiProperty({ enum: DocumentType })
+  @ApiPropertyOptional({ enum: DocumentType })
+  @IsOptional()
   @IsEnum(DocumentType)
-  docType!: DocumentType;
+  type?: DocumentType;
+
+  /** @deprecated use type */
+  @ApiPropertyOptional({ enum: DocumentType })
+  @ValidateIf((o: CreateDocumentDto) => !o.type)
+  @IsEnum(DocumentType)
+  docType?: DocumentType;
 
   @ApiProperty({
     example: 'tenants/abc/documents/agreement-0001.pdf',
-    description: 'Storage path/key (S3 key for now)',
+    description: 'Storage path/key',
   })
   @IsString()
   @MaxLength(1000)
@@ -31,7 +39,7 @@ export class CreateDocumentDto {
   @IsUUID()
   customerId?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'Stored in document.meta' })
   @IsOptional()
   @IsUUID()
   returnEventId?: string;

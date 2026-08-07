@@ -4,14 +4,25 @@ import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { QueueModule } from './queue/queue.module';
 import { StorageModule } from './storage/storage.module';
+import { AppointmentsModule } from './modules/appointments/appointments.module';
+import { AppsModule } from './modules/apps/apps.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { BillingModule } from './modules/billing/billing.module';
+import { CustomersModule } from './modules/customers/customers.module';
+import { DocumentsModule } from './modules/documents/documents.module';
+import { InventoryModule } from './modules/inventory/inventory.module';
+import { NotifyModule } from './modules/notify/notify.module';
+import { OrdersModule } from './modules/orders/orders.module';
+import { PaymentsModule } from './modules/payments/payments.module';
+import { PlatformBillingModule } from './modules/platform-billing/platform-billing.module';
+import { PosModule } from './modules/pos/pos.module';
+import { ReportsModule } from './modules/reports/reports.module';
+import { ReturnsModule } from './modules/returns/returns.module';
+import { SuppliersModule } from './modules/suppliers/suppliers.module';
+import { SyncModule } from './modules/sync/sync.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { UsersModule } from './modules/users/users.module';
 
-/**
- * Phase 2 — Identity & Organization only.
- * Commerce modules return in Phase 3 once adapters use the universal schema.
- */
 const enableQueues = process.env.ENABLE_QUEUES === 'true';
 
 @Module({
@@ -24,6 +35,21 @@ const enableQueues = process.env.ENABLE_QUEUES === 'true';
     AuthModule,
     TenantsModule,
     UsersModule,
+    AppsModule,
+    CustomersModule,
+    InventoryModule,
+    OrdersModule,
+    PaymentsModule,
+    BillingModule,
+    PlatformBillingModule,
+    DocumentsModule,
+    AppointmentsModule,
+    SuppliersModule,
+    SyncModule,
+    PosModule,
+    ReturnsModule,
+    ReportsModule,
+    NotifyModule,
   ],
 })
 export class AppModule {}

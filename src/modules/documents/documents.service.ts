@@ -1,5 +1,5 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { DocumentType, Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import { CreateDocumentDto, ListDocumentsQueryDto } from './dto/documents.dto';
@@ -10,12 +10,7 @@ export class DocumentsService {
 
   async create(user: AuthUser, dto: CreateDocumentDto) {
     if (dto.orderId) {
-      await this.assertExists(
-        'rentalOrder',
-        user.tenantId,
-        dto.orderId,
-        'Order',
-      );
+      await this.assertExists('order', user.tenantId, dto.orderId, 'Order');
     }
     if (dto.customerId) {
       await this.assertExists(
@@ -25,23 +20,22 @@ export class DocumentsService {
         'Customer',
       );
     }
-    if (dto.returnEventId) {
-      await this.assertExists(
-        'returnEvent',
-        user.tenantId,
-        dto.returnEventId,
-        'Return event',
-      );
+
+    const type = (dto.type ?? dto.docType) as DocumentType | undefined;
+    if (!type) {
+      throw new BadRequestException('type (or docType) is required');
     }
 
     return this.prisma.document.create({
       data: {
         tenantId: user.tenantId,
-        docType: dto.docType,
+        type,
         storageKey: dto.storageKey,
         orderId: dto.orderId,
         customerId: dto.customerId,
-        returnEventId: dto.returnEventId,
+        meta: {
+          ...(dto.returnEventId ? { returnEventId: dto.returnEventId } : {}),
+        },
       },
     });
   }
@@ -68,15 +62,20 @@ export class DocumentsService {
   }
 
   async acknowledge(user: AuthUser, id: string) {
-    await this.getById(user, id);
+    const doc = await this.getById(user, id);
+    const meta = {
+      ...((doc.meta as object) ?? {}),
+      customerAcknowledged: true,
+      signedAt: new Date().toISOString(),
+    };
     return this.prisma.document.update({
       where: { id },
-      data: { customerAcknowledged: true, signedAt: new Date() },
+      data: { meta },
     });
   }
 
   private async assertExists(
-    model: 'rentalOrder' | 'customer' | 'returnEvent',
+    model: 'order' | 'customer',
     tenantId: string,
     id: string,
     label: string,

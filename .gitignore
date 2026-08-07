@@ -2,8 +2,16 @@
 node_modules/
 dist/
 coverage/
+
+# Secrets / local env (never commit)
 .env
-.env.local
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+credentials.json
+service-account*.json
 
 # Logs / OS
 *.log
@@ -16,3 +24,6 @@ Thumbs.db
 
 # Prisma
 node_modules/.prisma/
+
+# Local product image uploads
+uploads/

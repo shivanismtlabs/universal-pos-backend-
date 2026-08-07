@@ -1,11 +1,11 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { OrderItemType, OrderStatus } from '@prisma/client';
+import { OrderKind, OrderStatus, RentalOrderLifecycle } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   IsDateString,
   IsEnum,
+  IsIn,
   IsNumber,
-  IsObject,
   IsOptional,
   IsString,
   IsUUID,
@@ -15,36 +15,77 @@ import {
 } from 'class-validator';
 import { PaginationQueryDto } from '../../../common/dto/pagination.dto';
 
-export class CreateOrderItemDto {
-  @ApiProperty({ enum: OrderItemType })
-  @IsEnum(OrderItemType)
-  itemType!: OrderItemType;
+/** Accepts new kinds + legacy rental_unit/retail/special */
+const ITEM_KINDS = [
+  'product',
+  'service',
+  'stock_unit',
+  'fee',
+  'discount',
+  'custom',
+  'rental_unit',
+  'retail',
+  'special',
+] as const;
 
-  @ApiPropertyOptional({ description: 'Required when itemType = rental_unit' })
+export class CreateOrderItemDto {
+  @ApiPropertyOptional({
+    enum: ITEM_KINDS,
+    description: 'Use product/stock_unit; rental_unit/retail still accepted',
+  })
+  @IsOptional()
+  @IsIn(ITEM_KINDS)
+  itemType?: (typeof ITEM_KINDS)[number];
+
+  @ApiPropertyOptional({ description: 'Alias for itemType' })
+  @IsOptional()
+  @IsIn(ITEM_KINDS)
+  itemKind?: (typeof ITEM_KINDS)[number];
+
+  @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
   inventoryUnitId?: string;
 
-  @ApiPropertyOptional({ description: 'Required when itemType = retail' })
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  stockUnitId?: string;
+
+  @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
   retailSkuId?: string;
 
-  @ApiPropertyOptional({ description: 'Party member wearing this item' })
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  stockLevelId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  productId?: string;
+
+  @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
   wearerCustomerId?: string;
 
-  @ApiPropertyOptional({ example: '42' })
+  @ApiPropertyOptional()
   @IsOptional()
   @IsString()
-  @MaxLength(50)
-  size?: string;
+  @MaxLength(255)
+  description?: string;
 
-  @ApiPropertyOptional({
-    example: 2500,
-    description: 'Defaults to unit rentalPrice / SKU sellPrice when omitted',
-  })
+  @ApiPropertyOptional({ example: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.001)
+  quantity?: number;
+
+  @ApiPropertyOptional({ example: 2500 })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
@@ -56,46 +97,47 @@ export class CreateOrderItemDto {
   @Type(() => Number)
   @IsNumber()
   @Min(0)
-  discount?: number;
-
-  @ApiPropertyOptional({ example: 0, default: 0 })
-  @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  @Min(0)
   taxAmount?: number;
-
-  @ApiPropertyOptional({ type: Object, example: { cgst: 6, sgst: 6 } })
-  @IsOptional()
-  @IsObject()
-  taxSplit?: Record<string, unknown>;
 }
 
 export class CreateOrderDto {
-  @ApiProperty()
+  @ApiPropertyOptional({ description: 'Preferred' })
+  @IsOptional()
   @IsUUID()
-  storeId!: string;
+  locationId?: string;
 
-  @ApiProperty()
+  /** @deprecated use locationId */
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsUUID()
-  customerId!: string;
+  storeId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  customerId?: string;
+
+  @ApiPropertyOptional({ enum: OrderKind, default: OrderKind.sale })
+  @IsOptional()
+  @IsEnum(OrderKind)
+  kind?: OrderKind;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
   partyId?: string;
 
-  @ApiPropertyOptional({ example: '2026-12-15', description: 'YYYY-MM-DD' })
+  @ApiPropertyOptional({ example: '2026-12-15' })
   @IsOptional()
   @IsDateString()
   eventDate?: string;
 
-  @ApiPropertyOptional({ example: '2026-12-14', description: 'YYYY-MM-DD' })
+  @ApiPropertyOptional({ example: '2026-12-14' })
   @IsOptional()
   @IsDateString()
   pickupDate?: string;
 
-  @ApiPropertyOptional({ example: '2026-12-16', description: 'YYYY-MM-DD' })
+  @ApiPropertyOptional({ example: '2026-12-16' })
   @IsOptional()
   @IsDateString()
   returnDueDate?: string;
@@ -113,6 +155,11 @@ export class ListOrdersQueryDto extends PaginationQueryDto {
   @IsEnum(OrderStatus)
   status?: OrderStatus;
 
+  @ApiPropertyOptional({ enum: OrderKind })
+  @IsOptional()
+  @IsEnum(OrderKind)
+  kind?: OrderKind;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
@@ -121,9 +168,14 @@ export class ListOrdersQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
+  locationId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
   storeId?: string;
 
-  @ApiPropertyOptional({ description: 'Search by order number' })
+  @ApiPropertyOptional()
   @IsOptional()
   @IsString()
   @MaxLength(100)
@@ -131,24 +183,22 @@ export class ListOrdersQueryDto extends PaginationQueryDto {
 }
 
 export class UpdateOrderDto {
-  @ApiPropertyOptional({
-    description: 'Only while status is quote/reserved/fitted',
-  })
+  @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
   partyId?: string;
 
-  @ApiPropertyOptional({ example: '2026-12-15' })
+  @ApiPropertyOptional()
   @IsOptional()
   @IsDateString()
   eventDate?: string | null;
 
-  @ApiPropertyOptional({ example: '2026-12-14' })
+  @ApiPropertyOptional()
   @IsOptional()
   @IsDateString()
   pickupDate?: string | null;
 
-  @ApiPropertyOptional({ example: '2026-12-16' })
+  @ApiPropertyOptional()
   @IsOptional()
   @IsDateString()
   returnDueDate?: string | null;
@@ -158,4 +208,14 @@ export class UpdateOrderStatusDto {
   @ApiProperty({ enum: OrderStatus })
   @IsEnum(OrderStatus)
   status!: OrderStatus;
+}
+
+export class UpdateRentalLifecycleDto {
+  @ApiProperty({
+    enum: RentalOrderLifecycle,
+    description:
+      'Rental module lifecycle (quote → reserved → checked_out → returned → …)',
+  })
+  @IsEnum(RentalOrderLifecycle)
+  lifecycle!: RentalOrderLifecycle;
 }

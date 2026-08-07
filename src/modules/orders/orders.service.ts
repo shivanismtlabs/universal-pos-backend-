@@ -1,18 +1,16 @@
 import {
   BadRequestException,
-  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import {
-  AvailabilityStatus,
-  OrderItem,
-  OrderItemType,
+  OrderItemKind,
+  OrderKind,
   OrderStatus,
-  PaymentType,
   Prisma,
-  RentalOrder,
+  RentalOrderLifecycle,
   ReservationStatus,
+  StockUnitStatus,
 } from '@prisma/client';
 import { pageMeta, paginate } from '../../common/dto/pagination.dto';
 import { PrismaService } from '../../database/database.module';
@@ -23,735 +21,797 @@ import {
   ListOrdersQueryDto,
   UpdateOrderDto,
   UpdateOrderStatusDto,
+  UpdateRentalLifecycleDto,
 } from './dto/orders.dto';
 
-type PrismaTx = Prisma.TransactionClient;
-
-const ACTIVE_RESERVATIONS: ReservationStatus[] = [
-  ReservationStatus.held,
-  ReservationStatus.checked_out,
+const MUTABLE: OrderStatus[] = [
+  OrderStatus.draft,
+  OrderStatus.quoted,
+  OrderStatus.confirmed,
+  OrderStatus.in_progress,
 ];
 
-/** Statuses in which order-level fields (dates, party) may still change */
-const ORDER_EDITABLE_STATUSES: OrderStatus[] = [
-  OrderStatus.quote,
-  OrderStatus.reserved,
-  OrderStatus.fitted,
-];
-
-/** Statuses in which line items may still be added/removed */
-const ITEMS_MUTABLE_STATUSES: OrderStatus[] = [
-  OrderStatus.quote,
-  OrderStatus.reserved,
-];
-
-const STATUS_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  quote: [OrderStatus.reserved, OrderStatus.cancelled],
-  reserved: [OrderStatus.fitted, OrderStatus.ready, OrderStatus.cancelled],
-  fitted: [OrderStatus.ready, OrderStatus.cancelled],
-  ready: [OrderStatus.checked_out, OrderStatus.cancelled],
-  checked_out: [OrderStatus.returned],
-  returned: [OrderStatus.inspected],
-  inspected: [OrderStatus.closed],
-  closed: [],
-  cancelled: [],
+const TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = {
+  [OrderStatus.draft]: [OrderStatus.quoted, OrderStatus.confirmed, OrderStatus.cancelled],
+  [OrderStatus.quoted]: [OrderStatus.confirmed, OrderStatus.cancelled],
+  [OrderStatus.confirmed]: [OrderStatus.in_progress, OrderStatus.ready, OrderStatus.cancelled],
+  [OrderStatus.in_progress]: [OrderStatus.ready, OrderStatus.fulfilled, OrderStatus.cancelled],
+  [OrderStatus.ready]: [OrderStatus.fulfilled, OrderStatus.cancelled],
+  [OrderStatus.fulfilled]: [OrderStatus.closed],
+  [OrderStatus.closed]: [],
+  [OrderStatus.cancelled]: [],
 };
 
-const CREDIT_PAYMENT_TYPES: PaymentType[] = [
-  PaymentType.payment,
-  PaymentType.deposit,
-];
-const REFUND_PAYMENT_TYPES: PaymentType[] = [
-  PaymentType.refund,
-  PaymentType.deposit_refund,
-];
+/** Rental-module lifecycle (independent of Core OrderStatus) */
+const RENTAL_TRANSITIONS: Partial<
+  Record<RentalOrderLifecycle, RentalOrderLifecycle[]>
+> = {
+  [RentalOrderLifecycle.quote]: [
+    RentalOrderLifecycle.reserved,
+    RentalOrderLifecycle.cancelled,
+  ],
+  [RentalOrderLifecycle.reserved]: [
+    RentalOrderLifecycle.fitted,
+    RentalOrderLifecycle.ready,
+    RentalOrderLifecycle.checked_out,
+    RentalOrderLifecycle.cancelled,
+  ],
+  [RentalOrderLifecycle.fitted]: [
+    RentalOrderLifecycle.ready,
+    RentalOrderLifecycle.checked_out,
+    RentalOrderLifecycle.cancelled,
+  ],
+  [RentalOrderLifecycle.ready]: [
+    RentalOrderLifecycle.checked_out,
+    RentalOrderLifecycle.cancelled,
+  ],
+  [RentalOrderLifecycle.checked_out]: [RentalOrderLifecycle.returned],
+  [RentalOrderLifecycle.returned]: [
+    RentalOrderLifecycle.inspected,
+    RentalOrderLifecycle.closed,
+  ],
+  [RentalOrderLifecycle.inspected]: [RentalOrderLifecycle.closed],
+  [RentalOrderLifecycle.closed]: [],
+  [RentalOrderLifecycle.cancelled]: [],
+};
 
-const ORDER_DETAIL_INCLUDE = {
-  items: {
-    orderBy: { createdAt: 'asc' as const },
-    include: {
-      inventoryUnit: {
-        select: {
-          id: true,
-          barcodeSku: true,
-          size: true,
-          rentalPrice: true,
-          depositAmount: true,
-          availabilityStatus: true,
-        },
-      },
-      retailSku: {
-        select: { id: true, sku: true, sellPrice: true },
-      },
-      wearer: { select: { id: true, fullName: true, phone: true } },
-    },
-  },
-  payments: {
-    orderBy: { createdAt: 'asc' as const },
-    select: {
-      id: true,
-      amount: true,
-      status: true,
-      type: true,
-      method: true,
-    },
-  },
-  fees: { orderBy: { createdAt: 'asc' as const } },
-  customer: { select: { id: true, fullName: true, phone: true } },
-} satisfies Prisma.RentalOrderInclude;
+const LIFECYCLE_TO_CORE: Partial<Record<RentalOrderLifecycle, OrderStatus>> = {
+  [RentalOrderLifecycle.reserved]: OrderStatus.confirmed,
+  [RentalOrderLifecycle.fitted]: OrderStatus.in_progress,
+  [RentalOrderLifecycle.ready]: OrderStatus.ready,
+  [RentalOrderLifecycle.checked_out]: OrderStatus.fulfilled,
+  [RentalOrderLifecycle.returned]: OrderStatus.fulfilled,
+  [RentalOrderLifecycle.inspected]: OrderStatus.fulfilled,
+  [RentalOrderLifecycle.closed]: OrderStatus.closed,
+  [RentalOrderLifecycle.cancelled]: OrderStatus.cancelled,
+};
+
+function mapItemKind(raw: string): OrderItemKind {
+  switch (raw) {
+    case 'rental_unit':
+      return OrderItemKind.stock_unit;
+    case 'retail':
+      return OrderItemKind.product;
+    case 'special':
+      return OrderItemKind.custom;
+    default:
+      return raw as OrderItemKind;
+  }
+}
+
+function money(n: number | string | Prisma.Decimal) {
+  return new Prisma.Decimal(n);
+}
 
 @Injectable()
 export class OrdersService {
   constructor(private readonly prisma: PrismaService) {}
 
-  // ─── Create ──────────────────────────────────────────────────────────────
-
   async create(user: AuthUser, dto: CreateOrderDto) {
-    await this.assertStore(user.tenantId, dto.storeId);
-    await this.assertCustomer(user.tenantId, dto.customerId);
-    if (dto.partyId) {
-      await this.assertParty(user.tenantId, dto.partyId);
+    const locationId = dto.locationId ?? dto.storeId;
+    if (!locationId) {
+      throw new BadRequestException('locationId (or storeId) is required');
+    }
+    await this.assertLocation(user.tenantId, locationId);
+    if (dto.customerId) {
+      await this.assertCustomer(user.tenantId, dto.customerId);
     }
 
-    const orderId = await this.prisma.$transaction(async (tx) => {
-      const orderNumber = await this.generateOrderNumber(tx, user.tenantId);
+    const isRental =
+      dto.kind === OrderKind.rental ||
+      Boolean(dto.pickupDate || dto.returnDueDate || dto.partyId);
 
-      const order = await tx.rentalOrder.create({
+    const kind = dto.kind ?? (isRental ? OrderKind.rental : OrderKind.sale);
+    const orderNumber = await this.nextOrderNumber(user.tenantId);
+
+    const tenant = await this.prisma.tenant.findFirstOrThrow({
+      where: { id: user.tenantId },
+      select: { currencyCode: true },
+    });
+
+    const order = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.order.create({
         data: {
           tenantId: user.tenantId,
-          storeId: dto.storeId,
+          locationId,
           customerId: dto.customerId,
-          partyId: dto.partyId,
           orderNumber,
-          eventDate: dto.eventDate ? new Date(dto.eventDate) : null,
-          pickupDate: dto.pickupDate ? new Date(dto.pickupDate) : null,
-          returnDueDate: dto.returnDueDate ? new Date(dto.returnDueDate) : null,
+          kind,
+          status: OrderStatus.draft,
           createdById: user.userId,
+          currencyCode: tenant.currencyCode,
         },
       });
 
-      if (dto.items?.length) {
-        for (const item of dto.items) {
-          await this.createItem(tx, user, order.id, item);
-        }
+      if (isRental) {
+        await tx.modRentalOrder.create({
+          data: {
+            tenantId: user.tenantId,
+            orderId: created.id,
+            partyId: dto.partyId,
+            lifecycle: RentalOrderLifecycle.quote,
+            eventDate: dto.eventDate ? new Date(dto.eventDate) : null,
+            pickupDate: dto.pickupDate ? new Date(dto.pickupDate) : null,
+            returnDueDate: dto.returnDueDate
+              ? new Date(dto.returnDueDate)
+              : null,
+          },
+        });
       }
 
-      await this.recalcTotals(tx, user.tenantId, order.id);
+      for (const item of dto.items ?? []) {
+        await this.createItemTx(tx, user.tenantId, created.id, item);
+      }
 
-      return order.id;
+      await this.recalculateTotals(tx, user.tenantId, created.id);
+      return created.id;
     });
 
-    return this.getById(user, orderId);
+    return this.getById(user, order);
   }
 
-  // ─── Read ────────────────────────────────────────────────────────────────
-
   async list(user: AuthUser, query: ListOrdersQueryDto) {
-    const { page, limit, skip } = paginate(query.page, query.limit);
-    const q = query.q?.trim();
-
-    const where: Prisma.RentalOrderWhereInput = {
+    const { skip, take, page, limit } = (() => {
+      const p = paginate(query.page, query.limit);
+      return { ...p, take: p.limit };
+    })();
+    const locationId = query.locationId ?? query.storeId;
+    const where: Prisma.OrderWhereInput = {
       tenantId: user.tenantId,
       ...(query.status ? { status: query.status } : {}),
+      ...(query.kind ? { kind: query.kind } : {}),
       ...(query.customerId ? { customerId: query.customerId } : {}),
-      ...(query.storeId ? { storeId: query.storeId } : {}),
-      ...(q ? { orderNumber: { contains: q, mode: 'insensitive' } } : {}),
+      ...(locationId ? { locationId } : {}),
+      ...(query.q
+        ? {
+            orderNumber: { contains: query.q.trim(), mode: 'insensitive' },
+          }
+        : {}),
     };
 
     const [items, total] = await this.prisma.$transaction([
-      this.prisma.rentalOrder.findMany({
+      this.prisma.order.findMany({
         where,
-        skip,
-        take: limit,
         orderBy: { createdAt: 'desc' },
-        select: {
-          id: true,
-          orderNumber: true,
-          status: true,
-          eventDate: true,
-          pickupDate: true,
-          returnDueDate: true,
-          subtotal: true,
-          taxTotal: true,
-          depositTotal: true,
-          balanceDue: true,
-          storeId: true,
-          customerId: true,
-          partyId: true,
-          createdAt: true,
+        skip,
+        take,
+        include: {
           customer: { select: { id: true, fullName: true, phone: true } },
+          location: { select: { id: true, name: true, code: true } },
+          rentalExt: true,
+          _count: { select: { items: true } },
         },
       }),
-      this.prisma.rentalOrder.count({ where }),
+      this.prisma.order.count({ where }),
     ]);
 
-    return { items, meta: pageMeta(total, page, limit) };
+    return {
+      items: items.map((o) => ({
+        ...o,
+        store: o.location,
+        storeId: o.locationId,
+      })),
+        meta: pageMeta(total, page, limit),
+    };
   }
 
   async getById(user: AuthUser, id: string) {
-    const order = await this.prisma.rentalOrder.findFirst({
+    const order = await this.prisma.order.findFirst({
       where: { id, tenantId: user.tenantId },
-      include: ORDER_DETAIL_INCLUDE,
+      include: {
+        customer: true,
+        location: true,
+        items: {
+          include: {
+            product: true,
+            stockUnit: true,
+            stockLevel: true,
+          },
+        },
+        payments: { orderBy: { createdAt: 'desc' } },
+        fees: true,
+        invoices: true,
+        rentalExt: { include: { party: true } },
+      },
     });
-    if (!order) {
-      throw new NotFoundException('Order not found');
-    }
-    return order;
+    if (!order) throw new NotFoundException('Order not found');
+    return {
+      ...order,
+      store: order.location,
+      storeId: order.locationId,
+    };
   }
 
-  // ─── Update ──────────────────────────────────────────────────────────────
-
   async update(user: AuthUser, id: string, dto: UpdateOrderDto) {
-    const order = await this.getOrderOrThrow(user, id);
-
-    const data: Prisma.RentalOrderUncheckedUpdateInput = {};
-
-    if (dto.partyId !== undefined) {
-      if (!ORDER_EDITABLE_STATUSES.includes(order.status)) {
-        throw new BadRequestException(
-          `Cannot change party while order status is ${order.status}`,
-        );
-      }
-      if (dto.partyId) {
-        await this.assertParty(user.tenantId, dto.partyId);
-      }
-      data.partyId = dto.partyId ?? null;
-    }
-    if (dto.eventDate !== undefined) {
-      data.eventDate = dto.eventDate ? new Date(dto.eventDate) : null;
-    }
-    if (dto.pickupDate !== undefined) {
-      data.pickupDate = dto.pickupDate ? new Date(dto.pickupDate) : null;
-    }
-    if (dto.returnDueDate !== undefined) {
-      data.returnDueDate = dto.returnDueDate
-        ? new Date(dto.returnDueDate)
-        : null;
+    const order = await this.prisma.order.findFirst({
+      where: { id, tenantId: user.tenantId },
+      include: { rentalExt: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (!MUTABLE.includes(order.status)) {
+      throw new BadRequestException(
+        `Cannot update order in status ${order.status}`,
+      );
     }
 
-    if (Object.keys(data).length > 0) {
-      await this.prisma.rentalOrder.update({ where: { id }, data });
+    if (order.rentalExt) {
+      await this.prisma.modRentalOrder.update({
+        where: { orderId: id },
+        data: {
+          ...(dto.partyId !== undefined ? { partyId: dto.partyId } : {}),
+          ...(dto.eventDate !== undefined
+            ? { eventDate: dto.eventDate ? new Date(dto.eventDate) : null }
+            : {}),
+          ...(dto.pickupDate !== undefined
+            ? { pickupDate: dto.pickupDate ? new Date(dto.pickupDate) : null }
+            : {}),
+          ...(dto.returnDueDate !== undefined
+            ? {
+                returnDueDate: dto.returnDueDate
+                  ? new Date(dto.returnDueDate)
+                  : null,
+              }
+            : {}),
+        },
+      });
     }
 
     return this.getById(user, id);
   }
 
-  // ─── Items ───────────────────────────────────────────────────────────────
-
   async addItem(user: AuthUser, orderId: string, dto: CreateOrderItemDto) {
-    const order = await this.getOrderOrThrow(user, orderId);
-    if (!ITEMS_MUTABLE_STATUSES.includes(order.status)) {
-      throw new BadRequestException(
-        `Cannot add items while order status is ${order.status}`,
-      );
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, tenantId: user.tenantId },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (!MUTABLE.includes(order.status)) {
+      throw new BadRequestException('Order items are locked for this status');
     }
 
     await this.prisma.$transaction(async (tx) => {
-      await this.createItem(tx, user, orderId, dto);
-      await this.recalcTotals(tx, user.tenantId, orderId);
+      await this.createItemTx(tx, user.tenantId, orderId, dto);
+      await this.recalculateTotals(tx, user.tenantId, orderId);
     });
 
     return this.getById(user, orderId);
   }
 
   async removeItem(user: AuthUser, orderId: string, itemId: string) {
-    const order = await this.getOrderOrThrow(user, orderId);
-    if (!ITEMS_MUTABLE_STATUSES.includes(order.status)) {
-      throw new BadRequestException(
-        `Cannot remove items while order status is ${order.status}`,
-      );
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, tenantId: user.tenantId },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (!MUTABLE.includes(order.status)) {
+      throw new BadRequestException('Order items are locked for this status');
     }
 
     const item = await this.prisma.orderItem.findFirst({
       where: { id: itemId, orderId, tenantId: user.tenantId },
     });
-    if (!item) {
-      throw new NotFoundException('Order item not found');
-    }
+    if (!item) throw new NotFoundException('Order item not found');
 
     await this.prisma.$transaction(async (tx) => {
-      const reservations = await tx.unitReservation.findMany({
-        where: {
-          tenantId: user.tenantId,
-          orderItemId: itemId,
-          status: { in: ACTIVE_RESERVATIONS },
-        },
-      });
-
-      for (const reservation of reservations) {
-        await tx.unitReservation.update({
-          where: { id: reservation.id },
-          data: { status: ReservationStatus.cancelled },
-        });
-        await this.releaseUnitIfFree(
-          tx,
-          user,
-          reservation.inventoryUnitId,
-          orderId,
-        );
-      }
-
-      if (item.itemType === OrderItemType.retail && item.retailSkuId) {
-        await tx.retailSku.update({
-          where: { id: item.retailSkuId },
-          data: { qtyOnHand: { increment: 1 } },
+      if (item.stockLevelId && item.itemKind === OrderItemKind.product) {
+        await tx.stockLevel.update({
+          where: { id: item.stockLevelId },
+          data: { qtyOnHand: { increment: Number(item.quantity) } },
         });
       }
-
       await tx.orderItem.delete({ where: { id: itemId } });
-      await this.recalcTotals(tx, user.tenantId, orderId);
+      await this.recalculateTotals(tx, user.tenantId, orderId);
     });
 
     return this.getById(user, orderId);
   }
-
-  // ─── Status lifecycle ───────────────────────────────────────────────────
 
   async changeStatus(
     user: AuthUser,
-    orderId: string,
+    id: string,
     dto: UpdateOrderStatusDto,
   ) {
-    const order = await this.prisma.rentalOrder.findFirst({
-      where: { id: orderId, tenantId: user.tenantId },
-      include: { items: true },
+    const order = await this.prisma.order.findFirst({
+      where: { id, tenantId: user.tenantId },
     });
-    if (!order) {
-      throw new NotFoundException('Order not found');
-    }
+    if (!order) throw new NotFoundException('Order not found');
 
-    if (order.status === dto.status) {
-      throw new BadRequestException(`Order is already ${dto.status}`);
-    }
-
-    const allowed = STATUS_TRANSITIONS[order.status] ?? [];
+    const allowed = TRANSITIONS[order.status] ?? [];
     if (!allowed.includes(dto.status)) {
       throw new BadRequestException(
-        `Cannot transition order from ${order.status} to ${dto.status}`,
+        `Cannot transition ${order.status} → ${dto.status}`,
+      );
+    }
+
+    await this.prisma.order.update({
+      where: { id },
+      data: { status: dto.status },
+    });
+
+    await this.prisma.outboxEvent.create({
+      data: {
+        tenantId: user.tenantId,
+        eventType: 'order.status_changed',
+        aggregateType: 'order',
+        aggregateId: id,
+        payload: { from: order.status, to: dto.status },
+      },
+    });
+
+    return this.getById(user, id);
+  }
+
+  /**
+   * Advance rental-module lifecycle and apply stock side-effects.
+   * Core OrderStatus is synced via LIFECYCLE_TO_CORE — no industry strings in Core.
+   */
+  async changeRentalLifecycle(
+    user: AuthUser,
+    id: string,
+    dto: UpdateRentalLifecycleDto,
+  ) {
+    const order = await this.prisma.order.findFirst({
+      where: { id, tenantId: user.tenantId },
+      include: {
+        rentalExt: true,
+        items: true,
+      },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (!order.rentalExt) {
+      throw new BadRequestException('Order has no rental extension');
+    }
+
+    const from = order.rentalExt.lifecycle;
+    const to = dto.lifecycle;
+    const allowed = RENTAL_TRANSITIONS[from] ?? [];
+    if (!allowed.includes(to)) {
+      throw new BadRequestException(
+        `Cannot transition rental lifecycle ${from} → ${to}`,
       );
     }
 
     await this.prisma.$transaction(async (tx) => {
-      if (dto.status === OrderStatus.reserved) {
-        await this.handleReserveTransition(tx, user, order);
-      } else if (dto.status === OrderStatus.checked_out) {
-        await this.handleCheckoutTransition(tx, user, order);
-      } else if (dto.status === OrderStatus.cancelled) {
-        await this.handleCancelTransition(tx, user, order);
+      if (to === RentalOrderLifecycle.reserved) {
+        await this.reserveRentalUnits(tx, user, order);
+      }
+      if (to === RentalOrderLifecycle.checked_out) {
+        await this.checkoutRentalUnits(tx, user, order);
+      }
+      if (to === RentalOrderLifecycle.cancelled) {
+        await this.releaseRentalHolds(tx, user, order);
       }
 
-      await tx.rentalOrder.update({
-        where: { id: orderId },
-        data: { status: dto.status },
+      await tx.modRentalOrder.update({
+        where: { orderId: id },
+        data: { lifecycle: to },
       });
-      await this.recalcTotals(tx, user.tenantId, orderId);
-    });
 
-    return this.getById(user, orderId);
-  }
+      const coreStatus = LIFECYCLE_TO_CORE[to];
+      if (coreStatus && coreStatus !== order.status) {
+        await tx.order.update({
+          where: { id },
+          data: { status: coreStatus },
+        });
+      }
 
-  private async handleReserveTransition(
-    tx: PrismaTx,
-    user: AuthUser,
-    order: RentalOrder & { items: OrderItem[] },
-  ) {
-    if (!order.pickupDate || !order.returnDueDate) {
-      throw new BadRequestException(
-        'pickupDate and returnDueDate are required before reserving',
-      );
-    }
-
-    const rentalItems = order.items.filter(
-      (item) =>
-        item.itemType === OrderItemType.rental_unit && item.inventoryUnitId,
-    );
-
-    for (const item of rentalItems) {
-      const existing = await tx.unitReservation.findFirst({
-        where: {
+      await tx.outboxEvent.create({
+        data: {
           tenantId: user.tenantId,
-          orderItemId: item.id,
-          status: { in: ACTIVE_RESERVATIONS },
+          eventType: 'rental.lifecycle_changed',
+          aggregateType: 'order',
+          aggregateId: id,
+          payload: { from, to, coreStatus: coreStatus ?? order.status },
         },
       });
-      if (existing) continue;
+    });
 
-      const unit = await tx.inventoryUnit.findFirst({
-        where: { id: item.inventoryUnitId!, tenantId: user.tenantId },
+    return this.getById(user, id);
+  }
+
+  private dateOnly(d: Date) {
+    return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  }
+
+  private async reserveRentalUnits(
+    tx: Prisma.TransactionClient,
+    user: AuthUser,
+    order: {
+      id: string;
+      tenantId: string;
+      rentalExt: {
+        pickupDate: Date | null;
+        returnDueDate: Date | null;
+      } | null;
+      items: Array<{
+        id: string;
+        stockUnitId: string | null;
+        itemKind: OrderItemKind;
+      }>;
+    },
+  ) {
+    const pickup = order.rentalExt?.pickupDate;
+    const ret = order.rentalExt?.returnDueDate;
+    if (!pickup || !ret) {
+      throw new BadRequestException(
+        'pickupDate and returnDueDate required to reserve',
+      );
+    }
+    const start = this.dateOnly(pickup);
+    const end = this.dateOnly(ret);
+    if (end < start) {
+      throw new BadRequestException('returnDueDate must be on or after pickupDate');
+    }
+
+    const unitItems = order.items.filter(
+      (i) => i.stockUnitId && i.itemKind === OrderItemKind.stock_unit,
+    );
+    if (unitItems.length === 0) {
+      throw new BadRequestException('No stock units on order to reserve');
+    }
+
+    for (const item of unitItems) {
+      const stockUnitId = item.stockUnitId!;
+      const unit = await tx.stockUnit.findFirst({
+        where: { id: stockUnitId, tenantId: user.tenantId },
       });
-      if (!unit) {
-        throw new NotFoundException(
-          `Inventory unit not found for item ${item.id}`,
+      if (!unit) throw new NotFoundException('Stock unit not found');
+      if (
+        unit.status !== StockUnitStatus.available &&
+        unit.status !== StockUnitStatus.reserved
+      ) {
+        throw new BadRequestException(
+          `Unit ${unit.barcodeSku} cannot be reserved (status ${unit.status})`,
         );
       }
 
-      const overlap = await tx.unitReservation.findFirst({
+      const overlap = await tx.stockReservation.findFirst({
         where: {
-          inventoryUnitId: unit.id,
+          stockUnitId,
           tenantId: user.tenantId,
-          status: { in: ACTIVE_RESERVATIONS },
-          startDate: { lte: order.returnDueDate },
-          endDate: { gte: order.pickupDate },
+          status: {
+            in: [ReservationStatus.held, ReservationStatus.checked_out],
+          },
+          startDate: { lte: end },
+          endDate: { gte: start },
+          NOT: { orderItemId: item.id },
         },
       });
       if (overlap) {
-        throw new ConflictException(
+        throw new BadRequestException(
           `Unit ${unit.barcodeSku} already reserved for overlapping dates`,
         );
       }
 
-      await tx.unitReservation.create({
-        data: {
+      const existing = await tx.stockReservation.findFirst({
+        where: {
           tenantId: user.tenantId,
-          inventoryUnitId: unit.id,
           orderItemId: item.id,
-          startDate: order.pickupDate,
-          endDate: order.returnDueDate,
           status: ReservationStatus.held,
         },
       });
-
-      if (unit.availabilityStatus === AvailabilityStatus.AVAILABLE) {
-        await tx.inventoryUnit.update({
-          where: { id: unit.id },
-          data: { availabilityStatus: AvailabilityStatus.RESERVED },
-        });
-        await tx.inventoryMovement.create({
+      if (!existing) {
+        await tx.stockReservation.create({
           data: {
             tenantId: user.tenantId,
-            inventoryUnitId: unit.id,
-            fromAvailability: unit.availabilityStatus,
-            toAvailability: AvailabilityStatus.RESERVED,
-            reason: 'order.reserved',
-            orderId: order.id,
+            stockUnitId,
+            orderItemId: item.id,
+            startDate: start,
+            endDate: end,
+            status: ReservationStatus.held,
+          },
+        });
+      }
+
+      if (unit.status === StockUnitStatus.available) {
+        await tx.stockUnit.update({
+          where: { id: stockUnitId },
+          data: { status: StockUnitStatus.reserved },
+        });
+        await tx.stockMovement.create({
+          data: {
+            tenantId: user.tenantId,
+            stockUnitId,
+            fromStatus: StockUnitStatus.available,
+            toStatus: StockUnitStatus.reserved,
+            reason: 'rental.reserved',
             actorUserId: user.userId,
+            orderId: order.id,
           },
         });
       }
     }
   }
 
-  private async handleCheckoutTransition(
-    tx: PrismaTx,
+  private async checkoutRentalUnits(
+    tx: Prisma.TransactionClient,
     user: AuthUser,
-    order: RentalOrder,
+    order: {
+      id: string;
+      tenantId: string;
+      items: Array<{
+        id: string;
+        stockUnitId: string | null;
+        itemKind: OrderItemKind;
+      }>;
+    },
   ) {
-    const reservations = await tx.unitReservation.findMany({
-      where: {
-        tenantId: user.tenantId,
-        status: ReservationStatus.held,
-        orderItem: { orderId: order.id },
-      },
-    });
+    const unitItems = order.items.filter(
+      (i) => i.stockUnitId && i.itemKind === OrderItemKind.stock_unit,
+    );
+    for (const item of unitItems) {
+      const stockUnitId = item.stockUnitId!;
+      const unit = await tx.stockUnit.findFirst({
+        where: { id: stockUnitId, tenantId: user.tenantId },
+      });
+      if (!unit) throw new NotFoundException('Stock unit not found');
 
-    for (const reservation of reservations) {
-      await tx.unitReservation.update({
-        where: { id: reservation.id },
+      await tx.stockReservation.updateMany({
+        where: {
+          tenantId: user.tenantId,
+          orderItemId: item.id,
+          status: ReservationStatus.held,
+        },
         data: { status: ReservationStatus.checked_out },
       });
 
-      const unit = await tx.inventoryUnit.findFirst({
-        where: { id: reservation.inventoryUnitId, tenantId: user.tenantId },
-      });
-      if (unit && unit.availabilityStatus !== AvailabilityStatus.CHECKED_OUT) {
-        await tx.inventoryUnit.update({
-          where: { id: unit.id },
-          data: { availabilityStatus: AvailabilityStatus.CHECKED_OUT },
+      if (unit.status !== StockUnitStatus.checked_out) {
+        await tx.stockUnit.update({
+          where: { id: stockUnitId },
+          data: { status: StockUnitStatus.checked_out },
         });
-        await tx.inventoryMovement.create({
+        await tx.stockMovement.create({
           data: {
             tenantId: user.tenantId,
-            inventoryUnitId: unit.id,
-            fromAvailability: unit.availabilityStatus,
-            toAvailability: AvailabilityStatus.CHECKED_OUT,
-            reason: 'order.checked_out',
-            orderId: order.id,
+            stockUnitId,
+            fromStatus: unit.status,
+            toStatus: StockUnitStatus.checked_out,
+            reason: 'rental.checked_out',
             actorUserId: user.userId,
+            orderId: order.id,
           },
         });
       }
     }
   }
 
-  private async handleCancelTransition(
-    tx: PrismaTx,
+  private async releaseRentalHolds(
+    tx: Prisma.TransactionClient,
     user: AuthUser,
-    order: RentalOrder,
+    order: {
+      id: string;
+      items: Array<{
+        id: string;
+        stockUnitId: string | null;
+        itemKind: OrderItemKind;
+      }>;
+    },
   ) {
-    const reservations = await tx.unitReservation.findMany({
-      where: {
-        tenantId: user.tenantId,
-        status: ReservationStatus.held,
-        orderItem: { orderId: order.id },
-      },
-    });
-
-    for (const reservation of reservations) {
-      await tx.unitReservation.update({
-        where: { id: reservation.id },
+    for (const item of order.items) {
+      if (!item.stockUnitId || item.itemKind !== OrderItemKind.stock_unit) {
+        continue;
+      }
+      await tx.stockReservation.updateMany({
+        where: {
+          tenantId: user.tenantId,
+          orderItemId: item.id,
+          status: ReservationStatus.held,
+        },
         data: { status: ReservationStatus.cancelled },
       });
-      await this.releaseUnitIfFree(
-        tx,
-        user,
-        reservation.inventoryUnitId,
-        order.id,
-      );
-    }
-  }
-
-  // ─── Totals ──────────────────────────────────────────────────────────────
-
-  private async recalcTotals(tx: PrismaTx, tenantId: string, orderId: string) {
-    const order = await tx.rentalOrder.findFirst({
-      where: { id: orderId, tenantId },
-      select: { depositTotal: true },
-    });
-    if (!order) {
-      throw new NotFoundException('Order not found');
-    }
-
-    const items = await tx.orderItem.findMany({
-      where: { tenantId, orderId },
-      include: { inventoryUnit: { select: { depositAmount: true } } },
-    });
-
-    let subtotal = new Prisma.Decimal(0);
-    let taxTotal = new Prisma.Decimal(0);
-    const rentalDeposits: Prisma.Decimal[] = [];
-
-    for (const item of items) {
-      subtotal = subtotal.plus(item.unitPrice).minus(item.discount);
-      taxTotal = taxTotal.plus(item.taxAmount);
-      if (item.itemType === OrderItemType.rental_unit && item.inventoryUnit) {
-        rentalDeposits.push(item.inventoryUnit.depositAmount);
+      const unit = await tx.stockUnit.findFirst({
+        where: { id: item.stockUnitId, tenantId: user.tenantId },
+      });
+      if (unit?.status === StockUnitStatus.reserved) {
+        const active = await tx.stockReservation.count({
+          where: {
+            stockUnitId: unit.id,
+            tenantId: user.tenantId,
+            status: {
+              in: [ReservationStatus.held, ReservationStatus.checked_out],
+            },
+          },
+        });
+        if (active === 0) {
+          await tx.stockUnit.update({
+            where: { id: unit.id },
+            data: { status: StockUnitStatus.available },
+          });
+          await tx.stockMovement.create({
+            data: {
+              tenantId: user.tenantId,
+              stockUnitId: unit.id,
+              fromStatus: StockUnitStatus.reserved,
+              toStatus: StockUnitStatus.available,
+              reason: 'rental.cancelled',
+              actorUserId: user.userId,
+              orderId: order.id,
+            },
+          });
+        }
       }
     }
-
-    const depositTotal = rentalDeposits.length
-      ? rentalDeposits.reduce(
-          (sum, deposit) => sum.plus(deposit),
-          new Prisma.Decimal(0),
-        )
-      : order.depositTotal;
-
-    const [feesAgg, creditsAgg, refundsAgg] = await Promise.all([
-      tx.orderFee.aggregate({
-        where: { tenantId, orderId },
-        _sum: { amount: true },
-      }),
-      tx.payment.aggregate({
-        where: {
-          tenantId,
-          orderId,
-          status: 'succeeded',
-          type: { in: CREDIT_PAYMENT_TYPES },
-        },
-        _sum: { amount: true },
-      }),
-      tx.payment.aggregate({
-        where: {
-          tenantId,
-          orderId,
-          status: 'succeeded',
-          type: { in: REFUND_PAYMENT_TYPES },
-        },
-        _sum: { amount: true },
-      }),
-    ]);
-
-    const feeSum = new Prisma.Decimal(feesAgg._sum.amount ?? 0);
-    const paidSucceeded = new Prisma.Decimal(creditsAgg._sum.amount ?? 0);
-    const refundedSucceeded = new Prisma.Decimal(refundsAgg._sum.amount ?? 0);
-
-    const balanceDue = subtotal
-      .plus(taxTotal)
-      .plus(feeSum)
-      .minus(paidSucceeded)
-      .plus(refundedSucceeded);
-
-    return tx.rentalOrder.update({
-      where: { id: orderId },
-      data: { subtotal, taxTotal, depositTotal, balanceDue },
-    });
   }
 
-  // ─── Item helpers ────────────────────────────────────────────────────────
-
-  private async createItem(
-    tx: PrismaTx,
-    user: AuthUser,
+  private async createItemTx(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
     orderId: string,
     dto: CreateOrderItemDto,
   ) {
-    let unitPrice = dto.unitPrice;
+    const rawKind = dto.itemKind ?? dto.itemType;
+    if (!rawKind) {
+      throw new BadRequestException('itemKind or itemType is required');
+    }
+    const kind = mapItemKind(rawKind);
+    const qty = dto.quantity ?? 1;
+    let unitPrice = dto.unitPrice ?? 0;
+    let productId = dto.productId ?? null;
+    let stockUnitId = dto.stockUnitId ?? dto.inventoryUnitId ?? null;
+    let stockLevelId = dto.stockLevelId ?? dto.retailSkuId ?? null;
+    let description = dto.description ?? null;
 
-    if (dto.itemType === OrderItemType.rental_unit) {
-      if (!dto.inventoryUnitId) {
-        throw new BadRequestException(
-          'inventoryUnitId is required for rental_unit items',
-        );
+    if (kind === OrderItemKind.stock_unit) {
+      if (!stockUnitId) {
+        throw new BadRequestException('stockUnitId required for stock_unit');
       }
-      const unit = await tx.inventoryUnit.findFirst({
-        where: { id: dto.inventoryUnitId, tenantId: user.tenantId },
-        select: { id: true, rentalPrice: true },
+      const unit = await tx.stockUnit.findFirst({
+        where: { id: stockUnitId, tenantId },
+        include: { product: true },
       });
-      if (!unit) {
-        throw new NotFoundException('Inventory unit not found');
+      if (!unit) throw new NotFoundException('Stock unit not found');
+      productId = unit.productId;
+      if (dto.unitPrice === undefined) {
+        unitPrice = Number(unit.product.basePrice);
       }
-      if (unitPrice === undefined) {
-        unitPrice = Number(unit.rentalPrice);
-      }
-    } else if (dto.itemType === OrderItemType.retail) {
-      if (!dto.retailSkuId) {
-        throw new BadRequestException(
-          'retailSkuId is required for retail items',
-        );
-      }
-      const sku = await tx.retailSku.findFirst({
-        where: { id: dto.retailSkuId, tenantId: user.tenantId },
-        select: { id: true, sellPrice: true, qtyOnHand: true },
-      });
-      if (!sku) {
-        throw new NotFoundException('Retail SKU not found');
-      }
-      if (sku.qtyOnHand < 1) {
-        throw new BadRequestException('Retail SKU is out of stock');
-      }
-      if (unitPrice === undefined) {
-        unitPrice = Number(sku.sellPrice);
-      }
-      await tx.retailSku.update({
-        where: { id: sku.id },
-        data: { qtyOnHand: { decrement: 1 } },
-      });
+      description = description ?? unit.product.name;
     }
 
-    if (dto.wearerCustomerId) {
-      const wearer = await tx.customer.findFirst({
-        where: {
-          id: dto.wearerCustomerId,
-          tenantId: user.tenantId,
-          deletedAt: null,
-        },
-        select: { id: true },
-      });
-      if (!wearer) {
-        throw new NotFoundException('Wearer customer not found');
+    if (kind === OrderItemKind.product) {
+      if (stockLevelId) {
+        const level = await tx.stockLevel.findFirst({
+          where: { id: stockLevelId, tenantId },
+          include: { product: true },
+        });
+        if (!level) throw new NotFoundException('Stock level not found');
+        if (level.qtyOnHand < qty) {
+          throw new BadRequestException('Insufficient stock');
+        }
+        productId = level.productId;
+        if (dto.unitPrice === undefined) unitPrice = Number(level.sellPrice);
+        description = description ?? level.product.name;
+        await tx.stockLevel.update({
+          where: { id: level.id },
+          data: { qtyOnHand: { decrement: qty } },
+        });
+      } else if (productId) {
+        const product = await tx.product.findFirst({
+          where: { id: productId, tenantId },
+        });
+        if (!product) throw new NotFoundException('Product not found');
+        if (dto.unitPrice === undefined) unitPrice = Number(product.basePrice);
+        description = description ?? product.name;
+      } else {
+        throw new BadRequestException(
+          'productId or stockLevelId required for product line',
+        );
       }
     }
 
-    return tx.orderItem.create({
+    const lineTotal = money(unitPrice).mul(qty);
+    const taxAmount = money(dto.taxAmount ?? 0);
+
+    await tx.orderItem.create({
       data: {
-        tenantId: user.tenantId,
+        tenantId,
         orderId,
-        itemType: dto.itemType,
-        inventoryUnitId: dto.inventoryUnitId,
-        retailSkuId: dto.retailSkuId,
+        itemKind: kind,
+        productId,
+        stockUnitId,
+        stockLevelId,
         wearerCustomerId: dto.wearerCustomerId,
-        size: dto.size?.trim(),
-        unitPrice: (unitPrice ?? 0).toFixed(2),
-        discount: (dto.discount ?? 0).toFixed(2),
-        taxAmount: (dto.taxAmount ?? 0).toFixed(2),
-        taxSplit: (dto.taxSplit ?? {}) as Prisma.InputJsonValue,
+        description,
+        quantity: qty,
+        unitPrice: money(unitPrice).toFixed(2),
+        lineTotal: lineTotal.toFixed(2),
+        taxAmount: taxAmount.toFixed(2),
       },
     });
   }
 
-  private async releaseUnitIfFree(
-    tx: PrismaTx,
-    user: AuthUser,
-    inventoryUnitId: string,
+  async recalculateTotals(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
     orderId: string,
   ) {
-    const activeLeft = await tx.unitReservation.count({
-      where: {
-        tenantId: user.tenantId,
-        inventoryUnitId,
-        status: { in: ACTIVE_RESERVATIONS },
+    const order = await tx.order.findFirstOrThrow({
+      where: { id: orderId, tenantId },
+      select: { discountTotal: true },
+    });
+    const items = await tx.orderItem.findMany({ where: { orderId, tenantId } });
+    const fees = await tx.orderFee.findMany({ where: { orderId, tenantId } });
+    const payments = await tx.payment.findMany({
+      where: { orderId, tenantId, status: 'succeeded' },
+    });
+
+    let subtotal = money(0);
+    let taxTotal = money(0);
+    for (const i of items) {
+      subtotal = subtotal.add(i.lineTotal);
+      taxTotal = taxTotal.add(i.taxAmount);
+    }
+    for (const f of fees) {
+      subtotal = subtotal.add(f.amount);
+    }
+
+    let paid = money(0);
+    let deposits = money(0);
+    for (const p of payments) {
+      if (p.type === 'refund' || p.type === 'deposit_refund') {
+        paid = paid.sub(p.amount);
+      } else if (p.type === 'deposit') {
+        deposits = deposits.add(p.amount);
+        paid = paid.add(p.amount);
+      } else {
+        paid = paid.add(p.amount);
+      }
+    }
+
+    const discount = money(order.discountTotal ?? 0);
+    const grand = Prisma.Decimal.max(
+      subtotal.add(taxTotal).sub(discount),
+      money(0),
+    );
+    const balanceDue = Prisma.Decimal.max(grand.sub(paid), money(0));
+
+    await tx.order.update({
+      where: { id: orderId },
+      data: {
+        subtotal: subtotal.toFixed(2),
+        taxTotal: taxTotal.toFixed(2),
+        depositTotal: deposits.toFixed(2),
+        balanceDue: balanceDue.toFixed(2),
       },
     });
-    if (activeLeft > 0) return;
-
-    const unit = await tx.inventoryUnit.findFirst({
-      where: { id: inventoryUnitId, tenantId: user.tenantId },
-    });
-    if (unit && unit.availabilityStatus === AvailabilityStatus.RESERVED) {
-      await tx.inventoryUnit.update({
-        where: { id: unit.id },
-        data: { availabilityStatus: AvailabilityStatus.AVAILABLE },
-      });
-      await tx.inventoryMovement.create({
-        data: {
-          tenantId: user.tenantId,
-          inventoryUnitId: unit.id,
-          fromAvailability: AvailabilityStatus.RESERVED,
-          toAvailability: AvailabilityStatus.AVAILABLE,
-          reason: 'order.reservation_released',
-          orderId,
-          actorUserId: user.userId,
-        },
-      });
-    }
   }
 
-  private async generateOrderNumber(
-    tx: PrismaTx,
-    tenantId: string,
-  ): Promise<string> {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const random = Math.random().toString(36).slice(2, 6).toUpperCase();
-      const candidate = `ORD-${Date.now().toString(36).toUpperCase()}-${random}`;
-      const exists = await tx.rentalOrder.findFirst({
-        where: { tenantId, orderNumber: candidate },
-        select: { id: true },
-      });
-      if (!exists) return candidate;
-    }
-    throw new ConflictException(
-      'Failed to generate a unique order number, please retry',
-    );
+  private async nextOrderNumber(tenantId: string) {
+    const count = await this.prisma.order.count({ where: { tenantId } });
+    const n = String(count + 1).padStart(5, '0');
+    return `ORD-${n}`;
   }
 
-  // ─── Assertions ──────────────────────────────────────────────────────────
-
-  private async getOrderOrThrow(user: AuthUser, id: string) {
-    const order = await this.prisma.rentalOrder.findFirst({
-      where: { id, tenantId: user.tenantId },
-    });
-    if (!order) {
-      throw new NotFoundException('Order not found');
-    }
-    return order;
-  }
-
-  private async assertStore(tenantId: string, id: string) {
-    const store = await this.prisma.store.findFirst({
+  private async assertLocation(tenantId: string, id: string) {
+    const loc = await this.prisma.location.findFirst({
       where: { id, tenantId, isActive: true },
       select: { id: true },
     });
-    if (!store) {
-      throw new NotFoundException('Store not found or inactive');
-    }
+    if (!loc) throw new NotFoundException('Location not found');
   }
 
   private async assertCustomer(tenantId: string, id: string) {
-    const customer = await this.prisma.customer.findFirst({
+    const c = await this.prisma.customer.findFirst({
       where: { id, tenantId, deletedAt: null },
       select: { id: true },
     });
-    if (!customer) {
-      throw new NotFoundException('Customer not found');
-    }
-  }
-
-  private async assertParty(tenantId: string, id: string) {
-    const party = await this.prisma.party.findFirst({
-      where: { id, tenantId },
-      select: { id: true },
-    });
-    if (!party) {
-      throw new NotFoundException('Party not found');
-    }
+    if (!c) throw new NotFoundException('Customer not found');
   }
 }

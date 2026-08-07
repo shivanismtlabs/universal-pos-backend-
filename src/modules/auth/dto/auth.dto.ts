@@ -8,6 +8,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
+import { IsInternationalPhone } from '../../../common/validators/is-international-phone';
 import { IsStrongPassword } from '../password.policy';
 
 const toLowerTrim = ({ value }: { value: unknown }) =>
@@ -77,13 +78,53 @@ export class RegisterTenantDto {
   @IsStrongPassword()
   adminPassword!: string;
 
-  @ApiPropertyOptional({ example: '9876543210' })
+  @ApiPropertyOptional({ example: '+12042347762' })
   @IsOptional()
   @IsString()
-  @Matches(/^[6-9]\d{9}$/, {
-    message: 'adminPhone must be a valid 10-digit Indian mobile number',
+  @IsInternationalPhone({
+    message: 'adminPhone must be a valid phone number (any country)',
   })
   adminPhone?: string;
+}
+
+export class RegisterUserDto {
+  @ApiProperty({ example: 'demo-shop', description: 'Existing shop slug' })
+  @Transform(toLowerTrim)
+  @IsString()
+  @Matches(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, {
+    message: 'tenantSlug must be lowercase kebab-case (a-z, 0-9, hyphens)',
+  })
+  @MinLength(2)
+  @MaxLength(50)
+  tenantSlug!: string;
+
+  @ApiProperty({ example: 'Jane Cashier' })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(255)
+  fullName!: string;
+
+  @ApiProperty({ example: 'jane@demo-shop.com' })
+  @Transform(toLowerTrim)
+  @IsEmail()
+  @MaxLength(255)
+  email!: string;
+
+  @ApiProperty({
+    example: 'Password123!',
+    description: 'Upper + lower + number + special, 8–72 chars',
+  })
+  @IsString()
+  @IsStrongPassword()
+  password!: string;
+
+  @ApiPropertyOptional({ example: '+12042347762' })
+  @IsOptional()
+  @IsString()
+  @IsInternationalPhone({
+    message: 'phone must be a valid phone number (any country)',
+  })
+  phone?: string;
 }
 
 export class LoginDto {

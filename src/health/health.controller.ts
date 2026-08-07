@@ -11,7 +11,7 @@ export class HealthController {
   check() {
     return {
       status: 'ok',
-      service: 'tuxedo-pos-api',
+      service: 'universal-pos-api',
       timestamp: new Date().toISOString(),
     };
   }

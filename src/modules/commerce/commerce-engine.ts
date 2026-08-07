@@ -92,10 +92,15 @@ export class CommerceEngine {
       locationId: string;
       customerId?: string;
       lines: CommerceLineInput[];
-      payments: Array<{ method: string; amount: number; type?: string }>;
+      payments: Array<{
+        method: string;
+        amount: number;
+        type?: string;
+        idempotencyKey: string;
+      }>;
       cashTendered?: number;
       note?: string;
-      idempotencyKey?: string;
+      discountAmount?: number;
     },
   ) {
     if (!input.lines?.length) {
@@ -126,13 +131,23 @@ export class CommerceEngine {
               : undefined,
         })),
         payments: input.payments.map((p) => ({
-          method: p.method as 'cash' | 'card' | 'upi' | 'bank_transfer' | 'other',
+          method: p.method as
+            | 'cash'
+            | 'card'
+            | 'upi'
+            | 'bank_transfer'
+            | 'other',
           amount: p.amount,
-          type: (p.type as 'sale' | 'deposit' | 'balance' | 'refund') ?? 'sale',
+          idempotencyKey: p.idempotencyKey,
+          type: (p.type as
+            | 'payment'
+            | 'refund'
+            | 'deposit'
+            | 'deposit_refund') ?? 'payment',
         })),
         cashTendered: input.cashTendered,
         note: input.note,
-        idempotencyKey: input.idempotencyKey,
+        discountAmount: input.discountAmount,
       });
     }
 

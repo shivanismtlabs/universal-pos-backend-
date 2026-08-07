@@ -29,6 +29,8 @@ export class CustomersService {
     }
 
     const marketingOptIn = dto.marketingOptIn ?? false;
+    const meta: Record<string, unknown> = {};
+    if (dto.eventDate) meta.eventDate = dto.eventDate;
 
     try {
       return await this.prisma.customer.create({
@@ -37,10 +39,10 @@ export class CustomersService {
           fullName: dto.fullName.trim(),
           phone,
           email: dto.email?.trim().toLowerCase(),
-          eventDate: dto.eventDate ? new Date(dto.eventDate) : null,
           notes: dto.notes?.trim(),
           marketingOptIn,
           consentAt: marketingOptIn ? new Date() : null,
+          meta: meta as Prisma.InputJsonValue,
         },
       });
     } catch (e) {
@@ -99,25 +101,28 @@ export class CustomersService {
     const customer = await this.prisma.customer.findFirst({
       where: { id, tenantId: user.tenantId, deletedAt: null },
       include: {
-        measurements: {
-          orderBy: { takenAt: 'desc' },
-          take: 5,
-        },
-        partyMemberships: {
+        rentalMeasurements: { orderBy: { takenAt: 'desc' }, take: 5 },
+        rentalPartyMemberships: {
           include: {
             party: { select: { id: true, name: true, eventDate: true } },
           },
         },
       },
     });
-    if (!customer) {
-      throw new NotFoundException('Customer not found');
-    }
-    return customer;
+    if (!customer) throw new NotFoundException('Customer not found');
+    const { rentalMeasurements, rentalPartyMemberships, ...rest } = customer;
+    return {
+      ...rest,
+      measurements: rentalMeasurements,
+      partyMemberships: rentalPartyMemberships,
+    };
   }
 
   async update(user: AuthUser, id: string, dto: UpdateCustomerDto) {
-    await this.getById(user, id);
+    const current = await this.prisma.customer.findFirst({
+      where: { id, tenantId: user.tenantId, deletedAt: null },
+    });
+    if (!current) throw new NotFoundException('Customer not found');
 
     if (dto.phone) {
       const clash = await this.prisma.customer.findFirst({
@@ -133,13 +138,20 @@ export class CustomersService {
       }
     }
 
-    const data: Prisma.CustomerUpdateInput = {};
+    const meta = {
+      ...((current.meta as Record<string, unknown>) ?? {}),
+    };
+    if (dto.eventDate !== undefined) {
+      if (dto.eventDate) meta.eventDate = dto.eventDate;
+      else delete meta.eventDate;
+    }
+
+    const data: Prisma.CustomerUpdateInput = {
+      meta: meta as Prisma.InputJsonValue,
+    };
     if (dto.fullName !== undefined) data.fullName = dto.fullName.trim();
     if (dto.phone !== undefined) data.phone = dto.phone.trim();
     if (dto.email !== undefined) data.email = dto.email.trim().toLowerCase();
-    if (dto.eventDate !== undefined) {
-      data.eventDate = dto.eventDate ? new Date(dto.eventDate) : null;
-    }
     if (dto.notes !== undefined) data.notes = dto.notes;
     if (dto.marketingOptIn !== undefined) {
       data.marketingOptIn = dto.marketingOptIn;
@@ -147,10 +159,7 @@ export class CustomersService {
     }
 
     try {
-      return await this.prisma.customer.update({
-        where: { id },
-        data,
-      });
+      return await this.prisma.customer.update({ where: { id }, data });
     } catch (e) {
       if (
         e instanceof Prisma.PrismaClientKnownRequestError &&
@@ -163,18 +172,12 @@ export class CustomersService {
   }
 
   async softDelete(user: AuthUser, id: string) {
-    const customer = await this.getById(user, id);
-    // Free unique phone for reuse after soft delete
-    const freedPhone = `${customer.phone}__del__${customer.id.slice(0, 8)}`;
+    await this.getById(user, id);
     await this.prisma.customer.update({
       where: { id },
-      data: {
-        deletedAt: new Date(),
-        phone: freedPhone,
-        marketingOptIn: false,
-      },
+      data: { deletedAt: new Date() },
     });
-    return null;
+    return { id, deleted: true };
   }
 
   async addMeasurement(
@@ -182,18 +185,17 @@ export class CustomersService {
     customerId: string,
     dto: CreateMeasurementDto,
   ) {
-    await this.getById(user, customerId);
-
-    return this.prisma.customerMeasurement.create({
+    await this.assertCustomer(user.tenantId, customerId);
+    return this.prisma.modRentalMeasurement.create({
       data: {
         tenantId: user.tenantId,
         customerId,
-        heightCm: dto.heightCm?.toString(),
-        weightKg: dto.weightKg?.toString(),
-        chest: dto.chest?.toString(),
-        waist: dto.waist?.toString(),
-        inseam: dto.inseam?.toString(),
-        sleeve: dto.sleeve?.toString(),
+        heightCm: dto.heightCm,
+        weightKg: dto.weightKg,
+        chest: dto.chest,
+        waist: dto.waist,
+        inseam: dto.inseam,
+        sleeve: dto.sleeve,
         shoeSize: dto.shoeSize,
         takenByUserId: user.userId,
       },
@@ -201,8 +203,8 @@ export class CustomersService {
   }
 
   async listMeasurements(user: AuthUser, customerId: string) {
-    await this.getById(user, customerId);
-    return this.prisma.customerMeasurement.findMany({
+    await this.assertCustomer(user.tenantId, customerId);
+    return this.prisma.modRentalMeasurement.findMany({
       where: { tenantId: user.tenantId, customerId },
       orderBy: { takenAt: 'desc' },
     });
@@ -210,57 +212,44 @@ export class CustomersService {
 
   async createParty(user: AuthUser, dto: CreatePartyDto) {
     if (dto.primaryCustomerId) {
-      await this.getById(user, dto.primaryCustomerId);
+      await this.assertCustomer(user.tenantId, dto.primaryCustomerId);
+    }
+    for (const m of dto.members ?? []) {
+      await this.assertCustomer(user.tenantId, m.customerId);
     }
 
-    const memberIds = dto.members?.map((m) => m.customerId) ?? [];
-    for (const id of memberIds) {
-      await this.getById(user, id);
-    }
-
-    return this.prisma.$transaction(async (tx) => {
-      const party = await tx.party.create({
-        data: {
-          tenantId: user.tenantId,
-          name: dto.name.trim(),
-          eventDate: dto.eventDate ? new Date(dto.eventDate) : null,
-          primaryCustomerId: dto.primaryCustomerId,
+    return this.prisma.modRentalParty.create({
+      data: {
+        tenantId: user.tenantId,
+        name: dto.name.trim(),
+        eventDate: dto.eventDate ? new Date(dto.eventDate) : null,
+        primaryCustomerId: dto.primaryCustomerId,
+        members: dto.members?.length
+          ? {
+              create: dto.members.map((m) => ({
+                customerId: m.customerId,
+                roleLabel: m.roleLabel,
+              })),
+            }
+          : undefined,
+      },
+      include: {
+        primaryCustomer: {
+          select: { id: true, fullName: true, phone: true },
         },
-      });
-
-      if (dto.members?.length) {
-        await tx.partyMember.createMany({
-          data: dto.members.map((m) => ({
-            partyId: party.id,
-            customerId: m.customerId,
-            roleLabel: m.roleLabel,
-          })),
-          skipDuplicates: true,
-        });
-      }
-
-      if (dto.primaryCustomerId && !memberIds.includes(dto.primaryCustomerId)) {
-        await tx.partyMember.create({
-          data: {
-            partyId: party.id,
-            customerId: dto.primaryCustomerId,
-            roleLabel: 'primary',
+        members: {
+          include: {
+            customer: {
+              select: { id: true, fullName: true, phone: true },
+            },
           },
-        });
-      }
-
-      return tx.party.findFirst({
-        where: { id: party.id },
-        include: {
-          members: { include: { customer: true } },
-          primaryCustomer: true,
         },
-      });
+      },
     });
   }
 
-  async listParties(user: AuthUser) {
-    return this.prisma.party.findMany({
+  listParties(user: AuthUser) {
+    return this.prisma.modRentalParty.findMany({
       where: { tenantId: user.tenantId },
       orderBy: { createdAt: 'desc' },
       include: {
@@ -269,7 +258,9 @@ export class CustomersService {
         },
         members: {
           include: {
-            customer: { select: { id: true, fullName: true, phone: true } },
+            customer: {
+              select: { id: true, fullName: true, phone: true },
+            },
           },
         },
       },
@@ -277,16 +268,20 @@ export class CustomersService {
   }
 
   async getParty(user: AuthUser, id: string) {
-    const party = await this.prisma.party.findFirst({
+    const party = await this.prisma.modRentalParty.findFirst({
       where: { id, tenantId: user.tenantId },
       include: {
         primaryCustomer: true,
-        members: { include: { customer: true } },
+        members: {
+          include: {
+            customer: {
+              select: { id: true, fullName: true, phone: true },
+            },
+          },
+        },
       },
     });
-    if (!party) {
-      throw new NotFoundException('Party not found');
-    }
+    if (!party) throw new NotFoundException('Party not found');
     return party;
   }
 
@@ -296,10 +291,9 @@ export class CustomersService {
     dto: AddPartyMemberDto,
   ) {
     await this.getParty(user, partyId);
-    await this.getById(user, dto.customerId);
-
+    await this.assertCustomer(user.tenantId, dto.customerId);
     try {
-      await this.prisma.partyMember.create({
+      await this.prisma.modRentalPartyMember.create({
         data: {
           partyId,
           customerId: dto.customerId,
@@ -311,19 +305,30 @@ export class CustomersService {
         e instanceof Prisma.PrismaClientKnownRequestError &&
         e.code === 'P2002'
       ) {
-        throw new ConflictException('Customer already in this party');
+        throw new ConflictException('Member already in party');
       }
       throw e;
     }
-
     return this.getParty(user, partyId);
   }
 
-  async removePartyMember(user: AuthUser, partyId: string, customerId: string) {
+  async removePartyMember(
+    user: AuthUser,
+    partyId: string,
+    customerId: string,
+  ) {
     await this.getParty(user, partyId);
-    await this.prisma.partyMember.deleteMany({
+    await this.prisma.modRentalPartyMember.deleteMany({
       where: { partyId, customerId },
     });
-    return this.getParty(user, partyId);
+    return { partyId, customerId, removed: true };
+  }
+
+  private async assertCustomer(tenantId: string, id: string) {
+    const c = await this.prisma.customer.findFirst({
+      where: { id, tenantId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!c) throw new NotFoundException('Customer not found');
   }
 }

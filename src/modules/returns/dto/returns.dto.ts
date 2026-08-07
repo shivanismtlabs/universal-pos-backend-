@@ -10,6 +10,7 @@ import {
   IsUUID,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { PaginationQueryDto } from '../../../common/dto/pagination.dto';
@@ -19,9 +20,17 @@ export class CreateReturnDto {
   @IsUUID()
   orderId!: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional({
+    description: 'Legacy alias — prefer stockUnitId',
+  })
+  @IsOptional()
   @IsUUID()
-  inventoryUnitId!: string;
+  inventoryUnitId?: string;
+
+  @ApiPropertyOptional({ description: 'Serial unit being returned' })
+  @IsOptional()
+  @IsUUID()
+  stockUnitId?: string;
 
   @ApiPropertyOptional({ default: false })
   @IsOptional()
@@ -55,6 +64,30 @@ export class DamageInputDto {
   @IsNumber()
   @Min(0)
   feeAmount?: number;
+}
+
+export class SettleDepositDto {
+  @ApiProperty({
+    example: 500,
+    description:
+      'Amount of deposit to refund to the customer (0 = forfeit all remaining)',
+  })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  refundAmount!: number;
+
+  @ApiProperty({ description: 'Idempotency key for the refund payment' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(255)
+  idempotencyKey!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  reason?: string;
 }
 
 export class InspectReturnDto {

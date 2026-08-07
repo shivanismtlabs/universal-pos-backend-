@@ -5,10 +5,10 @@ import {
   IsOptional,
   IsString,
   IsUUID,
-  Matches,
   MaxLength,
   MinLength,
 } from 'class-validator';
+import { IsInternationalPhone } from '../../../common/validators/is-international-phone';
 import { IsStrongPassword } from '../../auth/password.policy';
 
 export class CreateUserDto {
@@ -23,11 +23,11 @@ export class CreateUserDto {
   @MaxLength(255)
   fullName!: string;
 
-  @ApiPropertyOptional({ example: '9876543210' })
+  @ApiPropertyOptional({ example: '+12042347762' })
   @IsOptional()
   @IsString()
-  @Matches(/^[6-9]\d{9}$/, {
-    message: 'phone must be a valid 10-digit Indian mobile',
+  @IsInternationalPhone({
+    message: 'phone must be a valid phone number (any country)',
   })
   phone?: string;
 
@@ -72,11 +72,11 @@ export class UpdateUserDto {
   @MaxLength(255)
   fullName?: string;
 
-  @ApiPropertyOptional({ example: '9876543210' })
+  @ApiPropertyOptional({ example: '+12042347762' })
   @IsOptional()
   @IsString()
-  @Matches(/^[6-9]\d{9}$/, {
-    message: 'phone must be a valid 10-digit Indian mobile',
+  @IsInternationalPhone({
+    message: 'phone must be a valid phone number (any country)',
   })
   phone?: string;
 

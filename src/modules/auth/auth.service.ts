@@ -14,6 +14,7 @@ import type {
   LoginDto,
   RefreshTokenDto,
   RegisterTenantDto,
+  RegisterUserDto,
 } from './dto/auth.dto';
 import { RESERVED_TENANT_SLUGS } from './password.policy';
 import type { AuthUser, JwtPayload } from './types';
@@ -21,6 +22,7 @@ import type { AuthUser, JwtPayload } from './types';
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
 const BCRYPT_ROUNDS = 12;
+const DEFAULT_SELF_REGISTER_ROLE = 'staff';
 
 /** Valid bcrypt hash used only to keep login timing consistent */
 const DUMMY_PASSWORD_HASH =
@@ -113,6 +115,153 @@ export class AuthService {
         email: result.user.email,
         fullName: result.user.fullName,
         roles: result.roles,
+      },
+      ...tokens,
+    };
+  }
+
+  async registerUser(dto: RegisterUserDto) {
+    const slug = dto.tenantSlug.trim().toLowerCase();
+    const email = dto.email.trim().toLowerCase();
+    const fullName = dto.fullName.trim();
+    const roleCode = DEFAULT_SELF_REGISTER_ROLE;
+
+    if (dto.password.toLowerCase().includes(slug)) {
+      throw new BadRequestException('Password must not contain tenant slug');
+    }
+    if (dto.password.toLowerCase().includes(email.split('@')[0])) {
+      throw new BadRequestException(
+        'Password must not contain email local-part',
+      );
+    }
+
+    const tenant = await this.prisma.tenant.findUnique({ where: { slug } });
+    if (!tenant || tenant.status !== 'active') {
+      throw new BadRequestException('Shop not found or inactive');
+    }
+
+    const existing = await this.prisma.user.findFirst({
+      where: { tenantId: tenant.id, email },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new ConflictException('User with this email already exists');
+    }
+
+    const location = await this.prisma.location.findFirst({
+      where: { tenantId: tenant.id, isActive: true },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, name: true, code: true },
+    });
+
+    const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
+    const employeeCount = await this.prisma.employee.count({
+      where: { tenantId: tenant.id },
+    });
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      const role = await tx.role.upsert({
+        where: {
+          tenantId_code: { tenantId: tenant.id, code: roleCode },
+        },
+        create: {
+          tenantId: tenant.id,
+          code: roleCode,
+          name: roleCode,
+        },
+        update: {},
+      });
+
+      const user = await tx.user.create({
+        data: {
+          tenantId: tenant.id,
+          email,
+          phone: dto.phone,
+          fullName,
+          passwordHash,
+          primaryLocationId: location?.id,
+          isActive: true,
+          passwordChangedAt: new Date(),
+          lastLoginAt: new Date(),
+        },
+      });
+
+      await tx.employee.create({
+        data: {
+          tenantId: tenant.id,
+          userId: user.id,
+          employeeCode: `E${String(employeeCount + 1).padStart(3, '0')}`,
+          status: 'active',
+          hiredAt: new Date(),
+          jobTitle: 'Staff',
+        },
+      });
+
+      await tx.userRole.create({
+        data: {
+          userId: user.id,
+          roleId: role.id,
+          locationId: location?.id ?? null,
+        },
+      });
+
+      if (location) {
+        await tx.membership.create({
+          data: {
+            tenantId: tenant.id,
+            userId: user.id,
+            locationId: location.id,
+            roleId: role.id,
+            status: 'active',
+          },
+        });
+      }
+
+      await tx.auditLog.create({
+        data: {
+          tenantId: tenant.id,
+          actorUserId: user.id,
+          entityType: 'user',
+          entityId: user.id,
+          action: 'auth.register_user',
+        },
+      });
+
+      return user;
+    });
+
+    const roles = [roleCode];
+    const locationId = location?.id ?? null;
+    const tokens = await this.issueTokens({
+      userId: created.id,
+      tenantId: tenant.id,
+      email: created.email,
+      fullName: created.fullName,
+      locationId,
+      storeId: locationId,
+      roles,
+    });
+
+    return {
+      tenant: {
+        id: tenant.id,
+        name: tenant.name,
+        slug: tenant.slug,
+      },
+      location: location
+        ? { id: location.id, name: location.name, code: location.code }
+        : null,
+      store: location
+        ? { id: location.id, name: location.name, code: location.code }
+        : null,
+      user: {
+        id: created.id,
+        email: created.email,
+        fullName: created.fullName,
+        roles,
+        locationId,
+        storeId: locationId,
+        tenantId: tenant.id,
       },
       ...tokens,
     };

@@ -9,13 +9,13 @@ import {
   IsOptional,
   IsString,
   IsUUID,
-  Matches,
   Max,
   MaxLength,
   Min,
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { IsInternationalPhone } from '../../../common/validators/is-international-phone';
 
 export class CreateCustomerDto {
   @ApiProperty({ example: 'Amit Kumar' })
@@ -24,10 +24,10 @@ export class CreateCustomerDto {
   @MaxLength(255)
   fullName!: string;
 
-  @ApiProperty({ example: '9876543210' })
+  @ApiProperty({ example: '+919876543210' })
   @IsString()
-  @Matches(/^[6-9]\d{9}$/, {
-    message: 'phone must be a valid 10-digit Indian mobile',
+  @IsInternationalPhone({
+    message: 'phone must be a valid phone number (any country)',
   })
   phone!: string;
 
@@ -62,10 +62,12 @@ export class UpdateCustomerDto {
   @MaxLength(255)
   fullName?: string;
 
-  @ApiPropertyOptional({ example: '9876543210' })
+  @ApiPropertyOptional({ example: '+919876543210' })
   @IsOptional()
   @IsString()
-  @Matches(/^[6-9]\d{9}$/)
+  @IsInternationalPhone({
+    message: 'phone must be a valid phone number (any country)',
+  })
   phone?: string;
 
   @ApiPropertyOptional()
@@ -170,7 +172,7 @@ export class PartyMemberInputDto {
 }
 
 export class CreatePartyDto {
-  @ApiProperty({ example: 'Sharma Wedding Party' })
+  @ApiProperty({ example: 'Event group / crew name' })
   @IsString()
   @MinLength(2)
   @MaxLength(255)

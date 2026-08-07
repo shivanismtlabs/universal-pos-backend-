@@ -17,6 +17,7 @@ import {
   CreateReturnDto,
   InspectReturnDto,
   ListReturnsQueryDto,
+  SettleDepositDto,
 } from './dto/returns.dto';
 import { ReturnsService } from './returns.service';
 
@@ -37,6 +38,29 @@ export class ReturnsController {
   @ApiOperation({ summary: 'List returns, optionally filtered by order' })
   list(@CurrentUser() user: AuthUser, @Query() query: ListReturnsQueryDto) {
     return this.returnsService.list(user, query);
+  }
+
+  @Get('candidates')
+  @ApiOperation({
+    summary:
+      'Orders with units still out — for Returns / Exchange (lifecycle-based)',
+  })
+  candidates(@CurrentUser() user: AuthUser) {
+    return this.returnsService.listCandidates(user);
+  }
+
+  @Post('orders/:orderId/settle-deposit')
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Settle rental deposit: refundAmount returned; remainder forfeited',
+  })
+  settleDeposit(
+    @CurrentUser() user: AuthUser,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Body() dto: SettleDepositDto,
+  ) {
+    return this.returnsService.settleDeposit(user, orderId, dto);
   }
 
   @Get(':id')

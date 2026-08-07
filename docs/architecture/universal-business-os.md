@@ -14,7 +14,7 @@ Your prompt asks for Shopify + NetSuite + Dynamics + Salesforce in one design. T
 |---------|----------|
 | 100k tenants, every industry, ABAC, SSO, payroll, manufacturing MRP… | Multi-year platform |
 | “No issues / every unknown case covered” | Impossible as hardcode — only possible via **modules + metadata** |
-| Current CrownTux rental app | Becomes **Rental industry pack** on top of Core |
+| Legacy rental vertical | Becomes **Rental capability pack** on top of Core |
 
 **What we design now (Phase 1 DB):**  
 Industry-agnostic **Core** + **Module registry** + **Org/IAM foundation** + **Commerce engine** (catalog, stock, orders, payments, tax, POS checkout) + **Rental module extension tables** (preserve today’s logic).

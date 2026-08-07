@@ -1,4 +1,3 @@
-import { FeeType } from '@prisma/client';
 import {
   ConflictException,
   Injectable,
@@ -10,6 +9,10 @@ import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import { PaymentsService } from '../payments/payments.service';
 import {
+  buildTaxProfile,
+  computeInvoiceTax,
+} from '../../common/tax-engine';
+import {
   ApplyLateFeeDto,
   CreateInvoiceDto,
   CreateLayawayDto,
@@ -19,8 +22,6 @@ import {
 
 type PrismaTx = Prisma.TransactionClient;
 
-const GST_RATE = 0.05;
-
 @Injectable()
 export class BillingService {
   constructor(
@@ -28,19 +29,16 @@ export class BillingService {
     private readonly paymentsService: PaymentsService,
   ) {}
 
-  // ─── Fees ────────────────────────────────────────────────────────────────
-
   async createFee(user: AuthUser, orderId: string, dto: CreateOrderFeeDto) {
     await this.assertOrder(user.tenantId, orderId);
 
-    if (dto.inventoryUnitId) {
-      const unit = await this.prisma.inventoryUnit.findFirst({
-        where: { id: dto.inventoryUnitId, tenantId: user.tenantId },
+    if (dto.stockUnitId || dto.inventoryUnitId) {
+      const unitId = dto.stockUnitId ?? dto.inventoryUnitId!;
+      const unit = await this.prisma.stockUnit.findFirst({
+        where: { id: unitId, tenantId: user.tenantId },
         select: { id: true },
       });
-      if (!unit) {
-        throw new NotFoundException('Inventory unit not found');
-      }
+      if (!unit) throw new NotFoundException('Stock unit not found');
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -48,15 +46,14 @@ export class BillingService {
         data: {
           tenantId: user.tenantId,
           orderId,
-          inventoryUnitId: dto.inventoryUnitId,
-          feeType: dto.feeType,
+          stockUnitId: dto.stockUnitId ?? dto.inventoryUnitId ?? null,
+          feeCode: dto.feeType,
           amount: dto.amount.toFixed(2),
           reason: dto.reason,
         },
       });
 
       await this.paymentsService.recalculateBalance(tx, user.tenantId, orderId);
-
       return fee;
     });
   }
@@ -69,7 +66,6 @@ export class BillingService {
     });
   }
 
-  /** Auto late fee from returnDueDate vs today (FR-BIL-03) */
   async applyLateFee(
     user: AuthUser,
     orderId: string,
@@ -95,13 +91,11 @@ export class BillingService {
     const amount = daysLate * dailyRate;
 
     return this.createFee(user, orderId, {
-      feeType: FeeType.late,
+      feeType: 'late',
       amount,
       reason: `${daysLate} day(s) late × ₹${dailyRate}/day`,
     });
   }
-
-  // ─── Layaway ─────────────────────────────────────────────────────────────
 
   async createLayaway(user: AuthUser, orderId: string, dto: CreateLayawayDto) {
     await this.assertOrder(user.tenantId, orderId);
@@ -112,7 +106,6 @@ export class BillingService {
         created.push(
           await tx.layawaySchedule.create({
             data: {
-              tenantId: user.tenantId,
               orderId,
               dueBy: new Date(installment.dueBy),
               installmentAmount: installment.installmentAmount.toFixed(2),
@@ -127,32 +120,47 @@ export class BillingService {
   async listLayaway(user: AuthUser, orderId: string) {
     await this.assertOrder(user.tenantId, orderId);
     return this.prisma.layawaySchedule.findMany({
-      where: { tenantId: user.tenantId, orderId },
+      where: { orderId },
       orderBy: { dueBy: 'asc' },
     });
   }
 
   async updateLayaway(user: AuthUser, id: string, dto: UpdateLayawayDto) {
     const layaway = await this.prisma.layawaySchedule.findFirst({
-      where: { id, tenantId: user.tenantId },
+      where: { id, order: { tenantId: user.tenantId } },
     });
     if (!layaway) {
       throw new NotFoundException('Layaway installment not found');
     }
     return this.prisma.layawaySchedule.update({
       where: { id },
-      data: { status: dto.status },
+      data: {
+        status: dto.status,
+        ...(dto.status === 'paid' ? { paidAt: new Date() } : {}),
+      },
     });
   }
 
-  // ─── Invoices ────────────────────────────────────────────────────────────
-
   async createInvoice(user: AuthUser, orderId: string, dto: CreateInvoiceDto) {
     const order = await this.assertOrder(user.tenantId, orderId);
+    const tenant = await this.prisma.tenant.findFirstOrThrow({
+      where: { id: user.tenantId },
+      select: { taxMode: true, taxId: true, settings: true },
+    });
+    const profile = buildTaxProfile({
+      taxMode: tenant.taxMode,
+      taxId: tenant.taxId,
+      settings: tenant.settings,
+    });
 
     return this.prisma.$transaction(async (tx) => {
       const subtotal = Number(order.subtotal);
-      const totalTax = subtotal * GST_RATE;
+      // Prefer already-computed order tax when present; else apply profile rate
+      const existingTax = Number(order.taxTotal ?? 0);
+      const { totalTax } =
+        existingTax > 0
+          ? { totalTax: existingTax }
+          : computeInvoiceTax(profile, subtotal);
 
       const cgst = dto.useIgst ? 0 : totalTax / 2;
       const sgst = dto.useIgst ? 0 : totalTax / 2;
@@ -163,9 +171,7 @@ export class BillingService {
         _sum: { amount: true },
       });
       const feesTotal = Number(feesAgg._sum.amount ?? 0);
-
       const grandTotal = subtotal + totalTax + feesTotal;
-
       const invoiceNumber = await this.generateInvoiceNumber(tx, user.tenantId);
 
       const invoice = await tx.invoice.create({
@@ -173,8 +179,15 @@ export class BillingService {
           tenantId: user.tenantId,
           orderId,
           invoiceNumber,
-          gstin: dto.gstin,
-          placeOfSupply: dto.placeOfSupply,
+          taxIdSnapshot: dto.gstin ?? profile.taxId ?? null,
+          taxBreakdown: {
+            cgst,
+            sgst,
+            igst,
+            rate: profile.rate,
+            taxMode: profile.taxMode,
+            placeOfSupply: dto.placeOfSupply ?? null,
+          },
           cgst: cgst.toFixed(2),
           sgst: sgst.toFixed(2),
           igst: igst.toFixed(2),
@@ -182,13 +195,12 @@ export class BillingService {
         },
       });
 
-      await tx.rentalOrder.update({
+      await tx.order.update({
         where: { id: orderId },
         data: { taxTotal: totalTax.toFixed(2) },
       });
 
       await this.paymentsService.recalculateBalance(tx, user.tenantId, orderId);
-
       return invoice;
     });
   }
@@ -201,16 +213,24 @@ export class BillingService {
     });
   }
 
-  // ─── helpers ─────────────────────────────────────────────────────────────
-
   private async assertOrder(tenantId: string, orderId: string) {
-    const order = await this.prisma.rentalOrder.findFirst({
+    const order = await this.prisma.order.findFirst({
       where: { id: orderId, tenantId },
+      include: {
+        rentalExt: {
+          select: {
+            returnDueDate: true,
+            pickupDate: true,
+            lifecycle: true,
+          },
+        },
+      },
     });
-    if (!order) {
-      throw new NotFoundException('Order not found');
-    }
-    return order;
+    if (!order) throw new NotFoundException('Order not found');
+    return {
+      ...order,
+      returnDueDate: order.rentalExt?.returnDueDate ?? null,
+    };
   }
 
   private async generateInvoiceNumber(

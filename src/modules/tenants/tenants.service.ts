@@ -45,23 +45,84 @@ export class TenantsService {
   }
 
   async updateMe(user: AuthUser, dto: UpdateTenantDto) {
+    const existing = await this.prisma.tenant.findUnique({
+      where: { id: user.tenantId },
+      select: { settings: true, taxId: true, taxMode: true },
+    });
+    if (!existing) throw new NotFoundException('Tenant not found');
+
     const data: Prisma.TenantUpdateInput = {};
     if (dto.name !== undefined) data.name = dto.name.trim();
     if (dto.taxId !== undefined) data.taxId = dto.taxId.toUpperCase();
     if (dto.gstin !== undefined) data.taxId = dto.gstin.toUpperCase();
+    if (dto.taxMode !== undefined) data.taxMode = dto.taxMode;
     if (dto.branding !== undefined)
       data.branding = dto.branding as Prisma.InputJsonValue;
-    if (dto.settings !== undefined)
-      data.settings = dto.settings as Prisma.InputJsonValue;
     if (dto.currencyCode !== undefined) data.currencyCode = dto.currencyCode;
     if (dto.locale !== undefined) data.locale = dto.locale;
     if (dto.timezone !== undefined) data.timezone = dto.timezone;
+
+    const prevSettings =
+      existing.settings && typeof existing.settings === 'object'
+        ? ({ ...(existing.settings as Record<string, unknown>) } as Record<
+            string,
+            unknown
+          >)
+        : {};
+
+    if (dto.settings !== undefined) {
+      Object.assign(prevSettings, dto.settings);
+    }
+    if (dto.tax !== undefined) {
+      const prevTax =
+        prevSettings.tax && typeof prevSettings.tax === 'object'
+          ? { ...(prevSettings.tax as Record<string, unknown>) }
+          : {};
+      if (dto.tax.ratePercent !== undefined)
+        prevTax.ratePercent = dto.tax.ratePercent;
+      if (dto.tax.inclusive !== undefined) prevTax.inclusive = dto.tax.inclusive;
+      if (dto.tax.receiptFooter !== undefined)
+        prevTax.receiptFooter = dto.tax.receiptFooter;
+      prevSettings.tax = prevTax;
+    }
+    if (dto.maxCashierDiscountPercent !== undefined) {
+      const prevPos =
+        prevSettings.pos && typeof prevSettings.pos === 'object'
+          ? { ...(prevSettings.pos as Record<string, unknown>) }
+          : {};
+      prevPos.maxCashierDiscountPercent = dto.maxCashierDiscountPercent;
+      prevSettings.pos = prevPos;
+    }
+    if (
+      dto.settings !== undefined ||
+      dto.tax !== undefined ||
+      dto.maxCashierDiscountPercent !== undefined
+    ) {
+      data.settings = prevSettings as Prisma.InputJsonValue;
+    }
 
     const tenant = await this.prisma.tenant.update({
       where: { id: user.tenantId },
       data,
       select: TENANT_SELECT,
     });
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        action: 'tenant.settings_updated',
+        entityType: 'tenant',
+        entityId: user.tenantId,
+        beforeAfter: {
+          taxMode: tenant.taxMode,
+          taxId: tenant.taxId,
+          settingsTax:
+            (tenant.settings as Record<string, unknown>)?.tax ?? null,
+        },
+      },
+    });
+
     return { ...tenant, gstin: tenant.taxId };
   }
 
@@ -109,6 +170,26 @@ export class TenantsService {
       throw new BadRequestException('code is required unless isMain is true');
     }
 
+    const sub = await this.prisma.tenantSubscription.findFirst({
+      where: { tenantId: user.tenantId, status: 'active' },
+      include: { plan: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (sub) {
+      const limits = (sub.plan.limits ?? {}) as { locations?: number };
+      const maxLoc = limits.locations;
+      if (typeof maxLoc === 'number') {
+        const used = await this.prisma.location.count({
+          where: { tenantId: user.tenantId },
+        });
+        if (used >= maxLoc) {
+          throw new BadRequestException(
+            `Plan limit reached: max ${maxLoc} locations`,
+          );
+        }
+      }
+    }
+
     let organizationId = dto.organizationId;
     if (!organizationId) {
       const def = await this.prisma.organization.findFirst({
@@ -119,7 +200,7 @@ export class TenantsService {
     }
 
     try {
-      return await this.prisma.location.create({
+      const location = await this.prisma.location.create({
         data: {
           tenantId: user.tenantId,
           organizationId,
@@ -131,6 +212,13 @@ export class TenantsService {
           isActive: true,
         },
       });
+      if (sub) {
+        await this.prisma.tenantSubscription.update({
+          where: { id: sub.id },
+          data: { locationsUsed: { increment: 1 } },
+        });
+      }
+      return location;
     } catch (e) {
       throwIfUnique(e, 'Location code already exists for this tenant');
     }

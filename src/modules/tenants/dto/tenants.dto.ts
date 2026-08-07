@@ -1,15 +1,47 @@
 import { ApiPropertyOptional, ApiProperty } from '@nestjs/swagger';
+import { TaxMode } from '@prisma/client';
 import {
   IsBoolean,
   IsIn,
+  IsNumber,
   IsObject,
   IsOptional,
   IsString,
   IsUUID,
   Matches,
+  Max,
   MaxLength,
+  Min,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
+
+export class TenantTaxSettingsDto {
+  @ApiPropertyOptional({
+    example: 5,
+    description: 'GST/VAT rate percent (0–40). Default by taxMode when omitted.',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(40)
+  ratePercent?: number;
+
+  @ApiPropertyOptional({
+    example: false,
+    description: 'When true, catalog prices already include tax',
+  })
+  @IsOptional()
+  @IsBoolean()
+  inclusive?: boolean;
+
+  @ApiPropertyOptional({ example: 'Thank you for shopping with us.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  receiptFooter?: string;
+}
 
 export class UpdateTenantDto {
   @ApiPropertyOptional({ example: 'Demo Shop' })
@@ -33,6 +65,27 @@ export class UpdateTenantDto {
   @IsString()
   @MaxLength(32)
   taxId?: string;
+
+  @ApiPropertyOptional({ enum: TaxMode })
+  @IsOptional()
+  @IsIn(Object.values(TaxMode))
+  taxMode?: TaxMode;
+
+  @ApiPropertyOptional({ type: TenantTaxSettingsDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => TenantTaxSettingsDto)
+  tax?: TenantTaxSettingsDto;
+
+  @ApiPropertyOptional({
+    example: 15,
+    description: 'Max discount % a cashier may apply without manager role',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  maxCashierDiscountPercent?: number;
 
   @ApiPropertyOptional({ example: 'INR' })
   @IsOptional()
@@ -62,7 +115,7 @@ export class UpdateTenantDto {
   branding?: Record<string, unknown>;
 
   @ApiPropertyOptional({
-    description: 'Arbitrary tenant settings JSON',
+    description: 'Arbitrary tenant settings JSON (merged). Prefer tax DTO for tax.',
     example: { taxInclusive: true },
   })
   @IsOptional()
@@ -71,7 +124,7 @@ export class UpdateTenantDto {
 }
 
 export class CreateOrganizationDto {
-  @ApiProperty({ example: 'Crown Retail Pvt Ltd' })
+  @ApiProperty({ example: 'Acme Retail Pvt Ltd' })
   @IsString()
   @MinLength(2)
   @MaxLength(100)

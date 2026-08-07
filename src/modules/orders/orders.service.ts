@@ -692,7 +692,7 @@ export class OrdersService {
           include: { product: true },
         });
         if (!level) throw new NotFoundException('Stock level not found');
-        if (level.qtyOnHand < qty) {
+        if (Number(level.qtyOnHand) < qty) {
           throw new BadRequestException('Insufficient stock');
         }
         productId = level.productId;

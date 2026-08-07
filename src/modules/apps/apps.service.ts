@@ -464,7 +464,7 @@ export class AppsService {
           },
           stockLevel: {
             id: level.id,
-            qtyOnHand: level.qtyOnHand,
+            qtyOnHand: Number(level.qtyOnHand),
             sellPrice: level.sellPrice,
           },
         };

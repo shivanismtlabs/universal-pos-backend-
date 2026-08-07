@@ -248,7 +248,7 @@ export class SuppliersService {
           stockLevelId: level.id,
           sku: level.sku,
           qtyAdded: incoming.qty,
-          qtyOnHand: updated.qtyOnHand,
+          qtyOnHand: Number(updated.qtyOnHand),
         });
       }
 

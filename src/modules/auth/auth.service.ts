@@ -38,12 +38,22 @@ export class AuthService {
   ) {}
 
   async registerTenant(dto: RegisterTenantDto) {
-    const slug = dto.tenantSlug.trim().toLowerCase();
     const email = dto.adminEmail.trim().toLowerCase();
     const fullName = dto.adminFullName.trim();
     const tenantName = dto.tenantName.trim();
-    const locationName = dto.storeName.trim();
+    const locationName = (dto.storeName?.trim() || tenantName).trim();
     const taxId = dto.gstin?.trim() || dto.taxId?.trim();
+
+    let slug =
+      dto.tenantSlug?.trim().toLowerCase() ||
+      tenantName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 40);
+    if (slug.length < 2) {
+      slug = `shop-${Date.now().toString(36)}`;
+    }
 
     if (RESERVED_TENANT_SLUGS.has(slug)) {
       throw new BadRequestException('This tenant slug is reserved');
@@ -58,9 +68,15 @@ export class AuthService {
       );
     }
 
-    const existing = await this.prisma.tenant.findUnique({ where: { slug } });
+    // If slug taken, append short suffix
+    let existing = await this.prisma.tenant.findUnique({ where: { slug } });
     if (existing) {
-      throw new ConflictException('Tenant slug already taken');
+      const suffix = Date.now().toString(36).slice(-4);
+      slug = `${slug.slice(0, 45)}-${suffix}`;
+      existing = await this.prisma.tenant.findUnique({ where: { slug } });
+      if (existing) {
+        throw new ConflictException('Tenant slug already taken');
+      }
     }
 
     const passwordHash = await bcrypt.hash(dto.adminPassword, BCRYPT_ROUNDS);

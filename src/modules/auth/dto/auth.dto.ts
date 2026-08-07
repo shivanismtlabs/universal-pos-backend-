@@ -7,12 +7,19 @@ import {
   Matches,
   MaxLength,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
 import { IsInternationalPhone } from '../../../common/validators/is-international-phone';
 import { IsStrongPassword } from '../password.policy';
 
 const toLowerTrim = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? value.trim().toLowerCase() : value;
+
+/** Empty string / null → undefined so @IsOptional works */
+const optionalLowerTrim = ({ value }: { value: unknown }) => {
+  if (value == null || value === '') return undefined;
+  return typeof value === 'string' ? value.trim().toLowerCase() : value;
+};
 
 export class RegisterTenantDto {
   @ApiProperty({ example: 'Demo Tuxedo Shop' })
@@ -21,15 +28,20 @@ export class RegisterTenantDto {
   @MaxLength(100)
   tenantName!: string;
 
-  @ApiProperty({ example: 'demo-shop', description: 'lowercase slug' })
-  @Transform(toLowerTrim)
+  @ApiPropertyOptional({
+    example: 'demo-shop',
+    description: 'Optional — auto-generated from shop name when omitted',
+  })
+  @Transform(optionalLowerTrim)
+  @IsOptional()
+  @ValidateIf((_, v) => v !== undefined)
   @IsString()
   @Matches(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, {
     message: 'tenantSlug must be lowercase kebab-case (a-z, 0-9, hyphens)',
   })
   @MinLength(2)
   @MaxLength(50)
-  tenantSlug!: string;
+  tenantSlug?: string;
 
   @ApiPropertyOptional({
     example: '27AAAAA0000A1Z5',
@@ -52,11 +64,15 @@ export class RegisterTenantDto {
   @MaxLength(32)
   taxId?: string;
 
-  @ApiProperty({ example: 'Main Store', description: 'Primary location name' })
+  @ApiPropertyOptional({
+    example: 'Main Store',
+    description: 'Optional — defaults to shop name',
+  })
+  @IsOptional()
   @IsString()
   @MinLength(2)
   @MaxLength(100)
-  storeName!: string;
+  storeName?: string;
 
   @ApiProperty({ example: 'Shop Admin' })
   @IsString()
@@ -132,8 +148,9 @@ export class LoginDto {
     example: 'demo-shop',
     description: 'Optional — if omitted, login resolves tenant from email',
   })
+  @Transform(optionalLowerTrim)
   @IsOptional()
-  @Transform(toLowerTrim)
+  @ValidateIf((_, v) => v !== undefined)
   @IsString()
   @MinLength(2)
   @MaxLength(50)

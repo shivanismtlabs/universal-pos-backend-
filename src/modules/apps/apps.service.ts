@@ -297,10 +297,8 @@ export class AppsService {
       commerce: {
         setupComplete: commerceParsed.setupComplete,
         modes: commerceModes,
-        schemas: {
-          sale: COMMERCE_SCHEMAS.sale,
-          rental: COMMERCE_SCHEMAS.rental,
-        },
+        registeredModes: Object.keys(COMMERCE_SCHEMAS),
+        schemas: COMMERCE_SCHEMAS,
         rentalLifecycle: [...RENTAL_LIFECYCLE_STATES],
       },
     };
@@ -315,14 +313,24 @@ export class AppsService {
   }
 
   /**
-   * Deprecated alias: Phase 1 enables the default universal product stack.
-   * Optional shop title / tagline still applied when provided.
+   * Onboarding / settings: persist enabled commerce modes from the registry.
    */
   async setCommerceModes(user: AuthUser, dto: SetCommerceModesDto) {
+    const selected = (
+      dto.modes?.length ? dto.modes : dto.mode ? [dto.mode] : []
+    ).filter(isCommerceMode);
+    if (!selected.length) {
+      throw new BadRequestException(
+        'Select at least one commerce mode (sale, rental, service, subscription, …)',
+      );
+    }
+    const modes = [...new Set(selected)];
+
     const tenant = await this.prisma.tenant.findUniqueOrThrow({
       where: { id: user.tenantId },
     });
     const branding = (tenant.branding ?? {}) as Record<string, unknown>;
+    const prev = (tenant.settings ?? {}) as Record<string, unknown>;
     const brandingUpdate =
       dto.shopTitle || dto.tagline
         ? {
@@ -332,81 +340,62 @@ export class AppsService {
               : {}),
             ...(dto.tagline !== undefined
               ? {
-                  tagline:
-                    dto.tagline.trim() || 'Universal POS',
+                  tagline: dto.tagline.trim() || 'Universal POS',
                 }
               : {}),
           }
         : undefined;
 
-    if (brandingUpdate || dto.shopTitle) {
-      await this.prisma.tenant.update({
-        where: { id: user.tenantId },
-        data: {
-          ...(brandingUpdate
-            ? { branding: brandingUpdate as Prisma.InputJsonValue }
-            : {}),
-          ...(dto.shopTitle ? { name: dto.shopTitle.trim() } : {}),
-        },
-      });
-    }
+    const settings = {
+      ...prev,
+      commerceModes: modes,
+      commerceSetupAt: new Date().toISOString(),
+    };
 
-    const commerce = await this.ensureUniversalCommerce(user, {
-      ...tenant,
-      settings: tenant.settings,
+    await this.prisma.tenant.update({
+      where: { id: user.tenantId },
+      data: {
+        settings: settings as Prisma.InputJsonValue,
+        ...(brandingUpdate
+          ? { branding: brandingUpdate as Prisma.InputJsonValue }
+          : {}),
+        ...(dto.shopTitle ? { name: dto.shopTitle.trim() } : {}),
+      },
     });
+
+    for (const mode of modes) {
+      await this.syncCommerceModules(user, mode);
+    }
 
     return {
       setupComplete: true,
-      modes: commerce.modes,
-      primary: 'sale' as const,
-      schemas: {
-        sale: COMMERCE_SCHEMAS.sale,
-        rental: COMMERCE_SCHEMAS.rental,
-      },
-      fields: [...SALE_PRODUCT_FIELDS, ...RENTAL_PRODUCT_FIELDS],
+      modes,
+      primary: modes[0],
+      schemas: Object.fromEntries(
+        modes.map((m) => [m, COMMERCE_SCHEMAS[m]]),
+      ),
+      registeredModes: Object.keys(COMMERCE_SCHEMAS),
       rentalLifecycle: [...RENTAL_LIFECYCLE_STATES],
       modules: await this.listTenantModules(user),
     };
   }
 
   /**
-   * Universal POS: every shop can Sell AND Rent from one dashboard.
-   * Not a shop-type chooser — both capabilities stay on; staff pick the floor tab.
+   * Bootstrap helper: sync modules for already-chosen modes.
+   * Does NOT invent modes — empty setup → FE onboarding (CommerceModeGate).
    */
   private async ensureUniversalCommerce(
     user: AuthUser,
     tenant: { id: string; settings: unknown },
   ) {
-    const prev = (tenant.settings ?? {}) as Record<string, unknown>;
-    const parsed = parseCommerceModes(prev);
-    const needsBoth =
-      !parsed.setupComplete ||
-      !parsed.modes.includes('sale') ||
-      !parsed.modes.includes('rental');
-
-    if (needsBoth) {
-      const settings = {
-        ...prev,
-        commerceModes: ['sale', 'rental'] as CommerceMode[],
-        commerceSetupAt:
-          typeof prev.commerceSetupAt === 'string'
-            ? prev.commerceSetupAt
-            : new Date().toISOString(),
-      };
-      await this.prisma.tenant.update({
-        where: { id: tenant.id },
-        data: { settings: settings as Prisma.InputJsonValue },
-      });
+    const parsed = parseCommerceModes(tenant.settings);
+    if (!parsed.setupComplete || !parsed.modes.length) {
+      return { modes: [] as CommerceMode[], setupComplete: false };
     }
-
-    // Rental stack includes sale modules + rental
-    await this.syncCommerceModules(user, 'rental');
-
-    return {
-      modes: ['sale', 'rental'] as CommerceMode[],
-      setupComplete: true,
-    };
+    for (const mode of parsed.modes) {
+      await this.syncCommerceModules(user, mode);
+    }
+    return { modes: parsed.modes, setupComplete: true };
   }
 
   /**

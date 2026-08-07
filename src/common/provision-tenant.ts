@@ -52,10 +52,38 @@ export async function ensurePlatformCatalog(tx: Tx) {
       currencyCode: 'INR',
       limits: { locations: 2, users: 10 },
       features: {
-        modules: ['core', 'iam', 'catalog', 'inventory', 'orders', 'pos', 'payments'],
+        modules: [
+          'core',
+          'iam',
+          'catalog',
+          'inventory',
+          'orders',
+          'pos',
+          'payments',
+          'rental',
+          'appointments',
+          'notify',
+          'reports',
+        ],
       },
     },
-    update: {},
+    update: {
+      features: {
+        modules: [
+          'core',
+          'iam',
+          'catalog',
+          'inventory',
+          'orders',
+          'pos',
+          'payments',
+          'rental',
+          'appointments',
+          'notify',
+          'reports',
+        ],
+      },
+    },
   });
 
   await tx.plan.upsert({
@@ -146,8 +174,14 @@ export async function provisionTenantWithAdmin(
       locale: input.locale ?? 'en-IN',
       timezone: input.timezone ?? 'Asia/Kolkata',
       status: 'active',
-      settings: {},
-      branding: { productName: input.tenantName },
+      settings: {
+        // Empty until onboarding multi-select (CommerceModeGate)
+        commerceModes: [],
+      },
+      branding: {
+        productName: input.tenantName,
+        tagline: 'Universal POS',
+      },
     },
   });
 

@@ -1,13 +1,22 @@
 import { Module } from '@nestjs/common';
+import { OrdersModule } from '../orders/orders.module';
 import { PaymentsModule } from '../payments/payments.module';
+import { CommerceModeGuard } from '../../common/guards/commerce-mode.guard';
+import { CommerceEngine } from '../commerce/commerce-engine';
 import { PosController } from './pos.controller';
 import { PosService } from './pos.service';
+import { RentalPosService } from './rental-pos.service';
 
-/** Checkout, split pay, cash/UPI/card — FR-POS */
+/** Checkout, sale + rental terminals — FR-POS */
 @Module({
-  imports: [PaymentsModule],
+  imports: [PaymentsModule, OrdersModule],
   controllers: [PosController],
-  providers: [PosService],
-  exports: [PosService],
+  providers: [
+    PosService,
+    RentalPosService,
+    CommerceEngine,
+    CommerceModeGuard,
+  ],
+  exports: [PosService, RentalPosService, CommerceEngine],
 })
 export class PosModule {}

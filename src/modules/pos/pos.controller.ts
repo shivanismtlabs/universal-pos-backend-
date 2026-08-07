@@ -7,8 +7,13 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  CommerceModeGuard,
+  RequireCommerceModes,
+} from '../../common/guards/commerce-mode.guard';
 import { Role, RoleGroup } from '../../common/roles';
 import { Roles } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -47,6 +52,8 @@ export class PosController {
   ) {}
 
   @Get('sale/schema')
+  @UseGuards(CommerceModeGuard)
+  @RequireCommerceModes('sale')
   @Roles(...RoleGroup.pos, Role.inventory)
   @ApiOperation({
     summary:
@@ -57,6 +64,8 @@ export class PosController {
   }
 
   @Get('sale/floor')
+  @UseGuards(CommerceModeGuard)
+  @RequireCommerceModes('sale')
   @Roles(...RoleGroup.pos, Role.inventory)
   @ApiOperation({
     summary: 'Sale POS floor: schema + categories + in-stock items',
@@ -226,11 +235,15 @@ export class PosController {
     summary:
       'Atomic retail sale: create order + stock + payment + close (one call)',
   })
+  @UseGuards(CommerceModeGuard)
+  @RequireCommerceModes('sale')
   saleCheckout(@CurrentUser() user: AuthUser, @Body() dto: SaleCheckoutDto) {
     return this.posService.saleCheckout(user, dto);
   }
 
   @Post('sale/prepare')
+  @UseGuards(CommerceModeGuard)
+  @RequireCommerceModes('sale')
   @Roles(...RoleGroup.pos)
   @ApiOperation({
     summary:
@@ -342,6 +355,8 @@ export class PosController {
   // ─── Universal Rental floor (any rentable item) ───────────────────────────
 
   @Get('rental/schema')
+  @UseGuards(CommerceModeGuard)
+  @RequireCommerceModes('rental')
   @Roles(...RoleGroup.pos, Role.inventory)
   @ApiOperation({
     summary:

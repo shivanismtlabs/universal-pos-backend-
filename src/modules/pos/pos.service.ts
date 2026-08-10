@@ -599,7 +599,18 @@ export class PosService {
       select: {
         id: true,
         name: true,
-        _count: { select: { products: true } },
+        // Match inventory list: only sale catalog (not rental/service items
+        // that may share category names, e.g. seed formal jackets).
+        _count: {
+          select: {
+            products: {
+              where: {
+                fulfillmentMode: FulfillmentMode.sale,
+                stockLevels: { some: {} },
+              },
+            },
+          },
+        },
       },
     });
     return rows.map((c) => ({

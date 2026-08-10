@@ -136,7 +136,7 @@ async function seedDemoShop(passwordHash: string) {
       taxId: '29AABCU9603R1ZM',
       locationName: 'MG Road Flagship',
       adminEmail: 'owner@demo.shop',
-      adminFullName: 'Shop Owner',
+      adminFullName: 'Demo Owner',
       adminPhone: '9811111111',
       passwordHash,
       moduleCodes: [
@@ -158,7 +158,7 @@ async function seedDemoShop(passwordHash: string) {
     data: {
       branding: {
         productName: 'Demo Shop',
-        tagline: 'Universal POS — any business',
+        tagline: 'Point of sale for your business',
       },
       settings: { industry: 'general', commerceModes: ['sale'] },
     },

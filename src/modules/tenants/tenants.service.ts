@@ -47,20 +47,35 @@ export class TenantsService {
   async updateMe(user: AuthUser, dto: UpdateTenantDto) {
     const existing = await this.prisma.tenant.findUnique({
       where: { id: user.tenantId },
-      select: { settings: true, taxId: true, taxMode: true },
+      select: { settings: true, taxId: true, taxMode: true, branding: true },
     });
     if (!existing) throw new NotFoundException('Tenant not found');
 
     const data: Prisma.TenantUpdateInput = {};
     if (dto.name !== undefined) data.name = dto.name.trim();
-    if (dto.taxId !== undefined) data.taxId = dto.taxId.toUpperCase();
-    if (dto.gstin !== undefined) data.taxId = dto.gstin.toUpperCase();
+    if (dto.taxId !== undefined) {
+      const v = dto.taxId.trim();
+      data.taxId = v ? v.toUpperCase() : null;
+    }
+    if (dto.gstin !== undefined) {
+      const v = dto.gstin.trim();
+      data.taxId = v ? v.toUpperCase() : null;
+    }
     if (dto.taxMode !== undefined) data.taxMode = dto.taxMode;
-    if (dto.branding !== undefined)
-      data.branding = dto.branding as Prisma.InputJsonValue;
-    if (dto.currencyCode !== undefined) data.currencyCode = dto.currencyCode;
-    if (dto.locale !== undefined) data.locale = dto.locale;
-    if (dto.timezone !== undefined) data.timezone = dto.timezone;
+    if (dto.branding !== undefined) {
+      const prev =
+        existing.branding && typeof existing.branding === 'object'
+          ? { ...(existing.branding as Record<string, unknown>) }
+          : {};
+      data.branding = {
+        ...prev,
+        ...dto.branding,
+      } as Prisma.InputJsonValue;
+    }
+    if (dto.currencyCode !== undefined)
+      data.currencyCode = dto.currencyCode.trim().toUpperCase();
+    if (dto.locale !== undefined) data.locale = dto.locale.trim();
+    if (dto.timezone !== undefined) data.timezone = dto.timezone.trim();
 
     const prevSettings =
       existing.settings && typeof existing.settings === 'object'
@@ -110,6 +125,10 @@ export class TenantsService {
       data.settings = prevSettings as Prisma.InputJsonValue;
     }
 
+    if (Object.keys(data).length === 0) {
+      throw new BadRequestException('No settings fields to update');
+    }
+
     const tenant = await this.prisma.tenant.update({
       where: { id: user.tenantId },
       data,
@@ -126,8 +145,8 @@ export class TenantsService {
         beforeAfter: {
           taxMode: tenant.taxMode,
           taxId: tenant.taxId,
-          settingsTax:
-            (tenant.settings as Record<string, unknown>)?.tax ?? null,
+          branding: tenant.branding,
+          settings: tenant.settings,
         },
       },
     });

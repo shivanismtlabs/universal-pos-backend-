@@ -27,20 +27,20 @@ export const SELL_UNIT_OPTIONS: Array<{
   {
     value: 'kg',
     label: 'Kilogram (kg)',
-    priceHint: 'Price per kg',
-    qtyHint: 'e.g. 2.5 kg — up to 3 decimals',
+    priceHint: 'Price per kilogram',
+    qtyHint: 'Decimals allowed (for example 2.500)',
   },
   {
     value: 'g',
     label: 'Gram (g)',
     priceHint: 'Price per gram',
-    qtyHint: 'Whole grams preferred (500, 1000…)',
+    qtyHint: 'Whole grams preferred',
   },
   {
     value: 'L',
     label: 'Litre (L)',
     priceHint: 'Price per litre',
-    qtyHint: 'e.g. 1.5 L — up to 3 decimals',
+    qtyHint: 'Decimals allowed (for example 1.500)',
   },
   {
     value: 'ml',

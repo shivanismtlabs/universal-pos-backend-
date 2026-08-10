@@ -144,7 +144,14 @@ export class RentalPosService {
       select: {
         id: true,
         name: true,
-        _count: { select: { products: true } },
+        // Only rental-mode products (sale catalog may share category names)
+        _count: {
+          select: {
+            products: {
+              where: { fulfillmentMode: FulfillmentMode.rental },
+            },
+          },
+        },
       },
     });
     return rows.map((c) => ({

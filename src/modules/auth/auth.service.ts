@@ -25,6 +25,7 @@ import type {
 import { assertPinAllowed, isPinSwitchEnabled } from './pin.policy';
 import { RESERVED_TENANT_SLUGS } from './password.policy';
 import type { AuthUser, JwtPayload, JwtTokenTyp } from './types';
+import { PortalAuthService } from './portal-auth.service';
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
@@ -59,6 +60,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly portal: PortalAuthService,
   ) {}
 
   async registerTenant(dto: RegisterTenantDto) {
@@ -117,6 +119,15 @@ export class AuthService {
         passwordHash,
       }),
     );
+
+    await this.portal.ensureAfterTenantRegister({
+      email,
+      fullName,
+      phone: dto.adminPhone,
+      passwordHash,
+      tenantId: result.tenant.id,
+      userId: result.user.id,
+    });
 
     const tokens = await this.issueTokens({
       userId: result.user.id,
@@ -312,105 +323,14 @@ export class AuthService {
     const profile = await this.verifyGoogleIdToken(dto.idToken);
     const email = profile.email!.trim().toLowerCase();
     const fullName = (profile.name || email.split('@')[0] || 'Owner').trim();
+    const googleSub = profile.sub || email;
 
-    if (dto.mode === 'register') {
-      const tenantName = dto.tenantName?.trim();
-      if (!tenantName || tenantName.length < 2) {
-        throw new BadRequestException('Shop name is required for Google sign-up');
-      }
-      const existing = await this.prisma.user.findFirst({
-        where: { email, isActive: true, tenant: { status: 'active' } },
-      });
-      if (existing) {
-        throw new ConflictException(
-          'This Google account already has a shop. Sign in instead.',
-        );
-      }
-      // Strong random password — user can reset later; Google is the login path
-      const password =
-        randomBytes(24).toString('base64url') + 'Aa1!';
-      return this.registerTenant({
-        tenantName,
-        adminFullName: fullName,
-        adminEmail: email,
-        adminPassword: password,
-      });
-    }
-
-    const user = await this.prisma.user.findFirst({
-      where: {
-        email,
-        isActive: true,
-        tenant: { status: 'active' },
-      },
-      include: {
-        userRoles: { include: { role: true } },
-        tenant: true,
-      },
-      orderBy: { lastLoginAt: 'desc' },
+    // Always land on organization picker (Zoho flow)
+    return this.portal.googlePortal({
+      email,
+      fullName,
+      googleSub,
     });
-
-    if (!user || user.tenant.status !== 'active') {
-      throw new UnauthorizedException(
-        'No shop found for this Google account. Create a shop first.',
-      );
-    }
-
-    if (user.lockedUntil && user.lockedUntil > new Date()) {
-      throw new UnauthorizedException(
-        'Account temporarily locked. Try again later.',
-      );
-    }
-
-    const roles = user.userRoles.map((ur) => ur.role.code);
-    const locationId = user.primaryLocationId;
-    const authUser: AuthUser = {
-      userId: user.id,
-      tenantId: user.tenantId,
-      email: user.email,
-      fullName: user.fullName,
-      locationId,
-      storeId: locationId,
-      roles,
-    };
-    const tokens = await this.issueTokens(authUser);
-
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        failedLoginAttempts: 0,
-        lockedUntil: null,
-        lastLoginAt: new Date(),
-      },
-    });
-
-    await this.prisma.auditLog.create({
-      data: {
-        tenantId: user.tenantId,
-        actorUserId: user.id,
-        entityType: 'user',
-        entityId: user.id,
-        action: 'auth.login_google',
-      },
-    });
-
-    return {
-      user: {
-        id: user.id,
-        email: user.email,
-        fullName: user.fullName,
-        roles,
-        locationId,
-        storeId: locationId,
-        tenantId: user.tenantId,
-      },
-      tenant: {
-        id: user.tenant.id,
-        slug: user.tenant.slug,
-        name: user.tenant.name,
-      },
-      ...tokens,
-    };
   }
 
   private async verifyGoogleIdToken(idToken: string): Promise<GoogleTokenInfo> {
@@ -446,6 +366,15 @@ export class AuthService {
   }
 
   async login(dto: LoginDto) {
+    // Zoho portal path (no slug): identity → organizations
+    if (!dto.tenantSlug?.trim()) {
+      const portal = await this.portal.loginPortal({
+        email: dto.email,
+        password: dto.password,
+      });
+      if (portal) return portal;
+    }
+
     const email = dto.email.trim().toLowerCase();
     const password = dto.password;
     const slug = dto.tenantSlug?.trim().toLowerCase();
@@ -493,7 +422,6 @@ export class AuthService {
         }
       }
       if (!user) {
-        // Keep timing consistent + enable lockout on known email
         await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
         user = candidates[0] ?? null;
         passwordOk = false;
@@ -555,6 +483,18 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    // Link identity for future portal logins
+    await this.portal
+      .ensureAfterTenantRegister({
+        email: user.email,
+        fullName: user.fullName,
+        phone: user.phone,
+        passwordHash: user.passwordHash,
+        tenantId: user.tenantId,
+        userId: user.id,
+      })
+      .catch(() => null);
+
     const roles = user.userRoles.map((ur) => ur.role.code);
     const locationId = user.primaryLocationId;
     const authUser: AuthUser = {
@@ -589,6 +529,8 @@ export class AuthService {
     });
 
     return {
+      stage: 'app' as const,
+      requiresOrganizationSelection: false,
       user: {
         id: user.id,
         email: user.email,

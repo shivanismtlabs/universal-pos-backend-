@@ -110,8 +110,8 @@ export function validateSellQty(qty: number, unit: SellUnit): string | null {
 export function validateSku(sku: string): string | null {
   const s = sku.trim();
   if (s.length < 1) return 'SKU is required';
-  if (s.length < 15) return 'SKU must be 15–18 characters';
-  if (s.length > 18) return 'SKU must be 15–18 characters';
+  if (s.length < 2) return 'SKU must be at least 2 characters';
+  if (s.length > 18) return 'SKU must be at most 18 characters';
   if (!/^[A-Za-z0-9][A-Za-z0-9._\-/]*$/.test(s)) {
     return 'SKU: use letters, numbers, and . _ - / only';
   }

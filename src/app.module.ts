@@ -10,7 +10,9 @@ import { AuthModule } from './modules/auth/auth.module';
 import { BillingModule } from './modules/billing/billing.module';
 import { CustomersModule } from './modules/customers/customers.module';
 import { DocumentsModule } from './modules/documents/documents.module';
+import { ExpensesModule } from './modules/expenses/expenses.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
+import { LoyaltyModule } from './modules/loyalty/loyalty.module';
 import { NotifyModule } from './modules/notify/notify.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { PaymentsModule } from './modules/payments/payments.module';
@@ -52,6 +54,8 @@ const enableQueues = process.env.ENABLE_QUEUES === 'true';
     ReturnsModule,
     ReportsModule,
     NotifyModule,
+    ExpensesModule,
+    LoyaltyModule,
   ],
 })
 export class AppModule {}

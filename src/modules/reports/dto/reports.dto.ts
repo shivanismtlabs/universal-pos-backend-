@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsDateString, IsOptional } from 'class-validator';
+import { IsDateString, IsOptional, IsUUID } from 'class-validator';
 
 export class DateRangeQueryDto {
   @ApiPropertyOptional({ example: '2026-01-01' })
@@ -11,4 +11,9 @@ export class DateRangeQueryDto {
   @IsOptional()
   @IsDateString()
   to?: string;
+
+  @ApiPropertyOptional({ description: 'Filter by location (multi-store)' })
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
 }

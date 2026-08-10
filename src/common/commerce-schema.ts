@@ -337,7 +337,7 @@ export const COMMERCE_SCHEMAS: Record<string, CommerceSchemaEntry> = {
     mode: 'sale',
     label: 'Product sales',
     description:
-      'Catalog with categories, pricing, and quantity stock for counter sales',
+      'Product catalogue with categories, pricing, and quantity stock for counter sales',
     fields: SALE_PRODUCT_FIELDS,
     categoryExamples: UNIVERSAL_CATEGORY_EXAMPLES,
     moduleStack: SALE_MODULE_STACK,
@@ -364,8 +364,9 @@ export const COMMERCE_SCHEMAS: Record<string, CommerceSchemaEntry> = {
   },
   subscription: {
     mode: 'subscription',
-    label: 'Memberships',
-    description: 'Recurring plans, enrollments, and renewals',
+    label: 'Customer memberships',
+    description:
+      'Membership plans you sell to your customers (enroll, renew, bill) — not the SaaS fee for Universal POS',
     fields: SUBSCRIPTION_PRODUCT_FIELDS,
     categoryExamples: UNIVERSAL_CATEGORY_EXAMPLES,
     moduleStack: SUBSCRIPTION_MODULE_STACK,

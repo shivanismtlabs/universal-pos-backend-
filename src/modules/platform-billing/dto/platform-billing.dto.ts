@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsNumber,
@@ -37,4 +37,35 @@ export class CreateSubscriptionDto {
   @ApiProperty()
   @IsUUID()
   planId!: string;
+}
+
+export class CreatePlanCheckoutDto {
+  @ApiProperty({ description: 'SaaS plan to purchase / upgrade to' })
+  @IsUUID()
+  planId!: string;
+
+  @ApiProperty({
+    example: 'http://13.126.105.138:3000/plan?checkout=success',
+    description: 'Browser return URL after paid Stripe Checkout',
+  })
+  @IsString()
+  @MinLength(8)
+  @MaxLength(512)
+  successUrl!: string;
+
+  @ApiProperty({
+    example: 'http://13.126.105.138:3000/plan?checkout=cancel',
+  })
+  @IsString()
+  @MinLength(8)
+  @MaxLength(512)
+  cancelUrl!: string;
+}
+
+export class ConfirmPlanCheckoutDto {
+  @ApiProperty({ description: 'Stripe Checkout Session id (cs_…)' })
+  @IsString()
+  @MinLength(8)
+  @MaxLength(128)
+  sessionId!: string;
 }

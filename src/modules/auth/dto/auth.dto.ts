@@ -184,15 +184,19 @@ export class GoogleAuthDto {
   @MinLength(20)
   idToken!: string;
 
-  @ApiProperty({ enum: ['login', 'register'] })
+  @ApiPropertyOptional({
+    enum: ['login', 'register'],
+    description: 'Optional — both modes open organization picker',
+  })
+  @IsOptional()
   @IsIn(['login', 'register'])
-  mode!: 'login' | 'register';
+  mode?: 'login' | 'register';
 
   @ApiPropertyOptional({
-    description: 'Required when mode=register — new shop name',
+    description: 'Deprecated in portal flow — create org on /organizations',
     example: 'City Furniture',
   })
-  @ValidateIf((o: GoogleAuthDto) => o.mode === 'register')
+  @IsOptional()
   @IsString()
   @MinLength(2)
   @MaxLength(100)
@@ -225,4 +229,188 @@ export class PinLoginDto {
   @IsString()
   @Matches(/^\d{4,6}$/, { message: 'PIN must be 4–6 digits' })
   pin!: string;
+}
+
+/** Zoho-style: create person account (not a shop yet) */
+export class SignupIdentityDto {
+  @ApiProperty({ example: 'Riya Sharma' })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(255)
+  fullName!: string;
+
+  @ApiProperty({ example: 'riya@shop.com' })
+  @Transform(toLowerTrim)
+  @IsEmail()
+  @MaxLength(255)
+  email!: string;
+
+  @ApiProperty({ example: 'Password123!' })
+  @IsString()
+  @IsStrongPassword()
+  password!: string;
+
+  @ApiPropertyOptional({ example: '+919876543210' })
+  @IsOptional()
+  @IsString()
+  @IsInternationalPhone({
+    message: 'phone must be a valid phone number (any country)',
+  })
+  phone?: string;
+}
+
+/** Zoho organization setup after identity */
+export class CreateOrganizationDto {
+  @ApiProperty({ example: 'City Apparel Store' })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  organizationName!: string;
+
+  @ApiPropertyOptional({ example: '+919876543210' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  phone?: string;
+
+  @ApiPropertyOptional({ example: '12 MG Road' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  addressLine1?: string;
+
+  @ApiPropertyOptional({ example: 'Bengaluru' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  city?: string;
+
+  @ApiPropertyOptional({
+    example: 'Karnataka',
+    description: 'State / province (India GST uses this)',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  state?: string;
+
+  @ApiPropertyOptional({ example: '560001' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  postalCode?: string;
+
+  @ApiPropertyOptional({ example: 'IN' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2)
+  countryCode?: string;
+
+  @ApiPropertyOptional({ example: 'INR' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(3)
+  currencyCode?: string;
+
+  @ApiPropertyOptional({ example: 'en-IN' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  locale?: string;
+
+  @ApiPropertyOptional({
+    example: 'April',
+    description: 'Fiscal year start month name or 1–12',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  fiscalYearStart?: string;
+
+  @ApiPropertyOptional({
+    example: '2026-04-01',
+    description: 'Inventory / books start date (YYYY-MM-DD)',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'inventoryStartDate must be YYYY-MM-DD',
+  })
+  inventoryStartDate?: string;
+
+  @ApiPropertyOptional({ example: '29AABCU9603R1ZM' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  taxId?: string;
+
+  @ApiPropertyOptional({ example: 'Main Store' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  storeName?: string;
+
+  @ApiPropertyOptional({ example: 'city-apparel' })
+  @Transform(optionalLowerTrim)
+  @IsOptional()
+  @ValidateIf((_, v) => v !== undefined)
+  @IsString()
+  @Matches(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+  @MinLength(2)
+  @MaxLength(50)
+  tenantSlug?: string;
+}
+
+export class SelectOrganizationDto {
+  @ApiProperty()
+  @IsUUID()
+  tenantId!: string;
+}
+
+export class ForgotPasswordDto {
+  @ApiProperty({ example: 'you@business.com' })
+  @Transform(toLowerTrim)
+  @IsEmail()
+  @MaxLength(255)
+  email!: string;
+}
+
+export class ResetPasswordDto {
+  @ApiProperty()
+  @Transform(toLowerTrim)
+  @IsEmail()
+  @MaxLength(255)
+  email!: string;
+
+  @ApiProperty({ example: '482915', description: '6-digit email OTP' })
+  @IsString()
+  @Matches(/^\d{6}$/, { message: 'OTP must be 6 digits' })
+  otp!: string;
+
+  @ApiProperty()
+  @IsString()
+  @IsStrongPassword()
+  newPassword!: string;
+}
+
+export class ForgotPinDto {
+  @ApiProperty({ description: 'Staff user who forgot their counter PIN' })
+  @IsUUID()
+  userId!: string;
+}
+
+export class ResetPinOtpDto {
+  @ApiProperty()
+  @IsUUID()
+  userId!: string;
+
+  @ApiProperty({ example: '482915' })
+  @IsString()
+  @Matches(/^\d{6}$/, { message: 'OTP must be 6 digits' })
+  otp!: string;
+
+  @ApiProperty({ example: '4829' })
+  @IsString()
+  @Matches(/^\d{4,6}$/, { message: 'PIN must be 4–6 digits' })
+  newPin!: string;
 }

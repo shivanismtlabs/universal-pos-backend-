@@ -36,13 +36,46 @@ export class ReportsController {
 
   @Get('inventory-utilization')
   @ApiOperation({ summary: 'Inventory unit counts by availability status' })
-  inventoryUtilization(@CurrentUser() user: AuthUser) {
-    return this.reportsService.inventoryUtilization(user);
+  inventoryUtilization(
+    @CurrentUser() user: AuthUser,
+    @Query() query: DateRangeQueryDto,
+  ) {
+    return this.reportsService.inventoryUtilization(user, query);
   }
 
   @Get('balances')
   @ApiOperation({ summary: 'Orders with outstanding balance (top 50)' })
-  balances(@CurrentUser() user: AuthUser) {
-    return this.reportsService.balances(user);
+  balances(
+    @CurrentUser() user: AuthUser,
+    @Query() query: DateRangeQueryDto,
+  ) {
+    return this.reportsService.balances(user, query);
+  }
+
+  @Get('product-velocity')
+  @ApiOperation({ summary: 'Top and slow product movers by qty' })
+  productVelocity(
+    @CurrentUser() user: AuthUser,
+    @Query() query: DateRangeQueryDto,
+  ) {
+    return this.reportsService.productVelocity(user, query);
+  }
+
+  @Get('staff-sales')
+  @ApiOperation({ summary: 'Sales attributed to staff who created orders' })
+  staffSales(
+    @CurrentUser() user: AuthUser,
+    @Query() query: DateRangeQueryDto,
+  ) {
+    return this.reportsService.staffSales(user, query);
+  }
+
+  @Get('tax-summary')
+  @ApiOperation({ summary: 'Tax totals from orders + GST invoice lines' })
+  taxSummary(
+    @CurrentUser() user: AuthUser,
+    @Query() query: DateRangeQueryDto,
+  ) {
+    return this.reportsService.taxSummary(user, query);
   }
 }

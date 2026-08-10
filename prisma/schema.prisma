@@ -308,12 +308,17 @@ model Tenant {
   customFieldValues  CustomFieldValue[]
   outboxEvents       OutboxEvent[]
   registerSessions   RegisterSession[]
+  expenseCategories  ExpenseCategory[]
+  expenses           Expense[]
+  coupons            Coupon[]
+  couponRedemptions  CouponRedemption[]
   // rental module
   rentalOrders       ModRentalOrder[]
   rentalParties      ModRentalParty[]
   rentalMeasurements ModRentalMeasurement[]
   rentalCleaningJobs ModRentalCleaningJob[]
   rentalDamageRecords ModRentalDamageRecord[]
+  identityMemberships IdentityTenantMembership[]
 
   @@map("tenants")
 }
@@ -432,6 +437,7 @@ model Location {
   appointments      Appointment[]
   offlineSyncEvents OfflineSyncEvent[]
   registerSessions  RegisterSession[]
+  expenses          Expense[]
   userRoles         UserRole[]
 
   @@unique([tenantId, code])
@@ -475,6 +481,60 @@ model Team {
 
 // ─── Identity / employees / RBAC ────────────────────────────────────────────
 
+/// Global person account (Zoho-style) — independent of any single shop/tenant.
+model IdentityAccount {
+  id                    String    @id @default(uuid()) @db.Uuid
+  email                 String    @unique
+  passwordHash          String?   @map("password_hash")
+  fullName              String    @map("full_name")
+  phone                 String?
+  googleSub             String?   @unique @map("google_sub")
+  failedLoginAttempts   Int       @default(0) @map("failed_login_attempts")
+  lockedUntil           DateTime? @map("locked_until") @db.Timestamptz(6)
+  refreshTokenHash      String?   @map("refresh_token_hash")
+  refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at") @db.Timestamptz(6)
+  lastLoginAt           DateTime? @map("last_login_at") @db.Timestamptz(6)
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  memberships IdentityTenantMembership[]
+
+  @@map("identity_accounts")
+}
+
+/// Links a global identity to a tenant user row (multi-org).
+model IdentityTenantMembership {
+  id         String   @id @default(uuid()) @db.Uuid
+  identityId String   @map("identity_id") @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  userId     String   @unique @map("user_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  identity IdentityAccount @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([identityId, tenantId])
+  @@index([identityId])
+  @@map("identity_tenant_memberships")
+}
+
+/// Email OTP challenges for password / PIN recovery (Universal POS).
+model AuthOtpChallenge {
+  id           String    @id @default(uuid()) @db.Uuid
+  purpose      String // password_reset | pin_reset
+  email        String
+  targetUserId String?   @map("target_user_id") @db.Uuid
+  codeHash     String    @map("code_hash")
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(6)
+  attemptCount Int       @default(0) @map("attempt_count")
+  consumedAt   DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([email, purpose, createdAt])
+  @@map("auth_otp_challenges")
+}
+
 model User {
   id                    String    @id @default(uuid()) @db.Uuid
   tenantId              String    @map("tenant_id") @db.Uuid
@@ -511,6 +571,8 @@ model User {
   returnsApproved    ReturnEvent[]       @relation("ReturnApprovedBy")
   registerSessions   RegisterSession[]
   rentalMeasurementsTaken ModRentalMeasurement[]
+  expensesCreated    Expense[]
+  identityMembership IdentityTenantMembership?
 
   @@unique([tenantId, email])
   @@map("users")
@@ -644,19 +706,21 @@ model AuditLog {
 // ─── Customers (generic party) ──────────────────────────────────────────────
 
 model Customer {
-  id             String    @id @default(uuid()) @db.Uuid
-  tenantId       String    @map("tenant_id") @db.Uuid
-  fullName       String    @map("full_name")
-  phone          String
-  email          String?
-  notes          String?
-  marketingOptIn Boolean   @default(false) @map("marketing_opt_in")
-  consentAt      DateTime? @map("consent_at") @db.Timestamptz(6)
+  id                 String    @id @default(uuid()) @db.Uuid
+  tenantId           String    @map("tenant_id") @db.Uuid
+  fullName           String    @map("full_name")
+  phone              String
+  email              String?
+  notes              String?
+  marketingOptIn     Boolean   @default(false) @map("marketing_opt_in")
+  consentAt          DateTime? @map("consent_at") @db.Timestamptz(6)
+  /// Refunded to store credit / redeemed at counter
+  storeCreditBalance Decimal   @default(0) @map("store_credit_balance") @db.Decimal(12, 2)
   /// Industry-agnostic bag (labels, tags, external ids)
-  meta           Json      @default("{}")
-  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
-  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  meta               Json      @default("{}")
+  deletedAt          DateTime? @map("deleted_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant           Tenant                 @relation(fields: [tenantId], references: [id])
   orders           Order[]
@@ -668,6 +732,7 @@ model Customer {
   rentalPartyMemberships ModRentalPartyMember[]
   rentalMeasurements ModRentalMeasurement[]
   customerSubscriptions CustomerSubscription[]
+  couponRedemptions CouponRedemption[]
 
   @@unique([tenantId, phone])
   @@index([tenantId, createdAt])
@@ -1271,6 +1336,87 @@ model CustomFieldValue {
   @@unique([definitionId, entityId])
   @@index([tenantId, entityId])
   @@map("custom_field_values")
+}
+
+// ─── Phase 2: expenses + loyalty coupons ────────────────────────────────────
+
+model ExpenseCategory {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  expenses Expense[]
+
+  @@unique([tenantId, name])
+  @@map("expense_categories")
+}
+
+model Expense {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  locationId      String?  @map("location_id") @db.Uuid
+  categoryId      String?  @map("category_id") @db.Uuid
+  amount          Decimal  @db.Decimal(12, 2)
+  spentAt         DateTime @map("spent_at") @db.Date
+  paymentMethod   String   @default("cash") @map("payment_method")
+  notes           String?
+  isPettyCash     Boolean  @default(false) @map("is_petty_cash")
+  createdById     String?  @map("created_by_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant    Tenant           @relation(fields: [tenantId], references: [id])
+  location  Location?        @relation(fields: [locationId], references: [id])
+  category  ExpenseCategory? @relation(fields: [categoryId], references: [id])
+  createdBy User?            @relation(fields: [createdById], references: [id])
+
+  @@index([tenantId, spentAt])
+  @@map("expenses")
+}
+
+/// Phase 2 loyalty path: coupons (codes % or ₹ off)
+model Coupon {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  code            String
+  description     String?
+  /// percent | fixed
+  discountType    String    @map("discount_type")
+  discountValue   Decimal   @map("discount_value") @db.Decimal(12, 2)
+  minOrderAmount  Decimal?  @map("min_order_amount") @db.Decimal(12, 2)
+  maxRedemptions  Int?      @map("max_redemptions")
+  redemptionCount Int       @default(0) @map("redemption_count")
+  isActive        Boolean   @default(true) @map("is_active")
+  startsAt        DateTime? @map("starts_at") @db.Timestamptz(6)
+  endsAt          DateTime? @map("ends_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant      Tenant             @relation(fields: [tenantId], references: [id])
+  redemptions CouponRedemption[]
+
+  @@unique([tenantId, code])
+  @@map("coupons")
+}
+
+model CouponRedemption {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  couponId   String   @map("coupon_id") @db.Uuid
+  orderId    String?  @map("order_id") @db.Uuid
+  customerId String?  @map("customer_id") @db.Uuid
+  amountOff  Decimal  @map("amount_off") @db.Decimal(12, 2)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  coupon   Coupon    @relation(fields: [couponId], references: [id])
+  customer Customer? @relation(fields: [customerId], references: [id])
+
+  @@index([tenantId, couponId])
+  @@map("coupon_redemptions")
 }
 
 // =============================================================================

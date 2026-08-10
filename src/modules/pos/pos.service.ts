@@ -63,12 +63,14 @@ import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import { OrdersService } from '../orders/orders.service';
 import { PaymentsService } from '../payments/payments.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
 import {
   AddSaleCategoryDto,
   AddSaleProductDto,
   AdjustSaleStockDto,
   CheckoutDto,
   CloseRegisterDto,
+  ImportSaleProductsDto,
   OpenRegisterDto,
   ParkSaleDto,
   PrepareSaleCheckoutDto,
@@ -88,6 +90,7 @@ const IMMEDIATE_PAY: PaymentMethod[] = [
   PaymentMethod.cash,
   PaymentMethod.card,
   PaymentMethod.upi,
+  PaymentMethod.store_credit,
 ];
 
 function money(n: number | string | Prisma.Decimal) {
@@ -100,6 +103,7 @@ export class PosService {
     private readonly prisma: PrismaService,
     private readonly paymentsService: PaymentsService,
     private readonly ordersService: OrdersService,
+    private readonly loyalty: LoyaltyService,
   ) {}
 
   /**
@@ -173,10 +177,24 @@ export class PosService {
   /** Add category from Sale POS (same for every shop) */
   async addSaleCategory(user: AuthUser, dto: AddSaleCategoryDto) {
     await this.assertSaleShop(user.tenantId);
+    const name = dto.name.trim();
+    let parentId: string | null = null;
+    if (dto.parentId) {
+      const parent = await this.prisma.category.findFirst({
+        where: { id: dto.parentId, tenantId: user.tenantId },
+        select: { id: true },
+      });
+      if (!parent) throw new NotFoundException('Parent category not found');
+      parentId = parent.id;
+    }
     try {
       return await this.prisma.category.create({
-        data: { tenantId: user.tenantId, name: dto.name.trim() },
-        select: { id: true, name: true },
+        data: {
+          tenantId: user.tenantId,
+          name,
+          parentId,
+        },
+        select: { id: true, name: true, parentId: true },
       });
     } catch (error) {
       throwIfUnique(error, 'Category name already exists');
@@ -234,10 +252,27 @@ export class PosService {
           photoUrl: (dto.image ?? dto.photoUrl)?.trim() || null,
           kind: 'physical',
           fulfillmentMode: FulfillmentMode.sale,
-          trackQty: true,
+          trackQty: dto.trackInventory !== false,
           trackSerial: false,
           basePrice: price,
-          meta: { sellUnit },
+          meta: {
+            sellUnit,
+            ...(dto.manufacturer?.trim()
+              ? { manufacturer: dto.manufacturer.trim() }
+              : {}),
+            ...(dto.barcode?.trim()
+              ? { barcode: dto.barcode.trim(), upc: dto.barcode.trim() }
+              : {}),
+            ...(dto.costPrice != null && Number.isFinite(dto.costPrice)
+              ? { costPrice: Number(dto.costPrice) }
+              : {}),
+            ...(dto.reorderPoint != null && Number.isFinite(dto.reorderPoint)
+              ? { reorderPoint: Number(dto.reorderPoint) }
+              : {}),
+            ...(dto.hsnOrSac?.trim()
+              ? { hsnOrSac: dto.hsnOrSac.trim() }
+              : {}),
+          },
         },
       });
       const level = await this.prisma.stockLevel.create({
@@ -247,7 +282,7 @@ export class PosService {
           productId: product.id,
           sku: dto.sku.trim().toUpperCase(),
           sellUnit,
-          qtyOnHand: qty,
+          qtyOnHand: dto.trackInventory === false ? 0 : qty,
           sellPrice: price.toFixed(2),
         },
       });
@@ -287,6 +322,152 @@ export class PosService {
     } catch (error) {
       throwIfUnique(error, 'SKU already exists for this shop');
     }
+  }
+
+  /**
+   * Bulk import sale items — Universal POS (any industry).
+   * Creates missing categories by name when allowed.
+   */
+  async importSaleProducts(user: AuthUser, dto: ImportSaleProductsDto) {
+    await this.assertSaleShop(user.tenantId);
+
+    const rows = dto.items ?? [];
+    if (!rows.length) {
+      throw new BadRequestException('No items to import');
+    }
+    if (rows.length > 500) {
+      throw new BadRequestException('Import at most 500 items at a time');
+    }
+
+    let locationId = dto.locationId;
+    if (!locationId) {
+      locationId = (await this.defaultLocationId(user.tenantId)) ?? undefined;
+    }
+    if (!locationId) throw new BadRequestException('No location configured');
+
+    const loc = await this.prisma.location.findFirst({
+      where: { id: locationId, tenantId: user.tenantId, isActive: true },
+      select: { id: true },
+    });
+    if (!loc) throw new NotFoundException('Location not found');
+
+    const createCats = dto.createCategories !== false;
+    const categoryCache = new Map<string, { id: string; name: string }>();
+
+    const resolveCategory = async (
+      row: (typeof rows)[0],
+      rowIndex: number,
+    ): Promise<{ id: string; name: string }> => {
+      if (row.categoryId) {
+        const c = await this.prisma.category.findFirst({
+          where: { id: row.categoryId, tenantId: user.tenantId },
+          select: { id: true, name: true },
+        });
+        if (!c) {
+          throw new BadRequestException(
+            `Row ${rowIndex + 1}: category id not found`,
+          );
+        }
+        return c;
+      }
+      const name = (row.categoryName ?? '').trim() || 'General';
+      const key = name.toLowerCase();
+      const cached = categoryCache.get(key);
+      if (cached) return cached;
+
+      let cat = await this.prisma.category.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          name: { equals: name, mode: 'insensitive' },
+        },
+        select: { id: true, name: true },
+      });
+      if (!cat) {
+        if (!createCats) {
+          throw new BadRequestException(
+            `Row ${rowIndex + 1}: category “${name}” not found`,
+          );
+        }
+        cat = await this.prisma.category.create({
+          data: { tenantId: user.tenantId, name },
+          select: { id: true, name: true },
+        });
+      }
+      categoryCache.set(key, cat);
+      return cat;
+    };
+
+    if (dto.defaultCategoryId) {
+      const def = await this.prisma.category.findFirst({
+        where: { id: dto.defaultCategoryId, tenantId: user.tenantId },
+        select: { id: true, name: true },
+      });
+      if (def) categoryCache.set('__default__', def);
+    }
+
+    const created: Array<{ sku: string; title: string; id: string }> = [];
+    const errors: Array<{ row: number; sku?: string; message: string }> = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]!;
+      try {
+        let cat: { id: string; name: string };
+        if (
+          !row.categoryId &&
+          !(row.categoryName ?? '').trim() &&
+          categoryCache.has('__default__')
+        ) {
+          cat = categoryCache.get('__default__')!;
+        } else {
+          cat = await resolveCategory(row, i);
+        }
+
+        const res = await this.addSaleProduct(user, {
+          title: row.title,
+          description: row.description,
+          categoryId: cat.id,
+          sku: row.sku,
+          sellUnit: row.sellUnit,
+          price: row.price,
+          qty: row.qty ?? 0,
+          locationId,
+          manufacturer: row.manufacturer,
+          barcode: row.barcode,
+          costPrice: row.costPrice,
+          reorderPoint: row.reorderPoint,
+          hsnOrSac: row.hsnOrSac,
+          trackInventory: row.trackInventory,
+        });
+        created.push({
+          sku: res.product.sku ?? row.sku,
+          title: res.product.title,
+          id: res.stockLevel.id,
+        });
+      } catch (e) {
+        const message =
+          e instanceof BadRequestException || e instanceof NotFoundException
+            ? String(
+                (e.getResponse() as { message?: string | string[] })?.message ??
+                  e.message,
+              )
+            : e instanceof Error
+              ? e.message
+              : 'Import failed';
+        errors.push({
+          row: i + 1,
+          sku: row.sku,
+          message: Array.isArray(message) ? message.join(', ') : message,
+        });
+      }
+    }
+
+    return {
+      mode: 'sale' as const,
+      imported: created.length,
+      failed: errors.length,
+      created,
+      errors,
+    };
   }
 
   /** All sale products (incl. zero stock) — manage + sell */
@@ -447,11 +628,15 @@ export class PosService {
     await this.assertSaleShop(user.tenantId);
     const level = await this.prisma.stockLevel.findFirst({
       where: { id: stockLevelId, tenantId: user.tenantId },
+      include: {
+        product: { select: { id: true, name: true, skuCode: true } },
+      },
     });
     if (!level) throw new NotFoundException('Product not found');
 
     const unit = normalizeSellUnit(level.sellUnit);
-    const next = Number(level.qtyOnHand) + Number(dto.delta);
+    const beforeQty = Number(level.qtyOnHand);
+    const next = beforeQty + Number(dto.delta);
     const qtyErr = validateSellQty(next, unit);
     if (qtyErr) throw new BadRequestException(qtyErr);
     if (next < 0) {
@@ -465,12 +650,88 @@ export class PosService {
       where: { id: level.id },
       data: { qtyOnHand: normalized },
     });
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        entityType: 'stock_level',
+        entityId: level.id,
+        action: 'inventory.qty_adjust',
+        beforeAfter: {
+          sku: level.sku,
+          productName: level.product?.name ?? null,
+          productSku: level.product?.skuCode ?? null,
+          locationId: level.locationId,
+          beforeQty,
+          afterQty: Number(updated.qtyOnHand),
+          delta: Number(dto.delta),
+          sellUnit: unit,
+          reason: dto.reason?.trim() || null,
+        },
+      },
+    });
+
     return {
       id: updated.id,
       sku: updated.sku,
       qty: Number(updated.qtyOnHand),
       sellUnit: updated.sellUnit,
       delta: dto.delta,
+      beforeQty,
+      reason: dto.reason?.trim() || null,
+    };
+  }
+
+  /**
+   * Zoho-style inventory adjustments history (qty changes with reason).
+   * Uses audit_logs action inventory.qty_adjust.
+   */
+  async listSaleStockAdjustments(user: AuthUser, limit = 80) {
+    await this.assertSaleShop(user.tenantId);
+    const take = Math.min(Math.max(limit || 80, 1), 200);
+    const rows = await this.prisma.auditLog.findMany({
+      where: {
+        tenantId: user.tenantId,
+        action: 'inventory.qty_adjust',
+        entityType: 'stock_level',
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: {
+        actor: { select: { fullName: true, email: true } },
+      },
+    });
+
+    return {
+      items: rows.map((r) => {
+        const b =
+          (r.beforeAfter as {
+            sku?: string;
+            productName?: string | null;
+            productSku?: string | null;
+            locationId?: string;
+            beforeQty?: number;
+            afterQty?: number;
+            delta?: number;
+            sellUnit?: string;
+            reason?: string | null;
+          } | null) ?? {};
+        return {
+          id: r.id,
+          createdAt: r.createdAt,
+          stockLevelId: r.entityId,
+          actorName: r.actor?.fullName ?? r.actor?.email ?? 'Staff',
+          productName: b.productName ?? '—',
+          sku: b.sku ?? b.productSku ?? '—',
+          beforeQty: Number(b.beforeQty ?? 0),
+          afterQty: Number(b.afterQty ?? 0),
+          delta: Number(b.delta ?? 0),
+          sellUnit: b.sellUnit ?? 'pcs',
+          reason: b.reason ?? null,
+          locationId: b.locationId ?? null,
+        };
+      }),
     };
   }
 
@@ -599,6 +860,7 @@ export class PosService {
       select: {
         id: true,
         name: true,
+        parentId: true,
         // Match inventory list: only sale catalog (not rental/service items
         // that may share category names, e.g. seed formal jackets).
         _count: {
@@ -616,6 +878,7 @@ export class PosService {
     return rows.map((c) => ({
       id: c.id,
       name: c.name,
+      parentId: c.parentId,
       productCount: c._count.products,
     }));
   }
@@ -1469,6 +1732,34 @@ export class PosService {
         const status = IMMEDIATE_PAY.includes(p.method)
           ? PaymentStatus.succeeded
           : PaymentStatus.pending;
+
+        if (
+          p.method === PaymentMethod.store_credit &&
+          status === PaymentStatus.succeeded
+        ) {
+          if (!dto.customerId) {
+            throw new BadRequestException(
+              'Store credit pay needs a customer on the sale',
+            );
+          }
+          const cust = await tx.customer.findFirst({
+            where: { id: dto.customerId, tenantId: user.tenantId },
+            select: { storeCreditBalance: true },
+          });
+          const bal = Number(cust?.storeCreditBalance ?? 0);
+          if (bal + 1e-9 < p.amount) {
+            throw new BadRequestException(
+              `Insufficient store credit (have ${bal.toFixed(2)})`,
+            );
+          }
+          await tx.customer.update({
+            where: { id: dto.customerId },
+            data: {
+              storeCreditBalance: { decrement: money(p.amount).toFixed(2) },
+            },
+          });
+        }
+
         const payment = await tx.payment.create({
           data: {
             tenantId: user.tenantId,
@@ -1530,7 +1821,6 @@ export class PosService {
     });
 
     const order = await this.loadOrder(user.tenantId, result.orderId);
-    const receipt = await this.getReceipt(user, result.orderId);
 
     const cashPaid = result.payments
       .filter((p) => p.method === PaymentMethod.cash)
@@ -1538,6 +1828,44 @@ export class PosService {
     const tendered =
       dto.cashTendered !== undefined ? Number(dto.cashTendered) : cashPaid;
     const change = Math.max(0, tendered - cashPaid);
+
+    // Persist tendered/change so reprint / getReceipt can show them
+    if (tendered > 0 || change > 0) {
+      const meta = {
+        ...((order?.meta as Record<string, unknown> | null) ?? {}),
+        cashTendered: money(tendered).toFixed(2),
+        change: money(change).toFixed(2),
+      };
+      await this.prisma.order.update({
+        where: { id: result.orderId },
+        data: { meta },
+      });
+    }
+
+    if (dto.couponCode?.trim()) {
+      try {
+        const validated = await this.loyalty.validate(user, {
+          code: dto.couponCode.trim(),
+          orderSubtotal: Math.max(
+            Number(order?.subtotal ?? 0),
+            Number(dto.discountAmount ?? 0) || 0,
+          ),
+        });
+        await this.loyalty.recordRedemption(user, {
+          couponId: validated.couponId,
+          orderId: result.orderId,
+          customerId: dto.customerId,
+          amountOff:
+            dto.discountAmount && dto.discountAmount > 0
+              ? dto.discountAmount
+              : validated.amountOff,
+        });
+      } catch {
+        // Discount already on order; redemption is best-effort
+      }
+    }
+
+    const receipt = await this.getReceipt(user, result.orderId);
 
     return {
       order,
@@ -1614,18 +1942,49 @@ export class PosService {
     const order = await this.loadOrder(user.tenantId, orderId);
     if (!order) throw new NotFoundException('Order not found');
 
+    const tenant = await this.prisma.tenant.findFirst({
+      where: { id: user.tenantId },
+      select: {
+        name: true,
+        taxId: true,
+        currencyCode: true,
+        locale: true,
+        branding: true,
+        settings: true,
+      },
+    });
+
+    const cashier = order.createdById
+      ? await this.prisma.user.findFirst({
+          where: { id: order.createdById, tenantId: user.tenantId },
+          select: { fullName: true },
+        })
+      : null;
+
     const succeededPayments = order.payments.filter(
       (p) => p.status === 'succeeded',
     );
+
+    const settings = (tenant?.settings ?? {}) as {
+      tax?: { receiptFooter?: string };
+    };
+    const branding = (tenant?.branding ?? {}) as {
+      productName?: string;
+      tagline?: string;
+    };
+    const meta = (order.meta ?? {}) as Record<string, unknown>;
 
     return {
       orderNumber: order.orderNumber,
       status: order.status,
       kind: order.kind,
+      currencyCode: tenant?.currencyCode ?? order.currencyCode ?? 'INR',
       store: {
         name: order.location.name,
         code: order.location.code,
         address: order.location.address,
+        shopName: tenant?.name ?? order.location.name,
+        taxId: tenant?.taxId ?? null,
       },
       location: order.location,
       customer: order.customer
@@ -1635,6 +1994,15 @@ export class PosService {
             email: order.customer.email,
           }
         : null,
+      cashier: cashier?.fullName ?? null,
+      branding: {
+        productName: branding.productName ?? tenant?.name ?? 'Universal POS',
+        tagline: branding.tagline ?? 'Point of sale',
+      },
+      receiptFooter:
+        typeof settings.tax?.receiptFooter === 'string'
+          ? settings.tax.receiptFooter
+          : '',
       items: order.items.map((item) => ({
         id: item.id,
         itemType: item.itemKind,
@@ -1671,6 +2039,15 @@ export class PosService {
         amount: p.amount,
         createdAt: p.createdAt,
       })),
+      cashTendered:
+        typeof meta.cashTendered === 'string' ||
+        typeof meta.cashTendered === 'number'
+          ? meta.cashTendered
+          : null,
+      change:
+        typeof meta.change === 'string' || typeof meta.change === 'number'
+          ? meta.change
+          : null,
       printedAt: new Date(),
     };
   }
@@ -2007,9 +2384,19 @@ export class PosService {
       include: {
         items: true,
         payments: true,
+        customer: { select: { id: true, storeCreditBalance: true } },
       },
     });
     if (!order) throw new NotFoundException('Closed sale not found');
+
+    if (
+      dto.refundMethod === PaymentMethod.store_credit &&
+      !order.customerId
+    ) {
+      throw new BadRequestException(
+        'Store credit refund needs a customer on the original sale',
+      );
+    }
 
     const existingPay = await this.prisma.payment.findUnique({
       where: {
@@ -2098,6 +2485,18 @@ export class PosService {
         },
       });
 
+      if (
+        dto.refundMethod === PaymentMethod.store_credit &&
+        order.customerId
+      ) {
+        await tx.customer.update({
+          where: { id: order.customerId },
+          data: {
+            storeCreditBalance: { increment: refundAmount.toFixed(2) },
+          },
+        });
+      }
+
       await this.paymentsService.recalculateBalance(
         tx,
         user.tenantId,
@@ -2107,11 +2506,22 @@ export class PosService {
       return payment;
     });
 
+    const credit =
+      dto.refundMethod === PaymentMethod.store_credit && order.customerId
+        ? await this.prisma.customer.findFirst({
+            where: { id: order.customerId },
+            select: { storeCreditBalance: true },
+          })
+        : null;
+
     return {
       orderId: order.id,
       orderNumber: order.orderNumber,
       refundPaymentId: result.id,
       amount: result.amount,
+      storeCreditBalance: credit
+        ? Number(credit.storeCreditBalance)
+        : null,
       restocked: lines.map((l) => ({
         stockLevelId: l.stockLevelId,
         quantity: l.quantity,

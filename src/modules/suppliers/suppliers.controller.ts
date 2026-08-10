@@ -16,7 +16,9 @@ import {
   CreatePurchaseOrderDto,
   CreateSupplierDto,
   ReceivePurchaseOrderDto,
+  ReturnPurchaseOrderDto,
   UpdatePurchaseOrderDto,
+  UpdateSupplierDto,
 } from './dto/suppliers.dto';
 import { SuppliersService } from './suppliers.service';
 
@@ -37,6 +39,25 @@ export class SuppliersController {
   @ApiOperation({ summary: 'List suppliers' })
   listSuppliers(@CurrentUser() user: AuthUser) {
     return this.suppliersService.listSuppliers(user);
+  }
+
+  @Get('suppliers/:id')
+  @ApiOperation({ summary: 'Get supplier' })
+  getSupplier(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.suppliersService.getSupplier(user, id);
+  }
+
+  @Patch('suppliers/:id')
+  @ApiOperation({ summary: 'Update supplier' })
+  updateSupplier(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateSupplierDto,
+  ) {
+    return this.suppliersService.updateSupplier(user, id, dto);
   }
 
   @Post('purchase-orders')
@@ -83,5 +104,17 @@ export class SuppliersController {
     @Body() dto: ReceivePurchaseOrderDto,
   ) {
     return this.suppliersService.receivePo(user, id, dto);
+  }
+
+  @Post('purchase-orders/:id/return')
+  @ApiOperation({
+    summary: 'Purchase return (RTV) — decrement received qty + shelf stock',
+  })
+  returnPo(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReturnPurchaseOrderDto,
+  ) {
+    return this.suppliersService.returnPo(user, id, dto);
   }
 }

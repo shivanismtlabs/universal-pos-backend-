@@ -11,7 +11,7 @@ export class PlatformService {
 
     const [tenants, ordersToday, paymentsToday] = await Promise.all([
       this.prisma.tenant.count(),
-      this.prisma.rentalOrder.count({
+      this.prisma.order.count({
         where: { createdAt: { gte: startOfDay } },
       }),
       this.prisma.payment.count({ where: { createdAt: { gte: startOfDay } } }),

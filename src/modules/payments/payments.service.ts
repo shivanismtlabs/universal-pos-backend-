@@ -31,6 +31,7 @@ const IMMEDIATE: PaymentMethod[] = [
   PaymentMethod.cash,
   PaymentMethod.card,
   PaymentMethod.upi,
+  PaymentMethod.store_credit,
 ];
 
 const CREDIT: PaymentType[] = [PaymentType.payment, PaymentType.deposit];
@@ -73,6 +74,38 @@ export class PaymentsService {
       const status = IMMEDIATE.includes(dto.method)
         ? PaymentStatus.succeeded
         : PaymentStatus.pending;
+
+      if (
+        dto.method === PaymentMethod.store_credit &&
+        status === PaymentStatus.succeeded &&
+        type === PaymentType.payment
+      ) {
+        const orderFull = await tx.order.findFirst({
+          where: { id: dto.orderId, tenantId: user.tenantId },
+          select: { customerId: true },
+        });
+        if (!orderFull?.customerId) {
+          throw new BadRequestException(
+            'Store credit pay needs a customer on the order',
+          );
+        }
+        const cust = await tx.customer.findFirst({
+          where: { id: orderFull.customerId, tenantId: user.tenantId },
+          select: { storeCreditBalance: true },
+        });
+        const bal = Number(cust?.storeCreditBalance ?? 0);
+        if (bal + 1e-9 < dto.amount) {
+          throw new BadRequestException(
+            `Insufficient store credit (have ${bal.toFixed(2)})`,
+          );
+        }
+        await tx.customer.update({
+          where: { id: orderFull.customerId },
+          data: {
+            storeCreditBalance: { decrement: dto.amount.toFixed(2) },
+          },
+        });
+      }
 
       let payment;
       try {

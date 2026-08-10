@@ -27,6 +27,7 @@ import {
   AdjustSaleStockDto,
   CheckoutDto,
   CloseRegisterDto,
+  ImportSaleProductsDto,
   OpenRegisterDto,
   ParkSaleDto,
   PrepareSaleCheckoutDto,
@@ -148,6 +149,21 @@ export class PosController {
     return this.posService.addSaleProduct(user, dto);
   }
 
+  @Post('sale/products/import')
+  @Roles(...RoleGroup.catalogWrite)
+  @UseGuards(CommerceModeGuard)
+  @RequireCommerceModes('sale')
+  @ApiOperation({
+    summary:
+      'Bulk import sale items (CSV upload rows) — universal catalog, any industry',
+  })
+  importSaleProducts(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: ImportSaleProductsDto,
+  ) {
+    return this.posService.importSaleProducts(user, dto);
+  }
+
   @Patch('sale/products/:id')
   @Roles(...RoleGroup.catalogWrite)
   @ApiOperation({
@@ -195,6 +211,23 @@ export class PosController {
     @Body() dto: AdjustSaleStockDto,
   ) {
     return this.posService.adjustSaleStock(user, id, dto);
+  }
+
+  @Get('sale/stock-adjustments')
+  @Roles(...RoleGroup.catalogWrite, Role.inventory)
+  @UseGuards(CommerceModeGuard)
+  @RequireCommerceModes('sale')
+  @ApiOperation({
+    summary: 'List stock quantity adjustments (Zoho Adjustments history)',
+  })
+  listSaleStockAdjustments(
+    @CurrentUser() user: AuthUser,
+    @Query('limit') limit?: string,
+  ) {
+    return this.posService.listSaleStockAdjustments(
+      user,
+      limit ? Number(limit) : undefined,
+    );
   }
 
   @Get('sale/recent')

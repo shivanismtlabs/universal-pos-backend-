@@ -190,4 +190,82 @@ export class StripeService {
       };
     });
   }
+
+  /**
+   * Hosted Stripe Checkout for SaaS plan (tenant platform billing).
+   * mode=payment — one billing cycle; recurrence is handled by product UX
+   * + next checkout, not Stripe Subscriptions, until webhooks land.
+   */
+  async createPlatformPlanCheckout(args: {
+    tenantId: string;
+    tenantSlug?: string;
+    planId: string;
+    planCode: string;
+    planName: string;
+    amountInr: number;
+    currencyCode: string;
+    customerEmail?: string;
+    successUrl: string;
+    cancelUrl: string;
+  }) {
+    if (args.amountInr < 60) {
+      throw new BadRequestException('Minimum Stripe amount is ₹60.00');
+    }
+    const amountPaise = Math.round(args.amountInr * 100);
+    const currency = (args.currencyCode || 'inr').toLowerCase();
+    const stripe = this.getClient();
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      customer_email: args.customerEmail || undefined,
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency,
+            unit_amount: amountPaise,
+            product_data: {
+              name: `Universal POS — ${args.planName}`,
+              description: `Monthly subscription (${args.planCode})`,
+            },
+          },
+        },
+      ],
+      success_url: args.successUrl,
+      cancel_url: args.cancelUrl,
+      metadata: {
+        purpose: 'platform_plan',
+        tenantId: args.tenantId,
+        planId: args.planId,
+        planCode: args.planCode,
+        amountInr: String(args.amountInr),
+      },
+      payment_intent_data: {
+        metadata: {
+          purpose: 'platform_plan',
+          tenantId: args.tenantId,
+          planId: args.planId,
+        },
+      },
+    });
+
+    if (!session.url) {
+      throw new BadRequestException('Stripe Checkout did not return a URL');
+    }
+
+    return {
+      sessionId: session.id,
+      url: session.url,
+      amountInr: args.amountInr,
+      currency: currency.toUpperCase(),
+    };
+  }
+
+  async retrieveCheckoutSession(
+    sessionId: string,
+  ): Promise<Stripe.Checkout.Session> {
+    const stripe = this.getClient();
+    return stripe.checkout.sessions.retrieve(sessionId);
+  }
 }

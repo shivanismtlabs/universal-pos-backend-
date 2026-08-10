@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   Param,
   ParseUUIDPipe,
@@ -23,14 +24,84 @@ import {
   RegisterTenantDto,
   RegisterUserDto,
   SetPinDto,
+  SignupIdentityDto,
+  CreateOrganizationDto,
+  SelectOrganizationDto,
+  ForgotPasswordDto,
+  ResetPasswordDto,
+  ForgotPinDto,
+  ResetPinOtpDto,
 } from './dto/auth.dto';
 import { RolesGuard } from './guards/roles.guard';
 import type { AuthUser } from './types';
+import { PortalAuthService } from './portal-auth.service';
+import { AuthRecoveryService } from './auth-recovery.service';
 
 @ApiTags('auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly portal: PortalAuthService,
+    private readonly recovery: AuthRecoveryService,
+  ) {}
+
+  @Public()
+  @Post('signup')
+  @Throttle({
+    default: {
+      limit: process.env.NODE_ENV === 'production' ? 5 : 40,
+      ttl: 60_000,
+    },
+  })
+  @ApiOperation({
+    summary: 'Zoho-style: create personal account (then setup organization)',
+  })
+  signup(@Body() dto: SignupIdentityDto) {
+    return this.portal.signupIdentity(dto);
+  }
+
+  @Public()
+  @Get('organizations')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @ApiOperation({ summary: 'List organizations for identity token' })
+  organizations(@Headers('authorization') authorization?: string) {
+    return this.portal
+      .requireIdentityFromAuthHeader(authorization)
+      .then((id) => this.portal.listOrganizations(id.id));
+  }
+
+  @Public()
+  @Post('organizations')
+  @Throttle({
+    default: {
+      limit: process.env.NODE_ENV === 'production' ? 5 : 30,
+      ttl: 60_000,
+    },
+  })
+  @ApiOperation({ summary: 'Create organization / shop under identity' })
+  createOrganization(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: CreateOrganizationDto,
+  ) {
+    return this.portal
+      .requireIdentityFromAuthHeader(authorization)
+      .then((id) => this.portal.createOrganization(id.id, dto));
+  }
+
+  @Public()
+  @Post('select-organization')
+  @HttpCode(200)
+  @Throttle({ default: { limit: 40, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Enter a shop (issues tenant session tokens)' })
+  selectOrganization(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: SelectOrganizationDto,
+  ) {
+    return this.portal
+      .requireIdentityFromAuthHeader(authorization)
+      .then((id) => this.portal.selectOrganization(id.id, dto.tenantId));
+  }
 
   @Public()
   @Post('register-tenant')
@@ -73,6 +144,70 @@ export class AuthController {
   @ApiOperation({ summary: 'Login with tenant slug + email + password' })
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
+  }
+
+  @Public()
+  @Post('password/forgot')
+  @HttpCode(200)
+  @Throttle({
+    default: {
+      limit: process.env.NODE_ENV === 'production' ? 5 : 30,
+      ttl: 60_000,
+    },
+  })
+  @ApiOperation({ summary: 'Send 6-digit OTP to reset password' })
+  forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.recovery.requestPasswordOtp(dto.email);
+  }
+
+  @Public()
+  @Post('password/reset')
+  @HttpCode(200)
+  @Throttle({
+    default: {
+      limit: process.env.NODE_ENV === 'production' ? 8 : 40,
+      ttl: 60_000,
+    },
+  })
+  @ApiOperation({ summary: 'Reset password with email OTP' })
+  resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.recovery.resetPassword({
+      email: dto.email,
+      otp: dto.otp,
+      newPassword: dto.newPassword,
+    });
+  }
+
+  @Public()
+  @Post('pin/forgot')
+  @HttpCode(200)
+  @Throttle({
+    default: {
+      limit: process.env.NODE_ENV === 'production' ? 8 : 40,
+      ttl: 60_000,
+    },
+  })
+  @ApiOperation({ summary: 'Send OTP to staff email to reset counter PIN' })
+  forgotPin(@Body() dto: ForgotPinDto) {
+    return this.recovery.requestPinOtp(dto.userId);
+  }
+
+  @Public()
+  @Post('pin/reset-otp')
+  @HttpCode(200)
+  @Throttle({
+    default: {
+      limit: process.env.NODE_ENV === 'production' ? 8 : 40,
+      ttl: 60_000,
+    },
+  })
+  @ApiOperation({ summary: 'Set new PIN using email OTP' })
+  resetPinOtp(@Body() dto: ResetPinOtpDto) {
+    return this.recovery.resetPin({
+      userId: dto.userId,
+      otp: dto.otp,
+      newPin: dto.newPin,
+    });
   }
 
   @Public()

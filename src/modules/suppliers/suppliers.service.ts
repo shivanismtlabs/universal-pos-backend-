@@ -35,6 +35,30 @@ export class SuppliersService {
     });
   }
 
+  async getSupplier(user: AuthUser, id: string) {
+    const row = await this.prisma.supplier.findFirst({
+      where: { id, tenantId: user.tenantId },
+    });
+    if (!row) throw new NotFoundException('Supplier not found');
+    return row;
+  }
+
+  async updateSupplier(
+    user: AuthUser,
+    id: string,
+    dto: { name?: string; contact?: string; phone?: string },
+  ) {
+    await this.getSupplier(user, id);
+    return this.prisma.supplier.update({
+      where: { id },
+      data: {
+        name: dto.name?.trim(),
+        contact: dto.contact?.trim(),
+        phone: dto.phone?.trim(),
+      },
+    });
+  }
+
   async createPo(user: AuthUser, dto: CreatePurchaseOrderDto) {
     const supplier = await this.prisma.supplier.findFirst({
       where: { id: dto.supplierId, tenantId: user.tenantId },
@@ -289,6 +313,123 @@ export class SuppliersService {
       });
 
       return { purchaseOrder: updatedPo, received: results };
+    });
+  }
+
+  /**
+   * Purchase return (RTV) — reverse stock from a received PO line.
+   */
+  async returnPo(
+    user: AuthUser,
+    id: string,
+    dto: {
+      lines: Array<{ stockLevelId: string; qty: number }>;
+      reason?: string;
+    },
+  ) {
+    const po = await this.prisma.purchaseOrder.findFirst({
+      where: { id, tenantId: user.tenantId },
+      include: { lines: true },
+    });
+    if (!po) throw new NotFoundException('Purchase order not found');
+    if (po.status === 'cancelled' || po.status === 'draft') {
+      throw new BadRequestException('PO has nothing to return yet');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const results: Array<{
+        stockLevelId: string;
+        sku: string;
+        qtyReturned: number;
+        qtyOnHand: number;
+      }> = [];
+
+      for (const line of dto.lines) {
+        if (line.qty < 1) {
+          throw new BadRequestException('Return qty must be ≥ 1');
+        }
+        const poLine = po.lines.find(
+          (l) => l.stockLevelId === line.stockLevelId,
+        );
+        if (!poLine) {
+          throw new BadRequestException(
+            `No PO line for stock level ${line.stockLevelId}`,
+          );
+        }
+        const received = Number(poLine.qtyReceived);
+        if (line.qty > received) {
+          throw new BadRequestException(
+            `Cannot return ${line.qty} (only ${received} received)`,
+          );
+        }
+
+        const level = await tx.stockLevel.findFirst({
+          where: { id: line.stockLevelId, tenantId: user.tenantId },
+        });
+        if (!level) throw new NotFoundException('Stock level not found');
+        if (Number(level.qtyOnHand) < line.qty) {
+          throw new BadRequestException(
+            `Insufficient on-hand stock for ${level.sku}`,
+          );
+        }
+
+        await tx.purchaseOrderLine.update({
+          where: { id: poLine.id },
+          data: { qtyReceived: { decrement: line.qty } },
+        });
+        const updated = await tx.stockLevel.update({
+          where: { id: level.id },
+          data: { qtyOnHand: { decrement: line.qty } },
+        });
+        results.push({
+          stockLevelId: level.id,
+          sku: level.sku,
+          qtyReturned: line.qty,
+          qtyOnHand: Number(updated.qtyOnHand),
+        });
+      }
+
+      await tx.auditLog.create({
+        data: {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          entityType: 'purchase_order',
+          entityId: po.id,
+          action: 'purchase.return',
+          beforeAfter: {
+            reason: dto.reason ?? null,
+            lines: results,
+          },
+        },
+      });
+
+      const refreshed = await tx.purchaseOrderLine.findMany({
+        where: { purchaseOrderId: po.id },
+      });
+      const anyOnShelf = refreshed.some((l) => Number(l.qtyReceived) > 0);
+      const status = anyOnShelf ? 'partial' : 'ordered';
+
+      const updatedPo = await tx.purchaseOrder.update({
+        where: { id: po.id },
+        data: { status },
+        include: {
+          supplier: true,
+          lines: {
+            include: {
+              stockLevel: {
+                select: {
+                  id: true,
+                  sku: true,
+                  qtyOnHand: true,
+                  product: { select: { name: true } },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      return { purchaseOrder: updatedPo, returned: results };
     });
   }
 }

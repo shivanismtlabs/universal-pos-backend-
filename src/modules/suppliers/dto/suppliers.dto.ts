@@ -37,6 +37,27 @@ export class CreateSupplierDto {
   phone?: string;
 }
 
+export class UpdateSupplierDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(200)
+  name?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  contact?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  phone?: string;
+}
+
 export class CreatePoLineDto {
   @ApiProperty({ description: 'Sale stock level (SKU) to restock' })
   @IsUUID()
@@ -117,4 +138,19 @@ export class ReceivePurchaseOrderDto {
   @ValidateNested({ each: true })
   @Type(() => ReceivePoLineDto)
   lines!: ReceivePoLineDto[];
+}
+
+export class ReturnPurchaseOrderDto {
+  @ApiProperty({ type: [ReceivePoLineDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => ReceivePoLineDto)
+  lines!: ReceivePoLineDto[];
+
+  @ApiPropertyOptional({ example: 'Damaged on arrive' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
 }

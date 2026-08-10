@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PaymentMethod, PaymentType } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsBoolean,
@@ -138,6 +139,15 @@ export class SaleCheckoutDto {
   @IsNumber()
   @Min(0)
   discountAmount?: number;
+
+  @ApiPropertyOptional({
+    description: 'Loyalty coupon code applied at counter (records redemption)',
+    example: 'SAVE10',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  couponCode?: string;
 }
 
 /** Create unpaid sale ticket for Stripe (card/UPI) — stock held on verify */
@@ -193,9 +203,9 @@ export class AddSaleProductDto {
   @IsUUID()
   categoryId!: string;
 
-  @ApiProperty({ example: 'ACC-USBC-CABLE-01', minLength: 15, maxLength: 18 })
+  @ApiProperty({ example: 'ACC-USBC-01', minLength: 2, maxLength: 18 })
   @IsString()
-  @MinLength(15)
+  @MinLength(2)
   @MaxLength(18)
   sku!: string;
 
@@ -242,6 +252,163 @@ export class AddSaleProductDto {
   @IsOptional()
   @IsUUID()
   locationId?: string;
+
+  @ApiPropertyOptional({ description: 'Manufacturer / brand' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  manufacturer?: string;
+
+  @ApiPropertyOptional({ description: 'Barcode / UPC / EAN' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  barcode?: string;
+
+  @ApiPropertyOptional({ description: 'Cost / purchase price per unit' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costPrice?: number;
+
+  @ApiPropertyOptional({ description: 'Low-stock reorder threshold' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  reorderPoint?: number;
+
+  @ApiPropertyOptional({ description: 'HSN / SAC code (India tax)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  hsnOrSac?: string;
+
+  @ApiPropertyOptional({ description: 'When false, stock is not decremented on sale' })
+  @IsOptional()
+  @IsBoolean()
+  trackInventory?: boolean;
+}
+
+/** One row when bulk-importing sale items (Universal — any industry). */
+export class ImportSaleProductRowDto {
+  @ApiProperty({ example: 'USB-C Cable 1m' })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(255)
+  title!: string;
+
+  @ApiProperty({ example: 'USBC-1M' })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(18)
+  sku!: string;
+
+  @ApiPropertyOptional({
+    description: 'Category name — created if missing when createCategories is true',
+    example: 'Accessories',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  categoryName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  categoryId?: string;
+
+  @ApiPropertyOptional({ enum: ['pcs', 'pack', 'kg', 'g', 'L', 'ml'] })
+  @IsOptional()
+  @IsIn(['pcs', 'pack', 'kg', 'g', 'L', 'ml'])
+  sellUnit?: string;
+
+  @ApiProperty({ example: 199 })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  price!: number;
+
+  @ApiPropertyOptional({ example: 10 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  qty?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  description?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  manufacturer?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  barcode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costPrice?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  reorderPoint?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  hsnOrSac?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  trackInventory?: boolean;
+}
+
+export class ImportSaleProductsDto {
+  @ApiProperty({ type: [ImportSaleProductRowDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(500)
+  @ValidateNested({ each: true })
+  @Type(() => ImportSaleProductRowDto)
+  items!: ImportSaleProductRowDto[];
+
+  @ApiPropertyOptional({ description: 'Target location for opening stock' })
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Create category by name when categoryId missing',
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  createCategories?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Default category when row has none',
+  })
+  @IsOptional()
+  @IsUUID()
+  defaultCategoryId?: string;
 }
 
 export class AddSaleCategoryDto {
@@ -250,6 +417,13 @@ export class AddSaleCategoryDto {
   @MinLength(1)
   @MaxLength(120)
   name!: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional parent category for nesting (Zoho-style)',
+  })
+  @IsOptional()
+  @IsUUID()
+  parentId?: string;
 }
 
 /** Update universal sale keys on an existing stock row */
@@ -334,6 +508,15 @@ export class AdjustSaleStockDto {
   @Type(() => Number)
   @IsNumber()
   delta!: number;
+
+  @ApiPropertyOptional({
+    example: 'Damaged units written off',
+    description: 'Optional note for inventory audit trail',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
 }
 
 export class RenameSaleCategoryDto {

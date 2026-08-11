@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -188,17 +189,25 @@ export class IamController {
   // ── Biometric (WebAuthn, optional) ───────────────────────────────
   @Post('webauthn/register/options')
   @Roles(...RoleGroup.all)
-  regOptions(@CurrentUser() user: AuthUser) {
-    return this.webauthn.registrationOptions(user);
+  regOptions(
+    @CurrentUser() user: AuthUser,
+    @Headers('origin') origin?: string,
+  ) {
+    return this.webauthn.registrationOptions(user, origin);
   }
 
   @Post('webauthn/register/verify')
   @Roles(...RoleGroup.all)
-  regVerify(@CurrentUser() user: AuthUser, @Body() dto: WebAuthnLabelDto) {
+  regVerify(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: WebAuthnLabelDto,
+    @Headers('origin') origin?: string,
+  ) {
     return this.webauthn.registrationVerify(
       user,
       dto.response as RegistrationResponseJSON,
       dto.label,
+      origin,
     );
   }
 
@@ -220,17 +229,24 @@ export class IamController {
   @Public()
   @Post('webauthn/login/options')
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
-  loginOptions(@Body() dto: WebAuthnAuthDto) {
-    return this.webauthn.authenticationOptions(dto.email);
+  loginOptions(
+    @Body() dto: WebAuthnAuthDto,
+    @Headers('origin') origin?: string,
+  ) {
+    return this.webauthn.authenticationOptions(dto.email, origin);
   }
 
   @Public()
   @Post('webauthn/login/verify')
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
-  loginVerify(@Body() dto: WebAuthnAuthDto) {
+  loginVerify(
+    @Body() dto: WebAuthnAuthDto,
+    @Headers('origin') origin?: string,
+  ) {
     return this.webauthn.authenticationVerify(
       dto.email,
       dto.response as AuthenticationResponseJSON,
+      origin,
     );
   }
 }

@@ -1185,6 +1185,19 @@ export class PosService {
                       skuCode: { contains: q, mode: 'insensitive' as const },
                     },
                   },
+                  {
+                    product: {
+                      barcode: { contains: q, mode: 'insensitive' as const },
+                    },
+                  },
+                  {
+                    product: {
+                      internalCode: {
+                        contains: q,
+                        mode: 'insensitive' as const,
+                      },
+                    },
+                  },
                 ],
               },
             ]
@@ -1202,6 +1215,7 @@ export class PosService {
             id: true,
             name: true,
             skuCode: true,
+            barcode: true,
             description: true,
             photoUrl: true,
             meta: true,
@@ -1229,6 +1243,7 @@ export class PosService {
           lowStock: qty > 0 && qty <= threshold,
           name: row.product.name,
           productSku: row.product.skuCode,
+          barcode: row.product.barcode,
           description: row.product.description,
           image: cover,
           photoUrl: cover,
@@ -1240,27 +1255,57 @@ export class PosService {
     };
   }
 
-  /** Exact SKU / barcode scan for sale POS */
+  /** Exact SKU / barcode scan for sale POS (product barcode or shelf SKU) */
   async saleLookup(
     user: AuthUser,
     opts: { sku: string; locationId?: string },
   ) {
-    const sku = opts.sku.trim().toUpperCase();
-    if (!sku) throw new BadRequestException('sku is required');
+    const raw = opts.sku.trim();
+    if (!raw) throw new BadRequestException('sku is required');
+    const sku = raw.toUpperCase();
 
     const locationId =
       opts.locationId ?? (await this.defaultLocationId(user.tenantId));
     if (!locationId) throw new BadRequestException('No location configured');
 
-    const row = await this.prisma.stockLevel.findFirst({
+    const productSale = {
+      fulfillmentMode: FulfillmentMode.sale,
+      isActive: true,
+    } as const;
+
+    // Prefer exact matches like a live scanner expects (SKU, catalog barcode, product code)
+    let row = await this.prisma.stockLevel.findFirst({
       where: {
         tenantId: user.tenantId,
         locationId,
-        sku: { equals: sku, mode: 'insensitive' },
-        product: {
-          fulfillmentMode: FulfillmentMode.sale,
-          isActive: true,
-        },
+        product: productSale,
+        OR: [
+          { sku: { equals: raw, mode: 'insensitive' } },
+          { sku: { equals: sku, mode: 'insensitive' } },
+          { product: { skuCode: { equals: raw, mode: 'insensitive' } } },
+          { product: { skuCode: { equals: sku, mode: 'insensitive' } } },
+          { product: { barcode: { equals: raw, mode: 'insensitive' } } },
+          { product: { barcode: { equals: sku, mode: 'insensitive' } } },
+          {
+            product: {
+              internalCode: { equals: raw, mode: 'insensitive' },
+            },
+          },
+          {
+            product: {
+              variants: {
+                some: {
+                  OR: [
+                    { barcode: { equals: raw, mode: 'insensitive' } },
+                    { barcode: { equals: sku, mode: 'insensitive' } },
+                    { skuCode: { equals: raw, mode: 'insensitive' } },
+                    { skuCode: { equals: sku, mode: 'insensitive' } },
+                  ],
+                },
+              },
+            },
+          },
+        ],
       },
       include: {
         product: {
@@ -1268,6 +1313,7 @@ export class PosService {
             id: true,
             name: true,
             skuCode: true,
+            barcode: true,
             photoUrl: true,
             category: { select: { id: true, name: true } },
           },
@@ -1275,10 +1321,14 @@ export class PosService {
       },
     });
 
-    if (!row) throw new NotFoundException(`SKU not found: ${sku}`);
+    if (!row) {
+      throw new NotFoundException(`SKU / barcode not found: ${raw}`);
+    }
     const onHand = Number(row.qtyOnHand);
     if (onHand <= 0) {
-      throw new BadRequestException(`Out of stock: ${sku}`);
+      throw new BadRequestException(
+        `Out of stock: ${row.product.barcode || row.sku}`,
+      );
     }
 
     return {
@@ -1289,6 +1339,7 @@ export class PosService {
       sellUnit: row.sellUnit,
       name: row.product.name,
       productSku: row.product.skuCode,
+      barcode: row.product.barcode,
       image: row.product.photoUrl,
       photoUrl: row.product.photoUrl,
       category: row.product.category,

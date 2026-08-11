@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -21,35 +22,110 @@ const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
 @Injectable()
 export class IamWebAuthnService {
+  private readonly log = new Logger(IamWebAuthnService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly auth: AuthService,
   ) {}
 
-  private rpID() {
-    return this.config.get<string>('WEBAUTHN_RP_ID') || 'localhost';
-  }
-
   private rpName() {
     return this.config.get<string>('WEBAUTHN_RP_NAME') || 'Universal POS';
   }
 
-  private origin() {
-    return (
+  /** Comma-separated allowed browser origins (scheme + host + port). */
+  private configuredOrigins(): string[] {
+    const raw =
       this.config.get<string>('WEBAUTHN_ORIGIN') ||
       this.config.get<string>('FRONTEND_URL') ||
-      'http://localhost:3000'
-    );
+      'http://localhost:3000';
+    return [
+      ...new Set(
+        raw
+          .split(/[,\s]+/)
+          .map((s) => s.trim().replace(/\/$/, ''))
+          .filter(Boolean),
+      ),
+    ];
   }
 
-  async registrationOptions(user: AuthUser) {
+  /**
+   * Live apps serve FE from several hosts (localhost, 127.0.0.1, prod HTTPS).
+   * RP ID must match the browser host name used by the page origin.
+   */
+  private resolveRpContext(clientOrigin?: string | null): {
+    rpID: string;
+    origin: string;
+  } {
+    const allowed = this.configuredOrigins();
+    const envRp = this.config.get<string>('WEBAUTHN_RP_ID')?.trim() || '';
+    let origin = allowed[0] || 'http://localhost:3000';
+
+    const normalizedClient = clientOrigin?.trim().replace(/\/$/, '') || '';
+    if (normalizedClient) {
+      if (allowed.includes(normalizedClient)) {
+        origin = normalizedClient;
+      } else {
+        try {
+          const clientHost = new URL(normalizedClient).hostname;
+          const hostMatch = allowed.find((o) => {
+            try {
+              return new URL(o).hostname === clientHost;
+            } catch {
+              return false;
+            }
+          });
+          // Accept exact client origin when host is known (port/scheme variants)
+          if (hostMatch || clientHost === 'localhost' || clientHost === '127.0.0.1') {
+            origin = normalizedClient;
+          } else if (envRp && (clientHost === envRp || clientHost.endsWith(`.${envRp}`))) {
+            origin = normalizedClient;
+          }
+        } catch {
+          /* keep default */
+        }
+      }
+    }
+
+    let host = 'localhost';
+    try {
+      host = new URL(origin).hostname;
+    } catch {
+      /* default */
+    }
+
+    // Prefer explicit RP ID only when it is parent of or equal to current host
+    let rpID = host;
+    if (envRp) {
+      if (
+        host === envRp ||
+        host.endsWith(`.${envRp}`) ||
+        (envRp === 'localhost' && (host === 'localhost' || host === '127.0.0.1'))
+      ) {
+        // For 127.0.0.1 the browser RP ID must be 127.0.0.1, not "localhost"
+        rpID =
+          host === '127.0.0.1'
+            ? '127.0.0.1'
+            : envRp === 'localhost' && host === 'localhost'
+              ? 'localhost'
+              : host === envRp || host.endsWith(`.${envRp}`)
+                ? envRp
+                : host;
+      }
+    }
+
+    return { rpID, origin };
+  }
+
+  async registrationOptions(user: AuthUser, clientOrigin?: string | null) {
+    const { rpID } = this.resolveRpContext(clientOrigin);
     const existing = await this.prisma.webAuthnCredential.findMany({
       where: { userId: user.userId },
     });
     const options = await generateRegistrationOptions({
       rpName: this.rpName(),
-      rpID: this.rpID(),
+      rpID,
       userName: user.email,
       userDisplayName: user.fullName,
       userID: new TextEncoder().encode(user.userId),
@@ -59,9 +135,10 @@ export class IamWebAuthnService {
         transports: c.transports as AuthenticatorTransportFuture[],
       })),
       authenticatorSelection: {
+        // Platform biometric (Windows Hello / Face ID / Touch ID) preferred;
+        // omit attachment so USB keys still work on the same flow.
         residentKey: 'preferred',
         userVerification: 'preferred',
-        authenticatorAttachment: 'platform',
       },
     });
 
@@ -81,6 +158,7 @@ export class IamWebAuthnService {
     user: AuthUser,
     body: RegistrationResponseJSON,
     label?: string,
+    clientOrigin?: string | null,
   ) {
     const row = await this.prisma.webAuthnChallenge.findFirst({
       where: {
@@ -92,16 +170,24 @@ export class IamWebAuthnService {
     });
     if (!row) throw new BadRequestException('Challenge expired — try again');
 
+    const { rpID, origin } = this.resolveRpContext(clientOrigin);
     let verification;
     try {
       verification = await verifyRegistrationResponse({
         response: body,
         expectedChallenge: row.challenge,
-        expectedOrigin: this.origin(),
-        expectedRPID: this.rpID(),
+        expectedOrigin: origin,
+        expectedRPID: rpID,
       });
-    } catch {
-      throw new BadRequestException('Biometric registration failed');
+    } catch (e) {
+      this.log.warn(
+        `WebAuthn register verify failed (origin=${origin} rpID=${rpID}): ${
+          e instanceof Error ? e.message : e
+        }`,
+      );
+      throw new BadRequestException(
+        'Biometric registration failed — use HTTPS (or localhost), and ensure WEBAUTHN_ORIGIN matches this site',
+      );
     }
 
     if (!verification.verified || !verification.registrationInfo) {
@@ -153,28 +239,42 @@ export class IamWebAuthnService {
   }
 
   /** Public: start biometric login for email (optional path). */
-  async authenticationOptions(email: string) {
+  async authenticationOptions(
+    email: string,
+    clientOrigin?: string | null,
+  ) {
     const normalized = email.trim().toLowerCase();
-    const dbUser = await this.prisma.user.findFirst({
-      where: { email: normalized, isActive: true },
-      include: { webAuthnCredentials: true },
-    });
-    if (!dbUser?.webAuthnCredentials.length) {
-      throw new BadRequestException('No biometric credentials for this account');
+    if (!normalized) {
+      throw new BadRequestException('Email is required for biometric sign-in');
     }
 
+    // All active staff with this email who registered a passkey
+    const creds = await this.prisma.webAuthnCredential.findMany({
+      where: {
+        user: { email: normalized, isActive: true },
+      },
+      include: { user: { select: { id: true } } },
+    });
+    if (!creds.length) {
+      throw new BadRequestException(
+        'No biometric credentials for this account — register under Settings first',
+      );
+    }
+
+    const { rpID } = this.resolveRpContext(clientOrigin);
     const options = await generateAuthenticationOptions({
-      rpID: this.rpID(),
-      allowCredentials: dbUser.webAuthnCredentials.map((c) => ({
+      rpID,
+      allowCredentials: creds.map((c) => ({
         id: c.credentialId,
         transports: c.transports as AuthenticatorTransportFuture[],
       })),
       userVerification: 'preferred',
     });
 
+    // Challenge is keyed by email so multi-tenant same-email still works
     await this.prisma.webAuthnChallenge.create({
       data: {
-        userId: dbUser.id,
+        userId: creds[0].userId,
         email: normalized,
         challenge: options.challenge,
         type: 'authentication',
@@ -188,6 +288,7 @@ export class IamWebAuthnService {
   async authenticationVerify(
     email: string,
     body: AuthenticationResponseJSON,
+    clientOrigin?: string | null,
   ) {
     const normalized = email.trim().toLowerCase();
     const challenge = await this.prisma.webAuthnChallenge.findFirst({
@@ -215,13 +316,14 @@ export class IamWebAuthnService {
       throw new UnauthorizedException('Invalid credential');
     }
 
+    const { rpID, origin } = this.resolveRpContext(clientOrigin);
     let verification;
     try {
       verification = await verifyAuthenticationResponse({
         response: body,
         expectedChallenge: challenge.challenge,
-        expectedOrigin: this.origin(),
-        expectedRPID: this.rpID(),
+        expectedOrigin: origin,
+        expectedRPID: rpID,
         credential: {
           id: cred.credentialId,
           publicKey: new Uint8Array(cred.publicKey),
@@ -229,8 +331,15 @@ export class IamWebAuthnService {
           transports: cred.transports as AuthenticatorTransportFuture[],
         },
       });
-    } catch {
-      throw new UnauthorizedException('Biometric verification failed');
+    } catch (e) {
+      this.log.warn(
+        `WebAuthn auth verify failed (origin=${origin} rpID=${rpID}): ${
+          e instanceof Error ? e.message : e
+        }`,
+      );
+      throw new UnauthorizedException(
+        'Biometric verification failed — origin/RP mismatch or cancelled',
+      );
     }
 
     if (!verification.verified) {
@@ -246,10 +355,9 @@ export class IamWebAuthnService {
     });
 
     await this.prisma.webAuthnChallenge.deleteMany({
-      where: { userId: cred.userId, type: 'authentication' },
+      where: { email: normalized, type: 'authentication' },
     });
 
-    // Reuse password-login path by issuing tokens
     return this.auth.issueSessionForUser(cred.userId);
   }
 }

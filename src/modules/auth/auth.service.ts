@@ -11,6 +11,7 @@ import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { RoleGroup } from '../../common/roles';
+import { expandPermissions } from '../../common/rbac';
 import { PrismaService } from '../../database/database.module';
 import { provisionTenantWithAdmin } from '../../common/provision-tenant';
 import type {
@@ -496,6 +497,7 @@ export class AuthService {
       .catch(() => null);
 
     const roles = user.userRoles.map((ur) => ur.role.code);
+    const permissions = await this.loadPermissionsForUser(user.id, roles);
     const locationId = user.primaryLocationId;
     const authUser: AuthUser = {
       userId: user.id,
@@ -505,6 +507,7 @@ export class AuthService {
       locationId,
       storeId: locationId,
       roles,
+      permissions,
     };
 
     const tokens = await this.issueTokens(authUser);
@@ -536,6 +539,7 @@ export class AuthService {
         email: user.email,
         fullName: user.fullName,
         roles,
+        permissions,
         locationId,
         storeId: locationId,
         tenantId: user.tenantId,
@@ -689,12 +693,27 @@ export class AuthService {
 
     const { settings: tenantSettings, ...tenantRest } = dbUser.tenant;
 
+    const roles = dbUser.userRoles.map((ur) => ur.role.code);
+    const roleIds = dbUser.userRoles.map((ur) => ur.roleId);
+    const permRows =
+      roleIds.length > 0
+        ? await this.prisma.rolePermission.findMany({
+            where: { roleId: { in: roleIds } },
+            select: { permission: { select: { code: true } } },
+          })
+        : [];
+    const permissions = expandPermissions(
+      roles,
+      permRows.map((r) => r.permission.code),
+    );
+
     return {
       id: dbUser.id,
       email: dbUser.email,
       fullName: dbUser.fullName,
       phone: dbUser.phone,
-      roles: dbUser.userRoles.map((ur) => ur.role.code),
+      roles,
+      permissions,
       pinSet: Boolean(dbUser.pinHash),
       pinSwitchEnabled: isPinSwitchEnabled(tenantSettings),
       tenant: tenantRest,
@@ -1139,6 +1158,89 @@ export class AuthService {
         refreshTokenExpiresAt: null,
       },
     });
+  }
+
+  /**
+   * Build full shop session for an existing user (password, Google, biometric).
+   */
+  async issueSessionForUser(userId: string) {
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, isActive: true, tenant: { status: 'active' } },
+      include: {
+        tenant: true,
+        userRoles: { include: { role: true } },
+      },
+    });
+    if (!user) throw new UnauthorizedException('User not found');
+
+    const roles = user.userRoles.map((ur) => ur.role.code);
+    const permissions = await this.loadPermissionsForUser(
+      user.id,
+      roles,
+    );
+    const locationId = user.primaryLocationId;
+    const authUser: AuthUser = {
+      userId: user.id,
+      tenantId: user.tenantId,
+      email: user.email,
+      fullName: user.fullName,
+      locationId,
+      storeId: locationId,
+      roles,
+      permissions,
+    };
+
+    const tokens = await this.issueTokens(authUser);
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        lastLoginAt: new Date(),
+      },
+    });
+
+    return {
+      stage: 'app' as const,
+      requiresOrganizationSelection: false,
+      user: {
+        id: user.id,
+        email: user.email,
+        fullName: user.fullName,
+        roles,
+        permissions,
+        locationId,
+        storeId: locationId,
+        tenantId: user.tenantId,
+        pinSet: Boolean(user.pinHash),
+      },
+      tenant: {
+        id: user.tenant.id,
+        slug: user.tenant.slug,
+        name: user.tenant.name,
+      },
+      ...tokens,
+    };
+  }
+
+  private async loadPermissionsForUser(userId: string, roles: string[]) {
+    const roleIds = await this.prisma.userRole.findMany({
+      where: { userId },
+      select: { roleId: true },
+    });
+    const ids = roleIds.map((r) => r.roleId);
+    const permRows =
+      ids.length > 0
+        ? await this.prisma.rolePermission.findMany({
+            where: { roleId: { in: ids } },
+            select: { permission: { select: { code: true } } },
+          })
+        : [];
+    return expandPermissions(
+      roles,
+      permRows.map((r) => r.permission.code),
+    );
   }
 
   private parseTtlToMs(ttl: string): number {

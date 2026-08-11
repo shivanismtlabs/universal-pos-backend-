@@ -131,6 +131,7 @@ export const DEFAULT_ROLES = [
   'cashier',
   'fitter',
   'inventory',
+  'accountant',
   'staff',
 ] as const;
 
@@ -140,6 +141,9 @@ export const DEFAULT_PERMISSION_CODES = [
   'price_change',
   'users.manage',
   'roles.manage',
+  'attendance.manage',
+  'attendance.self',
+  'shifts.manage',
   'catalog.read',
   'catalog.write',
   'inventory.read',
@@ -152,6 +156,10 @@ export const DEFAULT_PERMISSION_CODES = [
   'appointments.manage',
   'notify.send',
   'reports.read',
+  'expenses.manage',
+  'suppliers.manage',
+  'settings.manage',
+  'plan.manage',
 ] as const;
 
 /** Modules enabled for a new tenant by default (IAM foundation). */

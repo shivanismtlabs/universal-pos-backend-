@@ -19,6 +19,7 @@ const ASSIGNABLE_BY_MANAGER = new Set([
   'inventory',
   'manager',
   'staff',
+  'accountant',
 ]);
 
 const USER_SELECT = {
@@ -71,7 +72,7 @@ function toUserView(
 export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Only shop admin may grant admin. Managers may invite day-ops roles only. */
+  /** Only shop admin may grant admin. Managers may invite day-ops + custom non-admin roles. */
   private assertCanAssignRole(actor: AuthUser, roleCode: string) {
     const code = roleCode.trim().toLowerCase();
     const isAdmin = actor.roles.includes('admin');
@@ -84,7 +85,10 @@ export class UsersService {
       return;
     }
     if (isAdmin) return;
-    if (!ASSIGNABLE_BY_MANAGER.has(code)) {
+    if (ASSIGNABLE_BY_MANAGER.has(code)) return;
+    // Custom roles: manager can assign if role exists and is not admin system
+    // (checked later when role row is loaded)
+    if (!/^[a-z][a-z0-9_]{1,39}$/.test(code)) {
       throw new BadRequestException(`Cannot assign role: ${code}`);
     }
   }
@@ -114,17 +118,42 @@ export class UsersService {
 
     try {
       const created = await this.prisma.$transaction(async (tx) => {
-        const role = await tx.role.upsert({
+        let role = await tx.role.findUnique({
           where: {
             tenantId_code: { tenantId: user.tenantId, code: roleCode },
           },
-          create: {
-            tenantId: user.tenantId,
-            code: roleCode,
-            name: roleCode,
-          },
-          update: {},
         });
+        if (!role) {
+          if (!ASSIGNABLE_BY_MANAGER.has(roleCode) && roleCode !== 'admin') {
+            throw new BadRequestException(
+              `Unknown role: ${roleCode}. Create it under Roles & permissions first.`,
+            );
+          }
+          role = await tx.role.create({
+            data: {
+              tenantId: user.tenantId,
+              code: roleCode,
+              name: roleCode,
+              isSystem: true,
+            },
+          });
+        }
+        if (
+          role.isSystem &&
+          role.code === 'admin' &&
+          !user.roles.includes('admin')
+        ) {
+          throw new BadRequestException(
+            'Only the shop owner (admin) can grant admin access',
+          );
+        }
+        if (
+          !user.roles.includes('admin') &&
+          role.isSystem &&
+          !ASSIGNABLE_BY_MANAGER.has(role.code)
+        ) {
+          throw new BadRequestException(`Cannot assign role: ${role.code}`);
+        }
 
         const newUser = await tx.user.create({
           data: {

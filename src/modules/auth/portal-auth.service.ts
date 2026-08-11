@@ -16,6 +16,7 @@ import {
   registryToDbPayload,
 } from '../../common/business-config';
 import { isCommerceMode, moduleStackForMode } from '../../common/commerce-schema';
+import { expandPermissions } from '../../common/rbac';
 import { PrismaService } from '../../database/database.module';
 import { RESERVED_TENANT_SLUGS } from './password.policy';
 import type {
@@ -484,6 +485,18 @@ export class PortalAuthService {
 
     const user = membership.user;
     const roles = user.userRoles.map((ur) => ur.role.code);
+    const roleIds = user.userRoles.map((ur) => ur.roleId);
+    const permRows =
+      roleIds.length > 0
+        ? await this.prisma.rolePermission.findMany({
+            where: { roleId: { in: roleIds } },
+            select: { permission: { select: { code: true } } },
+          })
+        : [];
+    const permissions = expandPermissions(
+      roles,
+      permRows.map((r) => r.permission.code),
+    );
     const locationId = user.primaryLocationId;
 
     const tokens = await this.issueTenantTokens({
@@ -517,6 +530,7 @@ export class PortalAuthService {
         email: user.email,
         fullName: user.fullName,
         roles,
+        permissions,
         locationId,
         storeId: locationId,
         tenantId: user.tenantId,

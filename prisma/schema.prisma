@@ -280,6 +280,10 @@ model Tenant {
   featureFlags       FeatureFlag[]
   tenantModules      TenantModule[]
   roles              Role[]
+  workShifts         WorkShift[]
+  shiftAssignments   ShiftAssignment[]
+  attendanceEntries  AttendanceEntry[]
+  webAuthnCredentials WebAuthnCredential[]
   auditLogs          AuditLog[]
   customers          Customer[]
   categories         Category[]
@@ -441,6 +445,8 @@ model Location {
   registerSessions  RegisterSession[]
   expenses          Expense[]
   userRoles         UserRole[]
+  shiftAssignments  ShiftAssignment[]
+  attendanceEntries AttendanceEntry[]
 
   @@unique([tenantId, code])
   @@map("locations")
@@ -605,6 +611,9 @@ model User {
   rentalMeasurementsTaken ModRentalMeasurement[]
   expensesCreated    Expense[]
   identityMembership IdentityTenantMembership?
+  shiftAssignments   ShiftAssignment[]
+  attendanceEntries  AttendanceEntry[]
+  webAuthnCredentials WebAuthnCredential[]
 
   @@unique([tenantId, email])
   @@map("users")
@@ -713,6 +722,111 @@ model RolePermission {
 
   @@id([roleId, permissionId])
   @@map("role_permissions")
+}
+
+/// Named work shift template (e.g. Morning 09:00–17:00)
+model WorkShift {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  name        String
+  code        String?
+  /// HH:mm local
+  startTime   String   @map("start_time")
+  /// HH:mm local
+  endTime     String   @map("end_time")
+  /// 0=Sun … 6=Sat; empty = any day
+  daysOfWeek  Int[]    @default([]) @map("days_of_week")
+  color       String?
+  isActive    Boolean  @default(true) @map("is_active")
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignments ShiftAssignment[]
+
+  @@index([tenantId])
+  @@map("work_shifts")
+}
+
+/// Staff assigned to a shift on a calendar date
+model ShiftAssignment {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  shiftId    String   @map("shift_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  locationId String?  @map("location_id") @db.Uuid
+  /// Calendar day (tenant local date at midnight UTC-ish; stored as date)
+  workDate   DateTime @map("work_date") @db.Date
+  notes      String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  shift    WorkShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  location Location? @relation(fields: [locationId], references: [id])
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([shiftId, userId, workDate])
+  @@index([tenantId, workDate])
+  @@map("shift_assignments")
+}
+
+/// Clock-in / clock-out attendance
+model AttendanceEntry {
+  id           String    @id @default(uuid()) @db.Uuid
+  tenantId     String    @map("tenant_id") @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  locationId   String?   @map("location_id") @db.Uuid
+  clockInAt    DateTime  @map("clock_in_at") @db.Timestamptz(6)
+  clockOutAt   DateTime? @map("clock_out_at") @db.Timestamptz(6)
+  /// pin | password | biometric | manual
+  method       String    @default("manual")
+  notes        String?
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  location Location? @relation(fields: [locationId], references: [id])
+
+  @@index([tenantId, userId, clockInAt])
+  @@map("attendance_entries")
+}
+
+/// WebAuthn / platform biometric (passkey) credentials
+model WebAuthnCredential {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  credentialId    String   @unique @map("credential_id")
+  publicKey       Bytes    @map("public_key")
+  counter         BigInt   @default(0)
+  deviceType      String?  @map("device_type")
+  backedUp        Boolean  @default(false) @map("backed_up")
+  transports      String[] @default([])
+  label           String?
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt      DateTime? @map("last_used_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("webauthn_credentials")
+}
+
+/// Short-lived WebAuthn challenge storage
+model WebAuthnChallenge {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String?  @map("user_id") @db.Uuid
+  email     String?
+  challenge String
+  type      String
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([challenge])
+  @@map("webauthn_challenges")
 }
 
 model AuditLog {

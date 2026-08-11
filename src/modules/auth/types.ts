@@ -17,6 +17,8 @@ export type AuthUser = {
   tenantId: string;
   email: string;
   roles: string[];
+  /** Effective permission codes (resolved from roles) */
+  permissions?: string[];
   locationId?: string | null;
   /** @deprecated alias of locationId */
   storeId?: string | null;

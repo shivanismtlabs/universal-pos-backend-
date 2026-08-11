@@ -2,6 +2,7 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
+import { expandPermissions } from '../../../common/rbac';
 import { PrismaService } from '../../../database/database.module';
 import type { AuthUser, JwtPayload } from '../types';
 
@@ -41,6 +42,20 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       throw new UnauthorizedException('User not found');
     }
 
+    const roles = user.userRoles.map((ur) => ur.role.code);
+    const roleIds = user.userRoles.map((ur) => ur.roleId);
+    const permRows =
+      roleIds.length > 0
+        ? await this.prisma.rolePermission.findMany({
+            where: { roleId: { in: roleIds } },
+            select: { permission: { select: { code: true } } },
+          })
+        : [];
+    const permissions = expandPermissions(
+      roles,
+      permRows.map((r) => r.permission.code),
+    );
+
     const locationId = user.primaryLocationId;
     return {
       userId: user.id,
@@ -49,7 +64,8 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       fullName: user.fullName,
       locationId,
       storeId: locationId,
-      roles: user.userRoles.map((ur) => ur.role.code),
+      roles,
+      permissions,
       tokenTyp: payload.typ,
     };
   }

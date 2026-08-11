@@ -8,6 +8,7 @@ import { AppointmentsModule } from './modules/appointments/appointments.module';
 import { AppsModule } from './modules/apps/apps.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { BillingModule } from './modules/billing/billing.module';
+import { CatalogModule } from './modules/catalog/catalog.module';
 import { CustomersModule } from './modules/customers/customers.module';
 import { DocumentsModule } from './modules/documents/documents.module';
 import { ExpensesModule } from './modules/expenses/expenses.module';
@@ -45,6 +46,7 @@ const enableQueues = process.env.ENABLE_QUEUES === 'true';
     OrdersModule,
     PaymentsModule,
     BillingModule,
+    CatalogModule,
     PlatformBillingModule,
     DocumentsModule,
     AppointmentsModule,

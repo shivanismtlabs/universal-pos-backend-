@@ -62,6 +62,15 @@ enum ProductKind {
   service
   digital
   bundle
+  rental
+}
+
+/// Catalog lifecycle — prefer soft archive over hard delete when used on sales
+enum ProductStatus {
+  active
+  inactive
+  draft
+  archived
 }
 
 enum FulfillmentMode {
@@ -287,7 +296,11 @@ model Tenant {
   auditLogs          AuditLog[]
   customers          Customer[]
   categories         Category[]
+  brands             Brand[]
   products           Product[]
+  productVariants    ProductVariant[]
+  productBundleLines ProductBundleLine[]
+  productBatches     ProductBatch[]
   suppliers          Supplier[]
   stockUnits         StockUnit[]
   stockLevels        StockLevel[]
@@ -439,6 +452,7 @@ model Location {
   memberships       Membership[]
   stockUnits        StockUnit[]
   stockLevels       StockLevel[]
+  productBatches    ProductBatch[]
   orders            Order[]
   appointments      Appointment[]
   offlineSyncEvents OfflineSyncEvent[]
@@ -887,14 +901,38 @@ model Customer {
 }
 
 // ─── Catalog / inventory (commerce core) ────────────────────────────────────
+// Catalog = what the product is. Inventory (StockLevel / StockUnit / Batch qty) =
+// how many / where. Never store location SOH columns as the product master.
+
+model Brand {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  name        String
+  description String?
+  imageUrl    String?  @map("image_url")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  products Product[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, isActive])
+  @@map("brands")
+}
 
 model Category {
-  id        String   @id @default(uuid()) @db.Uuid
-  tenantId  String   @map("tenant_id") @db.Uuid
-  name      String
-  parentId  String?  @map("parent_id") @db.Uuid
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  name        String
+  description String?
+  parentId    String?  @map("parent_id") @db.Uuid
+  imageUrl    String?  @map("image_url")
+  isActive    Boolean  @default(true) @map("is_active")
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant   Tenant     @relation(fields: [tenantId], references: [id])
   parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
@@ -902,6 +940,7 @@ model Category {
   products Product[]
 
   @@unique([tenantId, name])
+  @@index([tenantId, parentId])
   @@map("categories")
 }
 
@@ -909,34 +948,140 @@ model Product {
   id              String          @id @default(uuid()) @db.Uuid
   tenantId        String          @map("tenant_id") @db.Uuid
   categoryId      String?         @map("category_id") @db.Uuid
+  brandId         String?         @map("brand_id") @db.Uuid
   name            String
-  /// Required shop SKU — app enforces 15–18 chars on create
+  shortName       String?         @map("short_name")
+  /// Required shop SKU — unique per tenant (2–18 chars validated in app)
   skuCode         String          @map("sku_code") @db.VarChar(18)
+  /// Scan identifier — separate from SKU
+  barcode         String?         @db.VarChar(64)
+  /// Optional QR payload (defaults to structured catalog ref when empty)
+  qrCode          String?         @map("qr_code") @db.VarChar(255)
+  internalCode    String?         @map("internal_code") @db.VarChar(64)
   kind            ProductKind     @default(physical)
+  status          ProductStatus   @default(active)
   fulfillmentMode FulfillmentMode @default(sale) @map("fulfillment_mode")
+  /// Short blurb for POS cards / list
+  shortDescription String?        @map("short_description")
+  /// Full description for detail / future e-com
   description     String?
   photoUrl        String?         @map("photo_url")
+  /// Generic tax reference (GST/VAT etc. interpreted by tax module)
   taxCode         String?         @map("tax_code")
+  /// Selling price (catalog default; stock level may override per location)
   basePrice       Decimal         @default(0) @map("base_price") @db.Decimal(12, 2)
+  costPrice       Decimal?        @map("cost_price") @db.Decimal(12, 2)
+  /// MRP / list price
+  mrp             Decimal?        @db.Decimal(12, 2)
+  /// Unit of measure code: pcs, kg, L, hour, service…
+  unitOfMeasure   String          @default("pcs") @map("unit_of_measure") @db.VarChar(16)
   trackSerial     Boolean         @default(false) @map("track_serial")
+  trackBatch      Boolean         @default(false) @map("track_batch")
   trackQty        Boolean         @default(true) @map("track_qty")
+  canSell         Boolean         @default(true) @map("can_sell")
+  canPurchase     Boolean         @default(true) @map("can_purchase")
+  availableInPos  Boolean         @default(true) @map("available_in_pos")
+  /// Derived from status for legacy POS filters
   isActive        Boolean         @default(true) @map("is_active")
-  /// Dynamic vertical data (ERD: ITEM.extra_fields). e.g. { "size":"M", "color":"red" }
+  /// Dynamic vertical data (ERD: ITEM.extra_fields). e.g. images[], extra fields
   meta            Json            @default("{}") @map("meta")
-  /// Alias exposure: same JSON as meta — do not add a second physical column.
-  /// Prefer writing `meta` / reading as extra_fields in APIs for ERD clarity.
+  createdById     String?         @map("created_by_id") @db.Uuid
+  updatedById     String?         @map("updated_by_id") @db.Uuid
   createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant      Tenant       @relation(fields: [tenantId], references: [id])
   category    Category?    @relation(fields: [categoryId], references: [id])
+  brand       Brand?       @relation(fields: [brandId], references: [id])
+  variants              ProductVariant[]
+  bundleComponents      ProductBundleLine[] @relation("BundleParent")
+  usedInBundles         ProductBundleLine[] @relation("BundleComponent")
+  batches               ProductBatch[]
   stockUnits            StockUnit[]
   stockLevels           StockLevel[]
   orderItems            OrderItem[]
   customerSubscriptions CustomerSubscription[]
 
   @@unique([tenantId, skuCode])
+  @@index([tenantId, status])
+  @@index([tenantId, brandId])
+  @@index([tenantId, categoryId])
+  @@index([tenantId, barcode])
   @@map("products")
+}
+
+/// Optional sellable variant (size / color / weight…) — own SKU/barcode
+model ProductVariant {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  productId    String   @map("product_id") @db.Uuid
+  name         String
+  skuCode      String   @map("sku_code") @db.VarChar(18)
+  barcode      String?  @db.VarChar(64)
+  /// { "size": "42", "color": "Black", "weight": "0.5" }
+  attributes   Json     @default("{}")
+  basePrice    Decimal? @map("base_price") @db.Decimal(12, 2)
+  costPrice    Decimal? @map("cost_price") @db.Decimal(12, 2)
+  isActive     Boolean  @default(true) @map("is_active")
+  sortOrder    Int      @default(0) @map("sort_order")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant          @relation(fields: [tenantId], references: [id])
+  product  Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  batches  ProductBatch[]
+  stockUnits StockUnit[]
+
+  @@unique([tenantId, skuCode])
+  @@index([tenantId, productId])
+  @@map("product_variants")
+}
+
+/// Bundle / combo bill-of-materials (stock from components)
+model ProductBundleLine {
+  id                   String   @id @default(uuid()) @db.Uuid
+  tenantId             String   @map("tenant_id") @db.Uuid
+  bundleProductId      String   @map("bundle_product_id") @db.Uuid
+  componentProductId   String   @map("component_product_id") @db.Uuid
+  componentVariantId   String?  @map("component_variant_id") @db.Uuid
+  quantity             Decimal  @default(1) @db.Decimal(12, 3)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant           Tenant  @relation(fields: [tenantId], references: [id])
+  bundleProduct    Product @relation("BundleParent", fields: [bundleProductId], references: [id], onDelete: Cascade)
+  componentProduct Product @relation("BundleComponent", fields: [componentProductId], references: [id])
+
+  @@unique([bundleProductId, componentProductId, componentVariantId])
+  @@index([tenantId, bundleProductId])
+  @@map("product_bundle_lines")
+}
+
+/// Batch / lot + expiry — inventory of a catalog product (location-aware qty)
+model ProductBatch {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  productId      String    @map("product_id") @db.Uuid
+  variantId      String?   @map("variant_id") @db.Uuid
+  locationId     String    @map("location_id") @db.Uuid
+  batchCode      String    @map("batch_code") @db.VarChar(64)
+  manufacturedAt DateTime? @map("manufactured_at") @db.Date
+  expiresAt      DateTime? @map("expires_at") @db.Date
+  qtyOnHand      Decimal   @default(0) @map("qty_on_hand") @db.Decimal(12, 3)
+  notes          String?
+  isActive       Boolean   @default(true) @map("is_active")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant          @relation(fields: [tenantId], references: [id])
+  product  Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant  ProductVariant? @relation(fields: [variantId], references: [id])
+  location Location        @relation(fields: [locationId], references: [id])
+
+  @@unique([tenantId, locationId, productId, batchCode])
+  @@index([tenantId, productId])
+  @@index([tenantId, expiresAt])
+  @@map("product_batches")
 }
 
 /// Customer enrolled in a shop plan (commerce subscription mode — not SaaS billing)
@@ -989,6 +1134,8 @@ model StockUnit {
   tenantId              String             @map("tenant_id") @db.Uuid
   locationId            String             @map("location_id") @db.Uuid
   productId             String             @map("product_id") @db.Uuid
+  /// Optional link when unit is a specific catalog variant
+  productVariantId      String?            @map("product_variant_id") @db.Uuid
   barcodeSku            String             @map("barcode_sku")
   variantLabel          String?            @map("variant_label")
   condition             StockUnitCondition @default(good)
@@ -1002,20 +1149,22 @@ model StockUnit {
   createdAt             DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt             DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant        Tenant             @relation(fields: [tenantId], references: [id])
-  location      Location           @relation(fields: [locationId], references: [id])
-  product       Product            @relation(fields: [productId], references: [id])
-  supplier      Supplier?          @relation(fields: [supplierId], references: [id])
-  reservations  StockReservation[]
-  movements     StockMovement[]
-  orderItems    OrderItem[]
-  orderFees     OrderFee[]
-  returnEvents  ReturnEvent[]
-  cleaningJobs  ModRentalCleaningJob[]
-  damageRecords ModRentalDamageRecord[]
+  tenant         Tenant             @relation(fields: [tenantId], references: [id])
+  location       Location           @relation(fields: [locationId], references: [id])
+  product        Product            @relation(fields: [productId], references: [id])
+  productVariant ProductVariant?    @relation(fields: [productVariantId], references: [id])
+  supplier       Supplier?          @relation(fields: [supplierId], references: [id])
+  reservations   StockReservation[]
+  movements      StockMovement[]
+  orderItems     OrderItem[]
+  orderFees      OrderFee[]
+  returnEvents   ReturnEvent[]
+  cleaningJobs   ModRentalCleaningJob[]
+  damageRecords  ModRentalDamageRecord[]
 
   @@unique([tenantId, barcodeSku])
   @@index([tenantId, locationId, status])
+  @@index([tenantId, productId])
   @@map("stock_units")
 }
 

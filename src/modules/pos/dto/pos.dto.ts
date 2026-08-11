@@ -181,6 +181,15 @@ export class PrepareSaleCheckoutDto {
   @IsNumber()
   @Min(0)
   discountAmount?: number;
+
+  @ApiPropertyOptional({
+    description: 'Loyalty coupon code (same as cash sale checkout)',
+    example: 'SAVE10',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  couponCode?: string;
 }
 
 /**

@@ -255,11 +255,27 @@ export class PosService {
           skuCode: dto.sku.trim().toUpperCase(),
           description: dto.description?.trim(),
           photoUrl: (dto.image ?? dto.photoUrl)?.trim() || null,
-          kind: isService ? 'service' : 'physical',
+          kind: isService
+            ? 'service'
+            : dto.isComposite
+              ? 'bundle'
+              : 'physical',
           fulfillmentMode: FulfillmentMode.sale,
           trackQty: trackInventory,
           trackSerial,
+          trackBatch: Boolean(dto.batchTracking) && !isService,
           basePrice: price,
+          costPrice:
+            dto.costPrice != null && Number.isFinite(dto.costPrice)
+              ? Number(dto.costPrice)
+              : null,
+          barcode: dto.barcode?.trim() || dto.upc?.trim() || null,
+          unitOfMeasure: sellUnit,
+          canSell: true,
+          canPurchase: !isService,
+          availableInPos: true,
+          status: 'active',
+          isActive: true,
           meta: {
             sellUnit,
             itemType: isService ? 'service' : 'goods',
@@ -594,6 +610,9 @@ export class PosService {
                 OR: [
                   { name: { contains: q, mode: 'insensitive' } },
                   { skuCode: { contains: q, mode: 'insensitive' } },
+                  { barcode: { contains: q, mode: 'insensitive' } },
+                  { internalCode: { contains: q, mode: 'insensitive' } },
+                  { brand: { name: { contains: q, mode: 'insensitive' } } },
                 ],
               }
             : {}),
@@ -606,11 +625,16 @@ export class PosService {
             id: true,
             name: true,
             skuCode: true,
+            barcode: true,
             description: true,
             photoUrl: true,
             meta: true,
             isActive: true,
+            availableInPos: true,
+            kind: true,
+            status: true,
             basePrice: true,
+            brand: { select: { id: true, name: true } },
             category: { select: { id: true, name: true } },
           },
         },
@@ -620,7 +644,9 @@ export class PosService {
     return {
       locationId,
       fields: SALE_PRODUCT_FIELDS,
-      items: rows.map((r) => {
+      items: rows
+        .filter((r) => r.product.availableInPos !== false)
+        .map((r) => {
         const images = productImageList(r.product.photoUrl, r.product.meta);
         const cover = images[0] ?? r.product.photoUrl ?? null;
         return {
@@ -636,6 +662,10 @@ export class PosService {
           qty: Number(r.qtyOnHand),
           sellUnit: r.sellUnit,
           isActive: r.product.isActive,
+          barcode: r.product.barcode,
+          kind: r.product.kind,
+          status: r.product.status,
+          brand: r.product.brand,
           category: r.product.category,
         };
       }),
@@ -1462,6 +1492,42 @@ export class PosService {
 
       return created.id;
     });
+
+    if (dto.couponCode?.trim()) {
+      try {
+        const orderLoaded = await this.loadOrder(user.tenantId, orderId);
+        const validated = await this.loyalty.validate(user, {
+          code: dto.couponCode.trim(),
+          orderSubtotal: Math.max(
+            Number(orderLoaded?.subtotal ?? 0),
+            Number(dto.discountAmount ?? 0) || 0,
+          ),
+        });
+        await this.loyalty.recordRedemption(user, {
+          couponId: validated.couponId,
+          orderId,
+          customerId: dto.customerId,
+          amountOff:
+            dto.discountAmount && dto.discountAmount > 0
+              ? dto.discountAmount
+              : validated.amountOff,
+        });
+        const prevMeta =
+          ((orderLoaded?.meta as Record<string, unknown> | null) ?? {});
+        await this.prisma.order.update({
+          where: { id: orderId },
+          data: {
+            meta: {
+              ...prevMeta,
+              awaitingStripePayment: true,
+              couponCode: dto.couponCode.trim(),
+            },
+          },
+        });
+      } catch {
+        // Discount already applied; coupon meta best-effort
+      }
+    }
 
     const order = await this.loadOrder(user.tenantId, orderId);
     return {

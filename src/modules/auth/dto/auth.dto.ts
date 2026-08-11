@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Transform } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsEmail,
   IsIn,
   IsOptional,
@@ -10,6 +12,7 @@ import {
   MaxLength,
   MinLength,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
 import { IsInternationalPhone } from '../../../common/validators/is-international-phone';
 import { IsStrongPassword } from '../password.policy';
@@ -22,6 +25,15 @@ const optionalLowerTrim = ({ value }: { value: unknown }) => {
   if (value == null || value === '') return undefined;
   return typeof value === 'string' ? value.trim().toLowerCase() : value;
 };
+
+/** Optional custom item field when org business type is other */
+export class CustomItemFieldDto {
+  @ApiProperty({ example: 'Membership tier' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(60)
+  label!: string;
+}
 
 export class RegisterTenantDto {
   @ApiProperty({ example: 'Demo Tuxedo Shop' })
@@ -266,6 +278,41 @@ export class CreateOrganizationDto {
   @MinLength(2)
   @MaxLength(100)
   organizationName!: string;
+
+  /**
+   * Universal POS vertical profile (BusinessConfig registry id).
+   * Drives item/order extras, billing style, default commerce modes.
+   */
+  @ApiProperty({
+    example: 'retail',
+    description:
+      'Business type: retail | grocery | restaurant | salon | service | other | general',
+  })
+  @IsString()
+  @IsIn([
+    'retail',
+    'grocery',
+    'restaurant',
+    'salon',
+    'service',
+    'other',
+    'general',
+  ])
+  businessType!: string;
+
+  /**
+   * When businessType is other/general — extra item form fields (→ business_configs.item_fields).
+   */
+  @ApiPropertyOptional({
+    description: 'Custom item field labels for Other profile',
+    example: [{ label: 'Membership tier' }, { label: 'Session mins' }],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(12)
+  @ValidateNested({ each: true })
+  @Type(() => CustomItemFieldDto)
+  customItemFields?: CustomItemFieldDto[];
 
   @ApiPropertyOptional({ example: '+919876543210' })
   @IsOptional()

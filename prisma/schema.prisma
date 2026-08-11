@@ -319,6 +319,8 @@ model Tenant {
   rentalCleaningJobs ModRentalCleaningJob[]
   rentalDamageRecords ModRentalDamageRecord[]
   identityMemberships IdentityTenantMembership[]
+  /// Universal POS: 1:1 vertical config (order_fields / item_fields / ui_flow JSON)
+  businessConfig     BusinessConfig?
 
   @@map("tenants")
 }
@@ -533,6 +535,36 @@ model AuthOtpChallenge {
 
   @@index([email, purpose, createdAt])
   @@map("auth_otp_challenges")
+}
+
+/**
+ * Universal POS — per-shop vertical brain (ERD: BUSINESS_CONFIG).
+ *
+ * BUSINESS = Tenant. Core tables never fork by industry.
+ * item_fields / order_fields / ui_flow are JSON schemas the FE renders dynamically.
+ * Actual values live on products.meta / orders.meta (extra_fields).
+ */
+model BusinessConfig {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @unique @map("tenant_id") @db.Uuid
+  /// Profile id: retail | grocery | restaurant | salon | service | general | custom
+  businessType String   @map("business_type") @db.VarChar(40)
+  /// Form schema for Item extras → saved into products.meta
+  itemFields   Json     @default("[]") @map("item_fields")
+  /// Form schema for Order extras → saved into orders.meta
+  orderFields  Json     @default("[]") @map("order_fields")
+  /// Screens / nav / wizard steps
+  uiFlow       Json     @default("{}") @map("ui_flow")
+  /// Billing style flags (counter/table/appointment, split, park, requireCustomer)
+  billing      Json     @default("{}")
+  /// Optional free-form overrides / versioning
+  notes        String?
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("business_configs")
 }
 
 model User {
@@ -775,7 +807,10 @@ model Product {
   trackSerial     Boolean         @default(false) @map("track_serial")
   trackQty        Boolean         @default(true) @map("track_qty")
   isActive        Boolean         @default(true) @map("is_active")
-  meta            Json            @default("{}")
+  /// Dynamic vertical data (ERD: ITEM.extra_fields). e.g. { "size":"M", "color":"red" }
+  meta            Json            @default("{}") @map("meta")
+  /// Alias exposure: same JSON as meta — do not add a second physical column.
+  /// Prefer writing `meta` / reading as extra_fields in APIs for ERD clarity.
   createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -992,7 +1027,8 @@ model Order {
   depositTotal  Decimal     @default(0) @map("deposit_total") @db.Decimal(12, 2)
   balanceDue    Decimal     @default(0) @map("balance_due") @db.Decimal(12, 2)
   createdById   String?     @map("created_by") @db.Uuid
-  meta          Json        @default("{}")
+  /// Dynamic vertical data (ERD: ORDERS.extra_fields). e.g. { "tableNumber":"5", "kot_status":"sent" }
+  meta          Json        @default("{}") @map("meta")
   createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt     DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
 

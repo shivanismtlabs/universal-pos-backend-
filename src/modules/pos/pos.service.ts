@@ -241,6 +241,11 @@ export class PosService {
     });
     if (!loc) throw new NotFoundException('Location not found');
 
+    const isService = dto.itemType === 'service';
+    const trackInventory =
+      isService ? false : dto.trackInventory !== false;
+    const trackSerial = Boolean(dto.serialTracking) && !isService;
+
     try {
       const product = await this.prisma.product.create({
         data: {
@@ -250,19 +255,30 @@ export class PosService {
           skuCode: dto.sku.trim().toUpperCase(),
           description: dto.description?.trim(),
           photoUrl: (dto.image ?? dto.photoUrl)?.trim() || null,
-          kind: 'physical',
+          kind: isService ? 'service' : 'physical',
           fulfillmentMode: FulfillmentMode.sale,
-          trackQty: dto.trackInventory !== false,
-          trackSerial: false,
+          trackQty: trackInventory,
+          trackSerial,
           basePrice: price,
           meta: {
             sellUnit,
+            itemType: isService ? 'service' : 'goods',
+            itemStructure: dto.itemStructure === 'variants' ? 'variants' : 'single',
             ...(dto.manufacturer?.trim()
               ? { manufacturer: dto.manufacturer.trim() }
               : {}),
+            ...(dto.brand?.trim() ? { brand: dto.brand.trim() } : {}),
             ...(dto.barcode?.trim()
-              ? { barcode: dto.barcode.trim(), upc: dto.barcode.trim() }
+              ? { barcode: dto.barcode.trim() }
               : {}),
+            ...(dto.upc?.trim()
+              ? { upc: dto.upc.trim() }
+              : dto.barcode?.trim()
+                ? { upc: dto.barcode.trim() }
+                : {}),
+            ...(dto.ean?.trim() ? { ean: dto.ean.trim() } : {}),
+            ...(dto.mpn?.trim() ? { mpn: dto.mpn.trim() } : {}),
+            ...(dto.isbn?.trim() ? { isbn: dto.isbn.trim() } : {}),
             ...(dto.costPrice != null && Number.isFinite(dto.costPrice)
               ? { costPrice: Number(dto.costPrice) }
               : {}),
@@ -271,6 +287,91 @@ export class PosService {
               : {}),
             ...(dto.hsnOrSac?.trim()
               ? { hsnOrSac: dto.hsnOrSac.trim() }
+              : {}),
+            ...(dto.taxPreference
+              ? { taxPreference: dto.taxPreference }
+              : {}),
+            ...(dto.taxRatePercent != null &&
+            Number.isFinite(dto.taxRatePercent)
+              ? { taxRatePercent: Number(dto.taxRatePercent) }
+              : {}),
+            ...(dto.openingStockValue != null &&
+            Number.isFinite(dto.openingStockValue)
+              ? { openingStockValue: Number(dto.openingStockValue) }
+              : {}),
+            ...(dto.returnable != null ? { returnable: dto.returnable } : {}),
+            ...(dto.batchTracking
+              ? { batchTracking: true }
+              : {}),
+            ...(dto.serialTracking
+              ? { serialTracking: true }
+              : {}),
+            ...(dto.dimLength != null ||
+            dto.dimWidth != null ||
+            dto.dimHeight != null
+              ? {
+                  dimensions: {
+                    length: dto.dimLength ?? null,
+                    width: dto.dimWidth ?? null,
+                    height: dto.dimHeight ?? null,
+                    unit: dto.dimUnit?.trim() || 'cm',
+                  },
+                }
+              : {}),
+            ...(dto.weight != null && Number.isFinite(dto.weight)
+              ? {
+                  weight: Number(dto.weight),
+                  weightUnit: dto.weightUnit?.trim() || 'kg',
+                }
+              : {}),
+            ...(dto.isComposite ? { isComposite: true } : {}),
+            ...(dto.multiUnitBaseQty != null &&
+            Number.isFinite(dto.multiUnitBaseQty)
+              ? {
+                  multiUnit: {
+                    baseQty: Number(dto.multiUnitBaseQty),
+                    baseUnit: dto.multiUnitBaseUnit?.trim() || 'pcs',
+                  },
+                }
+              : {}),
+            ...(dto.loyaltyPoints != null &&
+            Number.isFinite(dto.loyaltyPoints)
+              ? { loyaltyPoints: Number(dto.loyaltyPoints) }
+              : {}),
+            ...(dto.perishable
+              ? {
+                  perishable: true,
+                  ...(dto.expiryAutoDiscountDays != null
+                    ? {
+                        expiryAutoDiscountDays: Number(
+                          dto.expiryAutoDiscountDays,
+                        ),
+                      }
+                    : {}),
+                  ...(dto.expiryAutoDiscountPercent != null
+                    ? {
+                        expiryAutoDiscountPercent: Number(
+                          dto.expiryAutoDiscountPercent,
+                        ),
+                      }
+                    : {}),
+                }
+              : {}),
+            ...(dto.modifiers?.length
+              ? {
+                  modifiers: dto.modifiers
+                    .map((m) => String(m).trim())
+                    .filter(Boolean)
+                    .slice(0, 40),
+                }
+              : {}),
+            // BusinessConfig / ERD extra_fields
+            ...(dto.extraFields && typeof dto.extraFields === 'object'
+              ? Object.fromEntries(
+                  Object.entries(dto.extraFields).filter(
+                    ([, v]) => v !== '' && v != null,
+                  ),
+                )
               : {}),
           },
         },
@@ -282,7 +383,7 @@ export class PosService {
           productId: product.id,
           sku: dto.sku.trim().toUpperCase(),
           sellUnit,
-          qtyOnHand: dto.trackInventory === false ? 0 : qty,
+          qtyOnHand: trackInventory ? qty : 0,
           sellPrice: price.toFixed(2),
         },
       });

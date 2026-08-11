@@ -9,7 +9,13 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import { Prisma } from '@prisma/client';
-import { provisionTenantWithAdmin } from '../../common/provision-tenant';
+import { provisionTenantWithAdmin, enableTenantModules } from '../../common/provision-tenant';
+import {
+  getBusinessConfig,
+  isBusinessTypeId,
+  registryToDbPayload,
+} from '../../common/business-config';
+import { isCommerceMode, moduleStackForMode } from '../../common/commerce-schema';
 import { PrismaService } from '../../database/database.module';
 import { RESERVED_TENANT_SLUGS } from './password.policy';
 import type {
@@ -266,6 +272,47 @@ export class PortalAuthService {
     const currencyCode = (dto.currencyCode?.trim() || 'INR').toUpperCase();
     const locale = dto.locale?.trim() || 'en-IN';
 
+    if (!isBusinessTypeId(dto.businessType)) {
+      throw new BadRequestException(
+        'Unknown business type. Choose retail, grocery, restaurant, salon, service, other, or general.',
+      );
+    }
+    const profile = getBusinessConfig(dto.businessType);
+    const configPayload = registryToDbPayload(profile);
+
+    // Other / general: optional merchant-defined item fields
+    if (
+      (profile.id === 'other' || profile.id === 'general') &&
+      Array.isArray(dto.customItemFields) &&
+      dto.customItemFields.length
+    ) {
+      const seen = new Set<string>();
+      for (const row of dto.customItemFields) {
+        const label = row.label?.trim();
+        if (!label) continue;
+        let key = label
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '_')
+          .replace(/^_+|_+$/g, '')
+          .slice(0, 40);
+        if (!key || seen.has(key)) key = `custom_${seen.size + 1}`;
+        seen.add(key);
+        configPayload.itemFields.push({
+          entity: 'item',
+          key,
+          label,
+          type: 'string',
+          required: false,
+        });
+      }
+    }
+
+    let modes = profile.defaultCommerceModes.filter(isCommerceMode);
+    if (!modes.length) modes = ['sale'];
+    const modeModuleCodes = [
+      ...new Set(modes.flatMap((m) => [...moduleStackForMode(m)])),
+    ];
+
     const result = await this.prisma.$transaction(async (tx) => {
       const provisioned = await provisionTenantWithAdmin(tx, {
         tenantName: organizationName,
@@ -280,10 +327,14 @@ export class PortalAuthService {
         locale,
       });
 
-      // Zoom/Zoho-style profile details in tenant settings
+      // Zoho-style org profile + universal BusinessConfig link
       const settings = {
         ...((provisioned.tenant.settings as Record<string, unknown>) ?? {}),
-        commerceModes: [],
+        businessType: profile.id,
+        businessConfigId: profile.id,
+        businessConfigSetAt: new Date().toISOString(),
+        commerceModes: modes,
+        commerceSetupAt: new Date().toISOString(),
         pos: { pinSwitchEnabled: true },
         organizationProfile: {
           phone: dto.phone?.trim() || identity.phone || null,
@@ -301,6 +352,21 @@ export class PortalAuthService {
         where: { id: provisioned.tenant.id },
         data: { settings: settings as Prisma.InputJsonValue },
       });
+
+      await tx.businessConfig.create({
+        data: {
+          tenantId: provisioned.tenant.id,
+          businessType: configPayload.businessType,
+          itemFields: configPayload.itemFields as Prisma.InputJsonValue,
+          orderFields: configPayload.orderFields as Prisma.InputJsonValue,
+          uiFlow: configPayload.uiFlow as Prisma.InputJsonValue,
+          billing: configPayload.billing as Prisma.InputJsonValue,
+        },
+      });
+
+      if (modeModuleCodes.length) {
+        await enableTenantModules(tx, provisioned.tenant.id, modeModuleCodes);
+      }
 
       await tx.identityTenantMembership.create({
         data: {

@@ -9,6 +9,7 @@ import {
   IsEnum,
   IsIn,
   IsNumber,
+  IsObject,
   IsOptional,
   IsPositive,
   IsString,
@@ -289,6 +290,190 @@ export class AddSaleProductDto {
   @IsOptional()
   @IsBoolean()
   trackInventory?: boolean;
+
+  /** Goods vs service (Zoho Type) */
+  @ApiPropertyOptional({ enum: ['goods', 'service'] })
+  @IsOptional()
+  @IsIn(['goods', 'service'])
+  itemType?: 'goods' | 'service';
+
+  /** Single item vs variants parent (matrix pack later) */
+  @ApiPropertyOptional({ enum: ['single', 'variants'] })
+  @IsOptional()
+  @IsIn(['single', 'variants'])
+  itemStructure?: 'single' | 'variants';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  brand?: string;
+
+  @ApiPropertyOptional({ description: 'Separate from primary barcode' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  upc?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  ean?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  mpn?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  isbn?: string;
+
+  @ApiPropertyOptional({ enum: ['taxable', 'non_taxable'] })
+  @IsOptional()
+  @IsIn(['taxable', 'non_taxable'])
+  taxPreference?: 'taxable' | 'non_taxable';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  taxRatePercent?: number;
+
+  @ApiPropertyOptional({ description: 'Value of opening stock (currency)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  openingStockValue?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  returnable?: boolean;
+
+  @ApiPropertyOptional({ description: 'Enable batch tracking intent (pack)' })
+  @IsOptional()
+  @IsBoolean()
+  batchTracking?: boolean;
+
+  @ApiPropertyOptional({ description: 'Enable serial tracking intent (pack)' })
+  @IsOptional()
+  @IsBoolean()
+  serialTracking?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  dimLength?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  dimWidth?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  dimHeight?: number;
+
+  @ApiPropertyOptional({ example: 'cm' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  dimUnit?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  weight?: number;
+
+  @ApiPropertyOptional({ example: 'kg' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  weightUnit?: string;
+
+  @ApiPropertyOptional({ description: 'Composite / kit intent' })
+  @IsOptional()
+  @IsBoolean()
+  isComposite?: boolean;
+
+  /** When sell unit is pack/box: how many base units (e.g. 12 pcs) */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.001)
+  multiUnitBaseQty?: number;
+
+  @ApiPropertyOptional({ example: 'pcs' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  multiUnitBaseUnit?: string;
+
+  @ApiPropertyOptional({ description: 'Loyalty points weight for this item' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  loyaltyPoints?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  perishable?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Days before expiry to apply auto discount (rule intent)',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  expiryAutoDiscountDays?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  expiryAutoDiscountPercent?: number;
+
+  /** Modifier / add-on labels (restaurant coffee “extra cheese”) — full pack later */
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(40)
+  @IsString({ each: true })
+  @MaxLength(80, { each: true })
+  modifiers?: string[];
+
+  /**
+   * Dynamic vertical extras (ERD ITEM.extra_fields → products.meta).
+   * Keys come from BusinessConfig.item_fields — not hardcode per industry.
+   */
+  @ApiPropertyOptional({
+    description: 'BusinessConfig-driven item extras stored in product.meta',
+    example: { size: 'M', color: 'red' },
+  })
+  @IsOptional()
+  @IsObject()
+  extraFields?: Record<string, unknown>;
 }
 
 /** One row when bulk-importing sale items (Universal — any industry). */

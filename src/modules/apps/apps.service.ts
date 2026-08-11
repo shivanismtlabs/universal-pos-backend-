@@ -15,6 +15,16 @@ import {
   parseCommerceModes,
   type CommerceMode,
 } from '../../common/commerce-schema';
+import {
+  businessConfigCatalog,
+  configFromDbRow,
+  formSchemaFromConfig,
+  getBusinessConfig,
+  isBusinessTypeId,
+  metaFieldsFor,
+  registryToDbPayload,
+  resolveBusinessConfig,
+} from '../../common/business-config';
 import { PLATFORM_MODULES } from '../../common/platform-catalog';
 import { ensurePlatformCatalog } from '../../common/provision-tenant';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
@@ -22,6 +32,7 @@ import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import {
   CreateCatalogItemDto,
+  SetBusinessConfigDto,
   SetCommerceModesDto,
   SetFeatureFlagDto,
 } from './dto/apps.dto';
@@ -277,6 +288,11 @@ export class AppsService {
       description: s.description,
     }));
 
+    const businessConfig = await this.resolveTenantBusinessConfig(
+      user.tenantId,
+      tenant.settings,
+    );
+
     return {
       tenant: { ...tenant, gstin: tenant.taxId },
       plan: planSub
@@ -306,7 +322,175 @@ export class AppsService {
         modeCatalog,
         rentalLifecycle: [...RENTAL_LIFECYCLE_STATES],
       },
+      /**
+       * Vertical profile — drives meta fields / billing style / screens.
+       * New vertical = registry entry only (see business-config.ts).
+       */
+      business: {
+        type: businessConfig.id,
+        config: businessConfig,
+        formSchema: formSchemaFromConfig(businessConfig),
+        catalog: businessConfigCatalog(),
+        coreEntities: [
+          'item',
+          'order',
+          'payment',
+          'customer',
+          'inventory',
+        ] as const,
+        itemMetaFields: metaFieldsFor(businessConfig, 'item'),
+        orderMetaFields: metaFieldsFor(businessConfig, 'order'),
+        customerMetaFields: metaFieldsFor(businessConfig, 'customer'),
+        /**
+         * ERD map (Universal POS tables):
+         * BUSINESS = tenants · BUSINESS_CONFIG = business_configs
+         * ITEM = products · ORDERS = orders · ITEM/ORDER extra_fields = *.meta
+         */
+        erd: {
+          business: 'tenants',
+          businessConfig: 'business_configs',
+          item: 'products',
+          itemExtraFields: 'products.meta',
+          order: 'orders',
+          orderExtraFields: 'orders.meta',
+          orderItem: 'order_items',
+          payment: 'payments',
+          customer: 'customers',
+        },
+      },
     };
+  }
+
+  /** DB row first (per-tenant JSON), else registry from settings.businessType */
+  private async resolveTenantBusinessConfig(
+    tenantId: string,
+    settings: unknown,
+  ) {
+    try {
+      const row = await this.prisma.businessConfig.findUnique({
+        where: { tenantId },
+      });
+      if (row) {
+        return configFromDbRow({
+          businessType: row.businessType,
+          itemFields: row.itemFields,
+          orderFields: row.orderFields,
+          uiFlow: row.uiFlow,
+          billing: row.billing,
+        });
+      }
+    } catch {
+      // Table missing pre-migrate — fall back to in-code registry
+    }
+    return resolveBusinessConfig(settings);
+  }
+
+  listBusinessConfigs() {
+    return {
+      catalog: businessConfigCatalog(),
+      configs: Object.fromEntries(
+        businessConfigCatalog().map((c) => [
+          c.id,
+          getBusinessConfig(c.id),
+        ]),
+      ),
+      coreEntities: ['item', 'order', 'payment', 'customer', 'inventory'],
+      erd: {
+        business: 'tenants',
+        businessConfig: 'business_configs',
+        itemExtraFields: 'products.meta',
+        orderExtraFields: 'orders.meta',
+      },
+      note: 'Add a new business type only in BUSINESS_CONFIG_REGISTRY (+ optional business_configs row) — no core forks',
+    };
+  }
+
+  /**
+   * Setup: pick vertical profile. Optionally apply default commerce modes.
+   * Upserts business_configs (ERD BUSINESS_CONFIG) with item/order field JSON.
+   */
+  async setBusinessConfig(user: AuthUser, dto: SetBusinessConfigDto) {
+    if (!isBusinessTypeId(dto.businessType)) {
+      throw new BadRequestException(
+        'Unknown business type. Use GET /commerce/business-configs for catalog.',
+      );
+    }
+    const profile = getBusinessConfig(dto.businessType);
+    const payload = registryToDbPayload(profile);
+    const tenant = await this.prisma.tenant.findUniqueOrThrow({
+      where: { id: user.tenantId },
+    });
+    const prev = (tenant.settings ?? {}) as Record<string, unknown>;
+    const applyModes = dto.applyDefaultModes !== false;
+    let modes = parseCommerceModes(prev).modes;
+
+    if (applyModes || !modes.length) {
+      modes = profile.defaultCommerceModes.filter(isCommerceMode);
+      if (!modes.length) modes = ['sale'];
+    }
+
+    const settings = {
+      ...prev,
+      businessType: profile.id,
+      businessConfigId: profile.id,
+      commerceModes: modes,
+      commerceSetupAt: new Date().toISOString(),
+      businessConfigSetAt: new Date().toISOString(),
+    };
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.tenant.update({
+        where: { id: user.tenantId },
+        data: { settings: settings as Prisma.InputJsonValue },
+      });
+      await tx.businessConfig.upsert({
+        where: { tenantId: user.tenantId },
+        create: {
+          tenantId: user.tenantId,
+          businessType: payload.businessType,
+          itemFields: payload.itemFields as Prisma.InputJsonValue,
+          orderFields: payload.orderFields as Prisma.InputJsonValue,
+          uiFlow: payload.uiFlow as Prisma.InputJsonValue,
+          billing: payload.billing as Prisma.InputJsonValue,
+        },
+        update: {
+          businessType: payload.businessType,
+          itemFields: payload.itemFields as Prisma.InputJsonValue,
+          orderFields: payload.orderFields as Prisma.InputJsonValue,
+          uiFlow: payload.uiFlow as Prisma.InputJsonValue,
+          billing: payload.billing as Prisma.InputJsonValue,
+        },
+      });
+    });
+
+    for (const mode of modes) {
+      await this.syncCommerceModules(user, mode);
+    }
+
+    const resolved = await this.resolveTenantBusinessConfig(
+      user.tenantId,
+      settings,
+    );
+    return {
+      businessType: resolved.id,
+      config: resolved,
+      formSchema: formSchemaFromConfig(resolved),
+      commerceModes: modes,
+      modules: await this.listTenantModules(user),
+    };
+  }
+
+  /** Dynamic form schema for config-driven UI (no hardcoded vertical forms) */
+  async businessFormSchema(user: AuthUser) {
+    const tenant = await this.prisma.tenant.findUniqueOrThrow({
+      where: { id: user.tenantId },
+      select: { settings: true },
+    });
+    const config = await this.resolveTenantBusinessConfig(
+      user.tenantId,
+      tenant.settings,
+    );
+    return formSchemaFromConfig(config);
   }
 
   commerceSchema() {

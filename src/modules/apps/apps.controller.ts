@@ -8,6 +8,7 @@ import { AppsService } from './apps.service';
 import {
   CreateCatalogItemDto,
   EnableModuleDto,
+  SetBusinessConfigDto,
   SetCommerceModesDto,
   SetFeatureFlagDto,
 } from './dto/apps.dto';
@@ -74,6 +75,39 @@ export class AppsController {
   })
   commerceSchema() {
     return this.apps.commerceSchema();
+  }
+
+  @Get('commerce/business-configs')
+  @Roles(...RoleGroup.all)
+  @ApiOperation({
+    summary:
+      'BusinessConfig registry — vertical profiles (add type = new JSON only)',
+  })
+  listBusinessConfigs() {
+    return this.apps.listBusinessConfigs();
+  }
+
+  @Post('tenants/me/business-config')
+  @Roles(...RoleGroup.ownerOnly)
+  @ApiOperation({
+    summary:
+      'Set shop business type profile (config-driven; no industry forks)',
+  })
+  setBusinessConfig(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: SetBusinessConfigDto,
+  ) {
+    return this.apps.setBusinessConfig(user, dto);
+  }
+
+  @Get('tenants/me/business-form-schema')
+  @Roles(...RoleGroup.all)
+  @ApiOperation({
+    summary:
+      'Dynamic form schema from BUSINESS_CONFIG (item_fields + order_fields + ui_flow)',
+  })
+  businessFormSchema(@CurrentUser() user: AuthUser) {
+    return this.apps.businessFormSchema(user);
   }
 
   @Post('tenants/me/commerce-modes')

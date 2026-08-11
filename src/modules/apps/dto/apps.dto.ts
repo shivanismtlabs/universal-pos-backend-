@@ -81,6 +81,31 @@ export class SetCommerceModesDto {
   tagline?: string;
 }
 
+/**
+ * Pick a business profile (retail, restaurant, salon, …).
+ * New profiles live only in BUSINESS_CONFIG_REGISTRY — not new apps.
+ */
+export class SetBusinessConfigDto {
+  @ApiProperty({
+    example: 'retail',
+    description:
+      'business type id from GET /commerce/business-configs (retail, grocery, restaurant, salon, service, general)',
+  })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(40)
+  businessType!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'When true (default), enable that profile’s defaultCommerceModes',
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  applyDefaultModes?: boolean;
+}
+
 /** Generic catalog create — mode must be a registered commerce mode */
 export class CreateCatalogItemDto {
   @ApiProperty({ enum: REGISTERED_COMMERCE_MODES })

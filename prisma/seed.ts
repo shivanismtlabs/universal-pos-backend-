@@ -1,18 +1,26 @@
 /**
- * Universal Business OS seed — Phase 1 MVP (sale-only)
+ * Universal POS demo seed — multi business-type shops + users
  *
- * Tenants:
- *   demo-shop   — retail demo (INR)
- *   pool-store  — The Pool Store style retail (USD) — best for client demos
+ * Login (all users):  WalitShop@2026
+ * Portal/login email is each owner email below.
  *
- * Password (all): WalitShop@2026
+ * Shops:
+ *   retail-demo     — Blue T-shirt (brand/size/colour)
+ *   grocery-demo    — 1L milk (pack size / expiry)
+ *   salon-demo      — Haircut (duration minutes)
+ *   restaurant-demo — Paneer dish (modifiers)
+ *   rental-demo     — Formal rental catalog (units)
  */
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, type Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import {
   ensurePlatformCatalog,
   provisionTenantWithAdmin,
 } from '../src/common/provision-tenant';
+import {
+  getBusinessConfig,
+  registryToDbPayload,
+} from '../src/common/business-config';
 import {
   POOL_STORE_CATEGORIES,
   POOL_STORE_PRODUCTS,
@@ -26,6 +34,28 @@ import {
 const prisma = new PrismaClient();
 const ADMIN_PASSWORD = 'WalitShop@2026';
 const BCRYPT_ROUNDS = 12;
+
+const SALE_MODULES = [
+  'core',
+  'iam',
+  'catalog',
+  'inventory',
+  'orders',
+  'pos',
+  'payments',
+  'reports',
+  'notify',
+] as const;
+
+const RENTAL_MODULES = [
+  ...SALE_MODULES,
+  'rental',
+] as const;
+
+const SALON_MODULES = [
+  ...SALE_MODULES,
+  'appointments',
+] as const;
 
 async function wipeAllBusinessData() {
   await prisma.payment.deleteMany();
@@ -46,6 +76,36 @@ async function wipeAllBusinessData() {
   await prisma.modRentalPartyMember.deleteMany();
   await prisma.modRentalParty.deleteMany();
   await prisma.modRentalMeasurement.deleteMany();
+  try {
+    await prisma.purchaseOrderLine.deleteMany();
+  } catch {
+    /* */
+  }
+  try {
+    await prisma.customerSubscription.deleteMany();
+  } catch {
+    /* */
+  }
+  try {
+    await prisma.couponRedemption.deleteMany();
+  } catch {
+    /* */
+  }
+  try {
+    await prisma.coupon.deleteMany();
+  } catch {
+    /* */
+  }
+  try {
+    await prisma.expense.deleteMany();
+  } catch {
+    /* */
+  }
+  try {
+    await prisma.expenseCategory.deleteMany();
+  } catch {
+    /* */
+  }
   await prisma.stockLevel.deleteMany();
   await prisma.stockUnit.deleteMany();
   await prisma.purchaseOrder.deleteMany();
@@ -68,6 +128,22 @@ async function wipeAllBusinessData() {
   await prisma.tenantModule.deleteMany();
   await prisma.featureFlag.deleteMany();
   await prisma.tenantSubscription.deleteMany();
+  try {
+    await prisma.businessConfig.deleteMany();
+  } catch {
+    /* table may not exist on very old DBs */
+  }
+  try {
+    await prisma.identityTenantMembership.deleteMany();
+    await prisma.identityAccount.deleteMany();
+  } catch {
+    /* optional */
+  }
+  try {
+    await prisma.authOtpChallenge.deleteMany();
+  } catch {
+    /* optional */
+  }
   await prisma.user.deleteMany();
   await prisma.role.deleteMany();
   await prisma.team.deleteMany();
@@ -128,28 +204,131 @@ async function addStaff(
   }
 }
 
-async function seedDemoShop(passwordHash: string) {
+/** Portal identity so email login → organizations works like signup */
+async function linkIdentity(
+  passwordHash: string,
+  email: string,
+  fullName: string,
+  phone: string | undefined,
+  tenantId: string,
+  userId: string,
+) {
+  const identity = await prisma.identityAccount.upsert({
+    where: { email: email.toLowerCase() },
+    create: {
+      email: email.toLowerCase(),
+      passwordHash,
+      fullName,
+      phone: phone ?? null,
+    },
+    update: {
+      passwordHash,
+      fullName,
+      phone: phone ?? null,
+    },
+  });
+  await prisma.identityTenantMembership.upsert({
+    where: {
+      identityId_tenantId: {
+        identityId: identity.id,
+        tenantId,
+      },
+    },
+    create: {
+      identityId: identity.id,
+      tenantId,
+      userId,
+    },
+    update: { userId },
+  });
+  return identity;
+}
+
+async function applyBusinessType(
+  tenantId: string,
+  businessType: string,
+  modes: string[],
+) {
+  const profile = getBusinessConfig(businessType);
+  const payload = registryToDbPayload(profile);
+  await prisma.businessConfig.upsert({
+    where: { tenantId },
+    create: {
+      tenantId,
+      businessType: payload.businessType,
+      itemFields: payload.itemFields as Prisma.InputJsonValue,
+      orderFields: payload.orderFields as Prisma.InputJsonValue,
+      uiFlow: payload.uiFlow as Prisma.InputJsonValue,
+      billing: payload.billing as Prisma.InputJsonValue,
+    },
+    update: {
+      businessType: payload.businessType,
+      itemFields: payload.itemFields as Prisma.InputJsonValue,
+      orderFields: payload.orderFields as Prisma.InputJsonValue,
+      uiFlow: payload.uiFlow as Prisma.InputJsonValue,
+      billing: payload.billing as Prisma.InputJsonValue,
+    },
+  });
+
+  const tenant = await prisma.tenant.findUniqueOrThrow({
+    where: { id: tenantId },
+  });
+  const prev = (tenant.settings ?? {}) as Record<string, unknown>;
+  await prisma.tenant.update({
+    where: { id: tenantId },
+    data: {
+      settings: {
+        ...prev,
+        businessType: profile.id,
+        businessConfigId: profile.id,
+        businessConfigSetAt: new Date().toISOString(),
+        commerceModes: modes,
+        commerceSetupAt: new Date().toISOString(),
+      } as Prisma.InputJsonValue,
+    },
+  });
+}
+
+async function seedSaleShop(opts: {
+  passwordHash: string;
+  tenantName: string;
+  slug: string;
+  adminEmail: string;
+  adminFullName: string;
+  adminPhone: string;
+  businessType: string;
+  commerceModes: string[];
+  modules: readonly string[];
+  brandingTagline: string;
+  category: string;
+  product: {
+    name: string;
+    sku: string;
+    price: number;
+    qty: number;
+    kind?: 'physical' | 'service';
+    trackQty?: boolean;
+    meta: Record<string, unknown>;
+  };
+  staff: Array<{
+    email: string;
+    fullName: string;
+    role: string;
+    code: string;
+  }>;
+}) {
   const result = await prisma.$transaction(async (tx) =>
     provisionTenantWithAdmin(tx, {
-      tenantName: 'Demo Shop',
-      slug: 'demo-shop',
-      taxId: '29AABCU9603R1ZM',
-      locationName: 'MG Road Flagship',
-      adminEmail: 'owner@demo.shop',
-      adminFullName: 'Demo Owner',
-      adminPhone: '9811111111',
-      passwordHash,
-      moduleCodes: [
-        'core',
-        'iam',
-        'catalog',
-        'inventory',
-        'orders',
-        'pos',
-        'payments',
-        'reports',
-        'notify',
-      ],
+      tenantName: opts.tenantName,
+      slug: opts.slug,
+      locationName: 'Main Store',
+      adminEmail: opts.adminEmail,
+      adminFullName: opts.adminFullName,
+      adminPhone: opts.adminPhone,
+      passwordHash: opts.passwordHash,
+      currencyCode: 'INR',
+      locale: 'en-IN',
+      moduleCodes: [...opts.modules],
     }),
   );
 
@@ -157,23 +336,129 @@ async function seedDemoShop(passwordHash: string) {
     where: { id: result.tenant.id },
     data: {
       branding: {
-        productName: 'Demo Shop',
-        tagline: 'Point of sale for your business',
+        productName: opts.tenantName,
+        tagline: opts.brandingTagline,
       },
-      settings: { industry: 'general', commerceModes: ['sale'] },
     },
   });
 
-  await prisma.location.create({
+  await applyBusinessType(
+    result.tenant.id,
+    opts.businessType,
+    opts.commerceModes,
+  );
+
+  const cat = await prisma.category.create({
+    data: { tenantId: result.tenant.id, name: opts.category },
+  });
+
+  const product = await prisma.product.create({
     data: {
       tenantId: result.tenant.id,
-      organizationId: result.organization.id,
-      name: 'City Warehouse',
-      code: 'WH01',
-      type: 'warehouse',
-      isActive: true,
+      categoryId: cat.id,
+      name: opts.product.name,
+      skuCode: opts.product.sku,
+      kind: opts.product.kind ?? 'physical',
+      fulfillmentMode: 'sale',
+      basePrice: opts.product.price,
+      trackQty: opts.product.trackQty ?? true,
+      trackSerial: false,
+      meta: {
+        sellUnit: 'pcs',
+        itemType: opts.product.kind === 'service' ? 'service' : 'goods',
+        ...opts.product.meta,
+      },
     },
   });
+
+  if (opts.product.trackQty !== false && opts.product.kind !== 'service') {
+    await prisma.stockLevel.create({
+      data: {
+        tenantId: result.tenant.id,
+        locationId: result.location.id,
+        productId: product.id,
+        sku: opts.product.sku,
+        sellUnit: 'pcs',
+        qtyOnHand: opts.product.qty,
+        sellPrice: opts.product.price,
+      },
+    });
+  } else {
+    await prisma.stockLevel.create({
+      data: {
+        tenantId: result.tenant.id,
+        locationId: result.location.id,
+        productId: product.id,
+        sku: opts.product.sku,
+        sellUnit: 'pcs',
+        qtyOnHand: 0,
+        sellPrice: opts.product.price,
+      },
+    });
+  }
+
+  await addStaff(
+    result.tenant.id,
+    result.location.id,
+    opts.passwordHash,
+    opts.staff,
+  );
+
+  await linkIdentity(
+    opts.passwordHash,
+    opts.adminEmail,
+    opts.adminFullName,
+    opts.adminPhone,
+    result.tenant.id,
+    result.user.id,
+  );
+
+  for (const s of opts.staff) {
+    const u = await prisma.user.findFirst({
+      where: { tenantId: result.tenant.id, email: s.email },
+    });
+    if (u) {
+      await linkIdentity(
+        opts.passwordHash,
+        s.email,
+        s.fullName,
+        undefined,
+        result.tenant.id,
+        u.id,
+      );
+    }
+  }
+
+  return { ...result, productName: product.name, productSku: product.skuCode };
+}
+
+async function seedRentalDemo(passwordHash: string) {
+  const result = await prisma.$transaction(async (tx) =>
+    provisionTenantWithAdmin(tx, {
+      tenantName: 'City Rental Demo',
+      slug: 'rental-demo',
+      taxId: '29RENTALDEMO1Z5',
+      locationName: 'Rental Flagship',
+      adminEmail: 'owner@rental.demo',
+      adminFullName: 'Rental Owner',
+      adminPhone: '9811122233',
+      passwordHash,
+      moduleCodes: [...RENTAL_MODULES],
+    }),
+  );
+
+  await prisma.tenant.update({
+    where: { id: result.tenant.id },
+    data: {
+      branding: {
+        productName: 'City Rental',
+        tagline: 'Formal wear & gear rental',
+      },
+    },
+  });
+
+  // rental shops still use a general-ish config + rental mode
+  await applyBusinessType(result.tenant.id, 'general', ['rental', 'sale']);
 
   const categoryIds = new Map<string, string>();
   for (const name of FORMAL_CATEGORIES) {
@@ -184,8 +469,7 @@ async function seedDemoShop(passwordHash: string) {
   }
 
   let unitCount = 0;
-  let firstUnitId: string | null = null;
-  for (const p of FORMAL_PRODUCTS) {
+  for (const p of FORMAL_PRODUCTS.slice(0, 6)) {
     const product = await prisma.product.create({
       data: {
         tenantId: result.tenant.id,
@@ -197,11 +481,15 @@ async function seedDemoShop(passwordHash: string) {
         basePrice: p.rentalPrice,
         trackQty: false,
         trackSerial: true,
-        meta: { vertical: 'formal_rental' },
+        meta: {
+          vertical: 'formal_rental',
+          sellUnit: 'pcs',
+          itemType: 'goods',
+        },
       },
     });
-    for (const u of p.units) {
-      const unit = await prisma.stockUnit.create({
+    for (const u of p.units.slice(0, 2)) {
+      await prisma.stockUnit.create({
         data: {
           tenantId: result.tenant.id,
           locationId: result.location.id,
@@ -216,93 +504,41 @@ async function seedDemoShop(passwordHash: string) {
         },
       });
       unitCount += 1;
-      if (!firstUnitId) firstUnitId = unit.id;
     }
   }
 
-  const groom = await prisma.customer.create({
-    data: {
-      tenantId: result.tenant.id,
-      fullName: 'Arjun Mehta',
-      phone: '9822222201',
-      email: 'arjun.mehta@example.com',
-      notes: 'Groom — Dec wedding',
-    },
-  });
-  const bestMan = await prisma.customer.create({
-    data: {
-      tenantId: result.tenant.id,
-      fullName: 'Rohan Shah',
-      phone: '9822222202',
-      email: 'rohan.shah@example.com',
-    },
-  });
-
-  await prisma.modRentalMeasurement.create({
-    data: {
-      tenantId: result.tenant.id,
-      customerId: groom.id,
-      heightCm: 178,
-      chest: 102,
-      waist: 86,
-      inseam: 81,
-      sleeve: 64,
-      shoeSize: '9',
-      extras: {},
-    },
-  });
-
-  const party = await prisma.modRentalParty.create({
-    data: {
-      tenantId: result.tenant.id,
-      name: 'Mehta Wedding Party',
-      eventDate: new Date('2026-12-15'),
-      primaryCustomerId: groom.id,
-      members: {
-        create: [
-          { customerId: groom.id, roleLabel: 'groom' },
-          { customerId: bestMan.id, roleLabel: 'best_man' },
-        ],
-      },
-    },
-  });
-
   await addStaff(result.tenant.id, result.location.id, passwordHash, [
     {
-      email: 'manager@demo.shop',
-      fullName: 'Store Manager',
+      email: 'manager@rental.demo',
+      fullName: 'Rental Manager',
       role: 'manager',
-      code: 'E002',
+      code: 'R002',
     },
     {
-      email: 'cashier@demo.shop',
-      fullName: 'Front Cashier',
+      email: 'cashier@rental.demo',
+      fullName: 'Rental Cashier',
       role: 'cashier',
-      code: 'E003',
-    },
-    {
-      email: 'fitter@demo.shop',
-      fullName: 'Lead Fitter',
-      role: 'fitter',
-      code: 'E004',
+      code: 'R003',
     },
   ]);
 
-  return {
-    ...result,
-    unitCount,
-    firstUnitId,
-    groom,
-    party,
-  };
+  await linkIdentity(
+    passwordHash,
+    'owner@rental.demo',
+    'Rental Owner',
+    '9811122233',
+    result.tenant.id,
+    result.user.id,
+  );
+
+  return { unitCount, tenant: result.tenant };
 }
 
-async function seedPoolStore(passwordHash: string) {
+async function seedPoolStoreLight(passwordHash: string) {
   const result = await prisma.$transaction(async (tx) =>
     provisionTenantWithAdmin(tx, {
       tenantName: 'The Pool Store',
       slug: 'pool-store',
-      taxId: 'US-GA-POOL',
       locationName: 'Valdosta Flagship',
       adminEmail: 'owner@pool.demo',
       adminFullName: 'Pool Store Owner',
@@ -312,59 +548,32 @@ async function seedPoolStore(passwordHash: string) {
       locale: 'en-US',
       timezone: 'America/New_York',
       taxMode: 'simple',
-      moduleCodes: [
-        'core',
-        'iam',
-        'catalog',
-        'inventory',
-        'orders',
-        'pos',
-        'payments',
-        'reports',
-        'notify',
-      ],
+      moduleCodes: [...SALE_MODULES],
     }),
   );
+
+  await applyBusinessType(result.tenant.id, 'retail', ['sale']);
 
   await prisma.tenant.update({
     where: { id: result.tenant.id },
     data: {
-      name: 'The Pool Store',
       branding: {
         productName: 'The Pool Store',
-        tagline: 'Example shop — Universal POS works for any catalog',
-        primaryColor: '#0c4a6e',
+        tagline: 'Universal POS retail sample catalog',
       },
-      settings: {
-        // Industry tag is metadata only — POS stays universal Sale keys
-        industry: 'retail',
-        country: 'US',
-        state: 'GA',
-        city: 'Valdosta',
-        phone: '229-247-6440',
-        commerceModes: ['sale'],
-        commerceSetupAt: new Date().toISOString(),
-      },
-    },
-  });
-
-  await prisma.location.update({
-    where: { id: result.location.id },
-    data: {
-      address: '3363 North Valdosta Road, Valdosta, GA 31602',
-      regionCode: 'GA',
     },
   });
 
   const categoryIds = new Map<string, string>();
-  for (const name of POOL_STORE_CATEGORIES) {
+  for (const name of POOL_STORE_CATEGORIES.slice(0, 4)) {
     const cat = await prisma.category.create({
       data: { tenantId: result.tenant.id, name },
     });
     categoryIds.set(name, cat.id);
   }
 
-  for (const p of POOL_STORE_PRODUCTS) {
+  const products = POOL_STORE_PRODUCTS.slice(0, 8);
+  for (const p of products) {
     const product = await prisma.product.create({
       data: {
         tenantId: result.tenant.id,
@@ -375,9 +584,8 @@ async function seedPoolStore(passwordHash: string) {
         fulfillmentMode: 'sale',
         basePrice: p.price,
         trackQty: true,
-        trackSerial: false,
         photoUrl: poolProductImageDataUrl(p.category, p.name),
-        meta: {},
+        meta: { sellUnit: 'pcs', brand: 'PoolPro' },
       },
     });
     await prisma.stockLevel.create({
@@ -392,40 +600,6 @@ async function seedPoolStore(passwordHash: string) {
     });
   }
 
-  // Universal custom field demo (any retail can define their own keys)
-  const field = await prisma.customFieldDefinition.create({
-    data: {
-      tenantId: result.tenant.id,
-      entity: 'customer',
-      fieldKey: 'loyalty_note',
-      label: 'Loyalty note',
-      dataType: 'text',
-      required: false,
-      moduleCode: 'catalog',
-      sortOrder: 1,
-    },
-  });
-
-  const customer = await prisma.customer.create({
-    data: {
-      tenantId: result.tenant.id,
-      fullName: 'Jordan Hayes',
-      phone: '2292476440',
-      email: 'jordan.hayes@example.com',
-      notes: 'Regular Valdosta customer',
-      meta: { city: 'Valdosta', state: 'GA' },
-    },
-  });
-
-  await prisma.customFieldValue.create({
-    data: {
-      tenantId: result.tenant.id,
-      definitionId: field.id,
-      entityId: customer.id,
-      valueText: 'Preferred contact: store phone',
-    },
-  });
-
   await addStaff(result.tenant.id, result.location.id, passwordHash, [
     {
       email: 'cashier@pool.demo',
@@ -434,43 +608,192 @@ async function seedPoolStore(passwordHash: string) {
       code: 'E002',
     },
   ]);
+  await linkIdentity(
+    passwordHash,
+    'owner@pool.demo',
+    'Pool Store Owner',
+    '9876500001',
+    result.tenant.id,
+    result.user.id,
+  );
 
-  await prisma.featureFlag.create({
-    data: {
-      tenantId: result.tenant.id,
-      key: 'offline_pos',
-      enabled: true,
-    },
-  });
-
-  return {
-    tenant: result.tenant,
-    location: result.location,
-    productCount: POOL_STORE_PRODUCTS.length,
-    customer,
-  };
+  return { productCount: products.length };
 }
 
 async function main() {
-  console.log('Phase 1 MVP seed — wiping + demo-shop + pool-store (sale-only)…');
+  console.log('Universal POS seed — multi business demos…');
   await wipeAllBusinessData();
   await ensurePlatformCatalog(prisma);
   const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, BCRYPT_ROUNDS);
 
-  const demo = await seedDemoShop(passwordHash);
-  const pool = await seedPoolStore(passwordHash);
+  const retail = await seedSaleShop({
+    passwordHash,
+    tenantName: 'Urban Retail Demo',
+    slug: 'retail-demo',
+    adminEmail: 'owner@retail.demo',
+    adminFullName: 'Retail Owner',
+    adminPhone: '9800000001',
+    businessType: 'retail',
+    commerceModes: ['sale'],
+    modules: SALE_MODULES,
+    brandingTagline: 'Apparel · catalog + counter',
+    category: 'Apparel',
+    product: {
+      name: 'Blue T-shirt',
+      sku: 'RET-TSHIRT-BLU-M',
+      price: 599,
+      qty: 40,
+      meta: {
+        brand: 'UrbanWear',
+        size: 'M',
+        color: 'Blue',
+        manufacturer: 'UrbanWear Co',
+      },
+    },
+    staff: [
+      {
+        email: 'cashier@retail.demo',
+        fullName: 'Retail Cashier',
+        role: 'cashier',
+        code: 'RT02',
+      },
+      {
+        email: 'manager@retail.demo',
+        fullName: 'Retail Manager',
+        role: 'manager',
+        code: 'RT03',
+      },
+    ],
+  });
 
-  console.log('Seeded Phase 1 MVP (sale-only)');
-  console.log('  demo-shop  owner@demo.shop / WalitShop@2026 (INR retail)');
+  const grocery = await seedSaleShop({
+    passwordHash,
+    tenantName: 'Fresh Grocery Demo',
+    slug: 'grocery-demo',
+    adminEmail: 'owner@grocery.demo',
+    adminFullName: 'Grocery Owner',
+    adminPhone: '9800000002',
+    businessType: 'grocery',
+    commerceModes: ['sale'],
+    modules: SALE_MODULES,
+    brandingTagline: 'Pack goods · stock-heavy selling',
+    category: 'Dairy',
+    product: {
+      name: '1L Full Cream Milk',
+      sku: 'GRC-MILK-1L',
+      price: 62,
+      qty: 120,
+      meta: {
+        packSize: '1 L',
+        expiryTracked: true,
+        sellUnit: 'pcs',
+        perishable: true,
+        brand: 'FarmFresh',
+      },
+    },
+    staff: [
+      {
+        email: 'cashier@grocery.demo',
+        fullName: 'Grocery Cashier',
+        role: 'cashier',
+        code: 'GR02',
+      },
+    ],
+  });
+
+  const salon = await seedSaleShop({
+    passwordHash,
+    tenantName: 'Luxe Salon Demo',
+    slug: 'salon-demo',
+    adminEmail: 'owner@salon.demo',
+    adminFullName: 'Salon Owner',
+    adminPhone: '9800000003',
+    businessType: 'salon',
+    commerceModes: ['service', 'sale'],
+    modules: SALON_MODULES,
+    brandingTagline: 'Services + appointments',
+    category: 'Hair',
+    product: {
+      name: 'Haircut – Men',
+      sku: 'SAL-CUT-MEN',
+      price: 350,
+      qty: 0,
+      kind: 'service',
+      trackQty: false,
+      meta: {
+        durationMinutes: 30,
+        staffSkill: 'Stylist',
+        itemType: 'service',
+        returnable: false,
+      },
+    },
+    staff: [
+      {
+        email: 'stylist@salon.demo',
+        fullName: 'Lead Stylist',
+        role: 'manager',
+        code: 'SL02',
+      },
+      {
+        email: 'cashier@salon.demo',
+        fullName: 'Salon Cashier',
+        role: 'cashier',
+        code: 'SL03',
+      },
+    ],
+  });
+
+  const restaurant = await seedSaleShop({
+    passwordHash,
+    tenantName: 'Spice Table Demo',
+    slug: 'restaurant-demo',
+    adminEmail: 'owner@restaurant.demo',
+    adminFullName: 'Restaurant Owner',
+    adminPhone: '9800000004',
+    businessType: 'restaurant',
+    commerceModes: ['sale'],
+    modules: SALE_MODULES,
+    brandingTagline: 'Menu items · table meta on orders',
+    category: 'Mains',
+    product: {
+      name: 'Paneer Butter Masala',
+      sku: 'RST-PANEER-BM',
+      price: 280,
+      qty: 999,
+      meta: {
+        modifiers: ['Extra cheese', 'No onion', 'Extra gravy', 'Butter naan side'],
+        sellUnit: 'pcs',
+        brand: 'House special',
+      },
+    },
+    staff: [
+      {
+        email: 'cashier@restaurant.demo',
+        fullName: 'Floor Cashier',
+        role: 'cashier',
+        code: 'RS02',
+      },
+    ],
+  });
+
+  const rental = await seedRentalDemo(passwordHash);
+  const pool = await seedPoolStoreLight(passwordHash);
+
+  console.log('');
+  console.log('=== Seed complete — password for ALL: WalitShop@2026 ===');
+  console.log('');
+  console.log('Retail     owner@retail.demo     product:', retail.productName);
+  console.log('Grocery    owner@grocery.demo    product:', grocery.productName);
+  console.log('Salon      owner@salon.demo      product:', salon.productName);
   console.log(
-    `  demo catalog: ${demo.unitCount} units, party=${demo.party.name}`,
+    'Restaurant owner@restaurant.demo product:',
+    restaurant.productName,
   );
-  console.log(
-    '  pool-store owner@pool.demo / WalitShop@2026 (USD retail — preferred demo)',
-  );
-  console.log(
-    `  pool-store catalog: ${pool.productCount} SKUs @ ${pool.location.name}`,
-  );
+  console.log('Rental     owner@rental.demo     units:', rental.unitCount);
+  console.log('Pool (retail sample) owner@pool.demo SKUs:', pool.productCount);
+  console.log('');
+  console.log('Also staff: cashier@*.demo / manager@retail.demo etc (same password)');
+  console.log('Login at /login → pick organization if portal lists multiple.');
 }
 
 main()

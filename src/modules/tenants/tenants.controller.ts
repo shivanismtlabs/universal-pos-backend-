@@ -8,7 +8,7 @@ import {
   Post,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { RoleGroup } from '../../common/roles';
+import { RoleGroup, Role } from '../../common/roles';
 import { Roles } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
@@ -65,8 +65,8 @@ export class TenantsController {
   }
 
   @Post('locations')
-  @Roles(...RoleGroup.ownerOnly)
-  @ApiOperation({ summary: 'Create location' })
+  @Roles(...RoleGroup.lead, Role.inventory)
+  @ApiOperation({ summary: 'Create location (store / warehouse / …)' })
   createLocation(
     @CurrentUser() user: AuthUser,
     @Body() dto: CreateLocationDto,

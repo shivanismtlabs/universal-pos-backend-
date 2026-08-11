@@ -443,6 +443,8 @@ export class InventoryService {
         qty: number;
         fromQtyOnHand: number;
         toQtyOnHand: number;
+        fromLevelId: string;
+        toLevelId: string;
       }> = [];
 
       for (const line of dto.lines) {
@@ -532,6 +534,8 @@ export class InventoryService {
           qty,
           fromQtyOnHand: Number(updatedFrom.qtyOnHand),
           toQtyOnHand: Number(toLevel.qtyOnHand),
+          fromLevelId: fromLevel.id,
+          toLevelId: toLevel.id,
         });
       }
 
@@ -554,6 +558,37 @@ export class InventoryService {
         },
       });
 
+      for (const m of moved) {
+        await tx.stockLedgerEntry.create({
+          data: {
+            tenantId: user.tenantId,
+            locationId: dto.fromLocationId,
+            productId: m.productId,
+            stockLevelId: m.fromLevelId,
+            type: 'transfer_out',
+            qtyDelta: -m.qty,
+            qtyAfter: m.fromQtyOnHand,
+            reason: dto.notes ?? null,
+            referenceType: 'stock_transfer',
+            actorUserId: user.userId,
+          },
+        });
+        await tx.stockLedgerEntry.create({
+          data: {
+            tenantId: user.tenantId,
+            locationId: dto.toLocationId,
+            productId: m.productId,
+            stockLevelId: m.toLevelId,
+            type: 'transfer_in',
+            qtyDelta: m.qty,
+            qtyAfter: m.toQtyOnHand,
+            reason: dto.notes ?? null,
+            referenceType: 'stock_transfer',
+            actorUserId: user.userId,
+          },
+        });
+      }
+
       return moved;
     });
 
@@ -561,7 +596,7 @@ export class InventoryService {
       fromLocationId: dto.fromLocationId,
       toLocationId: dto.toLocationId,
       notes: dto.notes ?? null,
-      lines: result,
+      lines: result.map(({ fromLevelId: _f, toLevelId: _t, ...rest }) => rest),
     };
   }
 

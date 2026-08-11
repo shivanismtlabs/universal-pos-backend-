@@ -27,13 +27,26 @@ import {
   TransferStockDto,
   UpdateUnitStatusDto,
 } from './dto/inventory.dto';
+import {
+  CompleteStockCountDto,
+  CreateStockCountDto,
+  DamageStockDto,
+  ListLedgerQueryDto,
+  SetReorderDto,
+  StockMoveDto,
+  UpsertStockCountLinesDto,
+} from './dto/inventory-ops.dto';
+import { InventoryOpsService } from './inventory-ops.service';
 import { InventoryService } from './inventory.service';
 
 @ApiTags('inventory')
 @ApiBearerAuth('access-token')
 @Controller()
 export class InventoryController {
-  constructor(private readonly inventoryService: InventoryService) {}
+  constructor(
+    private readonly inventoryService: InventoryService,
+    private readonly ops: InventoryOpsService,
+  ) {}
 
   @Post('categories')
   @Roles(...RoleGroup.catalogWrite)
@@ -208,5 +221,143 @@ export class InventoryController {
     @Body() dto: TransferStockDto,
   ) {
     return this.inventoryService.transferStock(user, dto);
+  }
+
+  // ── Inventory operations (stock in/out, ledger, audit, damage, reorder) ─
+
+  @Post('inventory/stock-in')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Stock In — increase sellable qty' })
+  stockIn(@CurrentUser() user: AuthUser, @Body() dto: StockMoveDto) {
+    return this.ops.stockIn(user, dto);
+  }
+
+  @Post('inventory/stock-out')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Stock Out — decrease sellable qty' })
+  stockOut(@CurrentUser() user: AuthUser, @Body() dto: StockMoveDto) {
+    return this.ops.stockOut(user, dto);
+  }
+
+  @Post('inventory/adjust')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Signed stock adjustment' })
+  adjust(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      locationId: string;
+      stockLevelId?: string;
+      productId?: string;
+      delta: number;
+      reason?: string;
+    },
+  ) {
+    return this.ops.adjust(user, body);
+  }
+
+  @Post('inventory/damage')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Move sellable qty to damaged quarantine' })
+  markDamaged(@CurrentUser() user: AuthUser, @Body() dto: DamageStockDto) {
+    return this.ops.markDamaged(user, dto);
+  }
+
+  @Post('inventory/damage/restore')
+  @Roles(...RoleGroup.catalogWrite)
+  restoreDamaged(@CurrentUser() user: AuthUser, @Body() dto: DamageStockDto) {
+    return this.ops.restoreDamaged(user, dto);
+  }
+
+  @Patch('inventory/reorder')
+  @Roles(...RoleGroup.catalogWrite)
+  setReorder(@CurrentUser() user: AuthUser, @Body() dto: SetReorderDto) {
+    return this.ops.setReorder(user, dto);
+  }
+
+  @Get('inventory/levels')
+  @Roles(...RoleGroup.catalogRead)
+  listLevels(
+    @CurrentUser() user: AuthUser,
+    @Query('locationId') locationId?: string,
+    @Query('q') q?: string,
+    @Query('lowStock') lowStock?: string,
+    @Query('includeZero') includeZero?: string,
+  ) {
+    return this.ops.listLevels(user, {
+      locationId,
+      q,
+      lowStockOnly: lowStock === '1' || lowStock === 'true',
+      includeZero: includeZero === '1' || includeZero === 'true',
+    });
+  }
+
+  @Get('inventory/low-stock')
+  @Roles(...RoleGroup.catalogRead)
+  lowStock(
+    @CurrentUser() user: AuthUser,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.ops.lowStockAlerts(user, locationId);
+  }
+
+  @Get('inventory/ledger')
+  @Roles(...RoleGroup.catalogRead)
+  ledger(
+    @CurrentUser() user: AuthUser,
+    @Query() query: ListLedgerQueryDto,
+  ) {
+    return this.ops.listLedger(user, query);
+  }
+
+  @Post('inventory/counts')
+  @Roles(...RoleGroup.catalogWrite)
+  createCount(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateStockCountDto,
+  ) {
+    return this.ops.createCount(user, dto);
+  }
+
+  @Get('inventory/counts')
+  @Roles(...RoleGroup.catalogRead)
+  listCounts(
+    @CurrentUser() user: AuthUser,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.ops.listCounts(user, locationId);
+  }
+
+  @Get('inventory/counts/:id')
+  @Roles(...RoleGroup.catalogRead)
+  getCount(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.ops.getCount(user, id);
+  }
+
+  @Post('inventory/counts/:id/lines')
+  @Roles(...RoleGroup.catalogWrite)
+  upsertCountLines(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpsertStockCountLinesDto,
+  ) {
+    return this.ops.upsertCountLines(user, id, dto.lines);
+  }
+
+  @Post('inventory/counts/:id/complete')
+  @Roles(...RoleGroup.catalogWrite)
+  completeCount(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CompleteStockCountDto,
+  ) {
+    return this.ops.completeCount(
+      user,
+      id,
+      dto.apply !== false && dto.apply !== 'false',
+    );
   }
 }

@@ -268,6 +268,22 @@ export class SuppliersService {
           data: { qtyOnHand: { increment: incoming.qty } },
         });
 
+        await tx.stockLedgerEntry.create({
+          data: {
+            tenantId: user.tenantId,
+            locationId: level.locationId,
+            productId: level.productId,
+            stockLevelId: level.id,
+            type: 'purchase_receive',
+            qtyDelta: incoming.qty,
+            qtyAfter: Number(updated.qtyOnHand),
+            reason: `PO ${po.id}`,
+            referenceType: 'purchase_order',
+            referenceId: po.id,
+            actorUserId: user.userId,
+          },
+        });
+
         results.push({
           stockLevelId: level.id,
           sku: level.sku,
@@ -380,6 +396,21 @@ export class SuppliersService {
         const updated = await tx.stockLevel.update({
           where: { id: level.id },
           data: { qtyOnHand: { decrement: line.qty } },
+        });
+        await tx.stockLedgerEntry.create({
+          data: {
+            tenantId: user.tenantId,
+            locationId: level.locationId,
+            productId: level.productId,
+            stockLevelId: level.id,
+            type: 'purchase_return',
+            qtyDelta: -line.qty,
+            qtyAfter: Number(updated.qtyOnHand),
+            reason: dto.reason?.trim() || `RTV PO ${po.id}`,
+            referenceType: 'purchase_order',
+            referenceId: po.id,
+            actorUserId: user.userId,
+          },
         });
         results.push({
           stockLevelId: level.id,

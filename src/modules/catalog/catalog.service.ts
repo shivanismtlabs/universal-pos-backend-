@@ -30,10 +30,36 @@ import {
   UpdateVariantDto,
 } from './dto/catalog.dto';
 import { randomBytes } from 'crypto';
+import { saveProductImage } from '../../common/product-image';
 
 function dec(n: number | null | undefined) {
   if (n == null || !Number.isFinite(n)) return null;
   return new Prisma.Decimal(n);
+}
+
+/** Persist data-URL / base64 images; keep http(s) and /v1/uploads paths as-is. */
+async function resolveImageRef(
+  tenantId: string,
+  raw?: string | null,
+): Promise<string | null> {
+  const value = raw?.trim();
+  if (!value) return null;
+  if (value.startsWith('data:')) {
+    return saveProductImage(tenantId, value);
+  }
+  return value;
+}
+
+async function resolveImageList(
+  tenantId: string,
+  photos: string[],
+): Promise<string[]> {
+  const out: string[] = [];
+  for (const photo of photos.slice(0, 12)) {
+    const saved = await resolveImageRef(tenantId, photo);
+    if (saved && !out.includes(saved)) out.push(saved);
+  }
+  return out;
 }
 
 function kindPrefix(kind?: ProductKind | string) {
@@ -514,13 +540,16 @@ export class CatalogService {
 
     const unit = (dto.unitOfMeasure || 'pcs').trim().slice(0, 16) || 'pcs';
     const price = Number(dto.basePrice ?? 0);
-    const images = (dto.images ?? []).filter(Boolean).slice(0, 12);
-    const photoUrl = dto.photoUrl?.trim() || images[0] || null;
+    const resolvedImages = await resolveImageList(user.tenantId, [
+      ...(dto.photoUrl?.trim() ? [dto.photoUrl.trim()] : []),
+      ...((dto.images ?? []).filter(Boolean) as string[]),
+    ]);
+    const photoUrl = resolvedImages[0] ?? null;
     const meta: Record<string, unknown> = {
       ...(dto.extraFields && typeof dto.extraFields === 'object'
         ? dto.extraFields
         : {}),
-      ...(images.length ? { images } : {}),
+      ...(resolvedImages.length ? { images: resolvedImages } : {}),
       sellUnit: unit,
     };
 
@@ -637,8 +666,30 @@ export class CatalogService {
 
     const prevMeta = (existing.meta ?? {}) as Record<string, unknown>;
     let nextMeta = { ...prevMeta };
+    let nextPhotoUrl: string | null | undefined;
     if (dto.images) {
-      nextMeta.images = dto.images.filter(Boolean).slice(0, 12);
+      const resolved = await resolveImageList(user.tenantId, [
+        ...(dto.photoUrl?.trim() ? [dto.photoUrl.trim()] : []),
+        ...dto.images.filter(Boolean),
+      ]);
+      nextMeta.images = resolved;
+      if (dto.photoUrl !== undefined) {
+        nextPhotoUrl = resolved[0] ?? null;
+      } else if (!existing.photoUrl && resolved[0]) {
+        nextPhotoUrl = resolved[0];
+      }
+    } else if (dto.photoUrl !== undefined) {
+      nextPhotoUrl = await resolveImageRef(user.tenantId, dto.photoUrl);
+      if (nextPhotoUrl) {
+        const gallery = Array.isArray(nextMeta.images)
+          ? (nextMeta.images as string[]).filter((u) => u !== nextPhotoUrl)
+          : [];
+        nextMeta.images = [nextPhotoUrl, ...gallery].slice(0, 12);
+      } else {
+        nextMeta.images = Array.isArray(nextMeta.images)
+          ? (nextMeta.images as string[]).filter(Boolean)
+          : [];
+      }
     }
     if (dto.extraFields) {
       nextMeta = { ...nextMeta, ...dto.extraFields };
@@ -692,9 +743,7 @@ export class CatalogService {
             ...(dto.description !== undefined
               ? { description: dto.description?.trim() || null }
               : {}),
-            ...(dto.photoUrl !== undefined
-              ? { photoUrl: dto.photoUrl?.trim() || null }
-              : {}),
+            ...(nextPhotoUrl !== undefined ? { photoUrl: nextPhotoUrl } : {}),
             ...(dto.taxCode !== undefined
               ? { taxCode: dto.taxCode?.trim() || null }
               : {}),

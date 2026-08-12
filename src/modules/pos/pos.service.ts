@@ -64,6 +64,7 @@ import type { AuthUser } from '../auth/types';
 import { OrdersService } from '../orders/orders.service';
 import { PaymentsService } from '../payments/payments.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
+import { NotifyService } from '../notify/notify.service';
 import {
   AddSaleCategoryDto,
   AddSaleProductDto,
@@ -91,6 +92,7 @@ const IMMEDIATE_PAY: PaymentMethod[] = [
   PaymentMethod.card,
   PaymentMethod.upi,
   PaymentMethod.store_credit,
+  PaymentMethod.gift_card,
 ];
 
 function money(n: number | string | Prisma.Decimal) {
@@ -104,6 +106,7 @@ export class PosService {
     private readonly paymentsService: PaymentsService,
     private readonly ordersService: OrdersService,
     private readonly loyalty: LoyaltyService,
+    private readonly notify: NotifyService,
   ) {}
 
   /**
@@ -1911,36 +1914,98 @@ export class PosService {
 
       const afterLines = await tx.order.findFirstOrThrow({
         where: { id: created.id },
-        select: { balanceDue: true, subtotal: true },
+        select: { balanceDue: true, subtotal: true, discountTotal: true },
       });
-      const due = money(afterLines.balanceDue);
+
+      const loyaltySettings = this.loyalty.parseLoyaltySettings(tenant.settings);
+      let loyaltyPointsRedeemed = 0;
+      let loyaltyAmountOff = 0;
+      if (
+        dto.loyaltyPointsToRedeem &&
+        dto.loyaltyPointsToRedeem > 0 &&
+        dto.customerId
+      ) {
+        const redeemed = await this.loyalty.redeemPointsInTx(tx, {
+          tenantId: user.tenantId,
+          customerId: dto.customerId,
+          points: dto.loyaltyPointsToRedeem,
+          orderId: created.id,
+          settings: loyaltySettings,
+        });
+        loyaltyPointsRedeemed = redeemed.points;
+        loyaltyAmountOff = redeemed.amountOff;
+        if (loyaltyAmountOff > 0) {
+          const nextDiscount = money(afterLines.discountTotal).plus(
+            loyaltyAmountOff,
+          );
+          await tx.order.update({
+            where: { id: created.id },
+            data: { discountTotal: nextDiscount.toFixed(2) },
+          });
+          await this.ordersService.recalculateTotals(
+            tx,
+            user.tenantId,
+            created.id,
+          );
+        }
+      }
+
+      const dueRow = await tx.order.findFirstOrThrow({
+        where: { id: created.id },
+        select: { balanceDue: true },
+      });
+      const due = money(dueRow.balanceDue);
       if (due.lte(0)) {
         throw new BadRequestException('Sale total must be greater than 0');
       }
 
-      // Single cash tender: always settle the server due (avoids FE/BE rounding drift)
-      const singleCash =
-        dto.payments.length === 1 &&
-        dto.payments[0]!.method === PaymentMethod.cash;
+      // Do not force single-cash to full due — supports partial payments
       const paymentLines = dto.payments.map((p) => ({
         ...p,
-        amount: singleCash ? Number(due.toFixed(2)) : Number(p.amount),
+        amount: Number(p.amount),
       }));
       const paidSum = paymentLines.reduce((s, p) => s + p.amount, 0);
       if (paidSum <= 0) {
         throw new BadRequestException('Payment amount must be greater than 0');
       }
-      if (money(paidSum).lt(due)) {
+
+      const allowPartial = dto.allowPartial === true;
+      if (money(paidSum).lt(due) && !allowPartial) {
         throw new BadRequestException(
-          `Payment ${money(paidSum).toFixed(2)} is less than balance due ${due.toFixed(2)}`,
+          `Payment ${money(paidSum).toFixed(2)} is less than balance due ${due.toFixed(2)}. Enable partial payment or pay the full amount.`,
         );
       }
 
-      const hasCash = paymentLines.some((p) => p.method === PaymentMethod.cash);
-      if (hasCash && dto.cashTendered !== undefined) {
-        if (Number(dto.cashTendered) + 1e-9 < Number(due.toFixed(2))) {
+      // Cap each line so total paid does not exceed due (except cash change via tendered)
+      if (money(paidSum).gt(due.add(0.009))) {
+        const onlyCash =
+          paymentLines.length === 1 &&
+          paymentLines[0]!.method === PaymentMethod.cash;
+        if (!onlyCash) {
           throw new BadRequestException(
-            'Cash tendered is less than payment total',
+            `Payment ${money(paidSum).toFixed(2)} exceeds balance due ${due.toFixed(2)}`,
+          );
+        }
+        paymentLines[0]!.amount = Number(due.toFixed(2));
+      } else if (money(paidSum).gt(due)) {
+        // Tiny float over — clamp last line
+        const excess = money(paidSum).minus(due);
+        const last = paymentLines[paymentLines.length - 1]!;
+        last.amount = Math.max(
+          0.01,
+          Number(money(last.amount).minus(excess).toFixed(2)),
+        );
+      }
+
+      const settledPaid = paymentLines.reduce((s, p) => s + p.amount, 0);
+
+      const cashPortion = paymentLines
+        .filter((p) => p.method === PaymentMethod.cash)
+        .reduce((s, p) => s + p.amount, 0);
+      if (cashPortion > 0 && dto.cashTendered !== undefined) {
+        if (Number(dto.cashTendered) + 1e-9 < cashPortion) {
+          throw new BadRequestException(
+            'Cash tendered is less than cash payment amount',
           );
         }
       }
@@ -1978,6 +2043,24 @@ export class PosService {
           });
         }
 
+        if (
+          p.method === PaymentMethod.gift_card &&
+          status === PaymentStatus.succeeded
+        ) {
+          if (!p.giftCardCode?.trim()) {
+            throw new BadRequestException(
+              'giftCardCode is required for gift card payments',
+            );
+          }
+          await this.loyalty.redeemGiftCardInTx(tx, {
+            tenantId: user.tenantId,
+            code: p.giftCardCode,
+            amount: p.amount,
+            orderId: created.id,
+            userId: user.userId,
+          });
+        }
+
         const payment = await tx.payment.create({
           data: {
             tenantId: user.tenantId,
@@ -1988,6 +2071,14 @@ export class PosService {
             status,
             idempotencyKey: p.idempotencyKey,
             takenByUserId: user.userId,
+            ...(p.giftCardCode
+              ? {
+                  gatewayRef: p.giftCardCode.trim().toUpperCase(),
+                  gatewayPayload: {
+                    giftCardCode: p.giftCardCode.trim().toUpperCase(),
+                  },
+                }
+              : {}),
           },
         });
         payments.push(payment);
@@ -2004,7 +2095,7 @@ export class PosService {
         select: { balanceDue: true },
       });
 
-      // Fully paid retail sale → fulfilled → closed
+      // Fully paid retail sale → fulfilled → closed; partial → confirmed with balance
       if (money(final.balanceDue).lte(0)) {
         await tx.order.update({
           where: { id: created.id },
@@ -2015,10 +2106,36 @@ export class PosService {
           data: { status: OrderStatus.closed },
         });
       } else {
+        const cur = await tx.order.findFirstOrThrow({
+          where: { id: created.id },
+          select: { meta: true },
+        });
+        const prevMeta =
+          cur.meta && typeof cur.meta === 'object'
+            ? (cur.meta as Record<string, unknown>)
+            : {};
         await tx.order.update({
           where: { id: created.id },
-          data: { status: OrderStatus.confirmed },
+          data: {
+            status: OrderStatus.confirmed,
+            meta: {
+              ...prevMeta,
+              partialPayment: true,
+            },
+          },
         });
+      }
+
+      let pointsEarned = 0;
+      if (dto.customerId && settledPaid > 0) {
+        const earned = await this.loyalty.earnPointsInTx(tx, {
+          tenantId: user.tenantId,
+          customerId: dto.customerId,
+          paidAmount: settledPaid,
+          orderId: created.id,
+          settings: loyaltySettings,
+        });
+        pointsEarned = earned.points;
       }
 
       await tx.outboxEvent.create({
@@ -2030,12 +2147,22 @@ export class PosService {
           payload: {
             orderId: created.id,
             orderNumber,
-            payTotal: paidSum,
+            payTotal: settledPaid,
+            partial: money(final.balanceDue).gt(0),
+            loyaltyPointsRedeemed,
+            pointsEarned,
           },
         },
       });
 
-      return { orderId: created.id, payments, paidSum };
+      return {
+        orderId: created.id,
+        payments,
+        paidSum: settledPaid,
+        loyaltyPointsRedeemed,
+        loyaltyAmountOff,
+        pointsEarned,
+      };
     });
 
     const order = await this.loadOrder(user.tenantId, result.orderId);
@@ -2085,6 +2212,22 @@ export class PosService {
 
     const receipt = await this.getReceipt(user, result.orderId);
 
+    let receiptNotifications: unknown[] = [];
+    if (dto.sendReceipt && dto.customerId) {
+      receiptNotifications = await this.notify.sendSaleReceipt(user, {
+        customerId: dto.customerId,
+        orderNumber: order?.orderNumber ?? '',
+        total: money(
+          Number(order?.subtotal ?? 0) +
+            Number(order?.taxTotal ?? 0) -
+            Number(order?.discountTotal ?? 0),
+        ).toFixed(2),
+        balanceDue: money(order?.balanceDue ?? 0).toFixed(2),
+        storeName: undefined,
+        channels: dto.sendReceiptChannels,
+      });
+    }
+
     return {
       order,
       payments: result.payments,
@@ -2092,6 +2235,12 @@ export class PosService {
       cashTendered: money(tendered).toFixed(2),
       receipt,
       replayed: false,
+      partial: money(order?.balanceDue ?? 0).gt(0),
+      balanceDue: money(order?.balanceDue ?? 0).toFixed(2),
+      loyaltyPointsRedeemed: result.loyaltyPointsRedeemed,
+      loyaltyAmountOff: result.loyaltyAmountOff,
+      pointsEarned: result.pointsEarned,
+      receiptNotifications,
     };
   }
 

@@ -14,6 +14,7 @@ import { pageMeta, paginate } from '../../common/dto/pagination.dto';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import { OrdersService } from '../orders/orders.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
 import {
   CreatePaymentDto,
   ListPaymentsQueryDto,
@@ -32,6 +33,7 @@ const IMMEDIATE: PaymentMethod[] = [
   PaymentMethod.card,
   PaymentMethod.upi,
   PaymentMethod.store_credit,
+  PaymentMethod.gift_card,
 ];
 
 const CREDIT: PaymentType[] = [PaymentType.payment, PaymentType.deposit];
@@ -45,6 +47,7 @@ export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ordersService: OrdersService,
+    private readonly loyalty: LoyaltyService,
   ) {}
 
   async create(user: AuthUser, dto: CreatePaymentDto) {
@@ -104,6 +107,25 @@ export class PaymentsService {
           data: {
             storeCreditBalance: { decrement: dto.amount.toFixed(2) },
           },
+        });
+      }
+
+      if (
+        dto.method === PaymentMethod.gift_card &&
+        status === PaymentStatus.succeeded &&
+        type === PaymentType.payment
+      ) {
+        if (!dto.gatewayRef?.trim()) {
+          throw new BadRequestException(
+            'gatewayRef must be the gift card code',
+          );
+        }
+        await this.loyalty.redeemGiftCardInTx(tx, {
+          tenantId: user.tenantId,
+          code: dto.gatewayRef,
+          amount: dto.amount,
+          orderId: dto.orderId,
+          userId: user.userId,
         });
       }
 

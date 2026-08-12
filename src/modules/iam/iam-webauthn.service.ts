@@ -178,15 +178,18 @@ export class IamWebAuthnService {
         expectedChallenge: row.challenge,
         expectedOrigin: origin,
         expectedRPID: rpID,
+        // Match authenticatorSelection.userVerification: 'preferred'
+        requireUserVerification: false,
       });
     } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
       this.log.warn(
-        `WebAuthn register verify failed (origin=${origin} rpID=${rpID}): ${
-          e instanceof Error ? e.message : e
-        }`,
+        `WebAuthn register verify failed (origin=${origin} rpID=${rpID}): ${detail}`,
       );
       throw new BadRequestException(
-        'Biometric registration failed — use HTTPS (or localhost), and ensure WEBAUTHN_ORIGIN matches this site',
+        detail.includes('User verification')
+          ? 'Biometric registration failed — complete Windows Hello / passkey prompt, then try again'
+          : 'Biometric registration failed — use HTTPS (or localhost), and ensure WEBAUTHN_ORIGIN matches this site',
       );
     }
 
@@ -324,6 +327,9 @@ export class IamWebAuthnService {
         expectedChallenge: challenge.challenge,
         expectedOrigin: origin,
         expectedRPID: rpID,
+        // Options use userVerification: 'preferred' — do not hard-require UV
+        // (Windows Hello often returns without UV when PIN/face is skipped).
+        requireUserVerification: false,
         credential: {
           id: cred.credentialId,
           publicKey: new Uint8Array(cred.publicKey),
@@ -332,13 +338,16 @@ export class IamWebAuthnService {
         },
       });
     } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
       this.log.warn(
-        `WebAuthn auth verify failed (origin=${origin} rpID=${rpID}): ${
-          e instanceof Error ? e.message : e
-        }`,
+        `WebAuthn auth verify failed (origin=${origin} rpID=${rpID}): ${detail}`,
       );
       throw new UnauthorizedException(
-        'Biometric verification failed — origin/RP mismatch or cancelled',
+        detail.includes('User verification')
+          ? 'Biometric verification failed — complete Windows Hello / passkey prompt'
+          : detail.includes('origin') || detail.includes('RP ID')
+            ? 'Biometric verification failed — origin/RP mismatch (re-register passkey on this site)'
+            : 'Biometric verification failed — cancelled or credential not accepted',
       );
     }
 

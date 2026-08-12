@@ -25,6 +25,15 @@ export class SendNotificationDto {
   @MaxLength(20)
   phone?: string;
 
+  @ApiPropertyOptional({
+    description: 'Email destination (email channel)',
+    example: 'customer@example.com',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  email?: string;
+
   @ApiProperty({ enum: NotificationChannel })
   @IsEnum(NotificationChannel)
   channel!: NotificationChannel;

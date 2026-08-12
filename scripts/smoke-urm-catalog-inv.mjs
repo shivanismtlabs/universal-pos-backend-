@@ -454,8 +454,8 @@ async function main() {
         availableInPos: true,
         openingQty: 20,
         locationId,
-        photoUrl: 'https://via.placeholder.com/120',
-        images: ['https://via.placeholder.com/120'],
+        photoUrl: 'https://placehold.co/240x240/e8eefb/1a56db/png?text=Nike',
+        images: ['https://placehold.co/240x240/e8eefb/1a56db/png?text=Nike'],
       },
     });
     productId = p.data.id;

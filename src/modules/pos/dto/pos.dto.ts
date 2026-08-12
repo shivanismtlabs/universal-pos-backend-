@@ -41,6 +41,16 @@ export class PosPaymentInputDto {
   @IsOptional()
   @IsEnum(PaymentType)
   type?: PaymentType;
+
+  @ApiPropertyOptional({
+    description: 'Required when method is gift_card',
+    example: 'GC-ABC123',
+  })
+  @IsOptional()
+  @IsString()
+  @MinLength(4)
+  @MaxLength(40)
+  giftCardCode?: string;
 }
 
 export class CheckoutDto {
@@ -149,6 +159,39 @@ export class SaleCheckoutDto {
   @IsString()
   @MaxLength(40)
   couponCode?: string;
+
+  @ApiPropertyOptional({
+    description: 'Loyalty points to redeem (needs customerId)',
+    example: 100,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  loyaltyPointsToRedeem?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Allow payment less than balance due (order stays open with balance)',
+  })
+  @IsOptional()
+  @IsBoolean()
+  allowPartial?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Send sale receipt via email/SMS/WhatsApp after checkout',
+  })
+  @IsOptional()
+  @IsBoolean()
+  sendReceipt?: boolean;
+
+  @ApiPropertyOptional({
+    enum: ['email', 'sms', 'whatsapp'],
+    isArray: true,
+  })
+  @IsOptional()
+  @IsIn(['email', 'sms', 'whatsapp'], { each: true })
+  sendReceiptChannels?: Array<'email' | 'sms' | 'whatsapp'>;
 }
 
 /** Create unpaid sale ticket for Stripe (card/UPI) — stock held on verify */

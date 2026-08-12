@@ -32,6 +32,10 @@ const IMMEDIATE: PaymentMethod[] = [
   PaymentMethod.cash,
   PaymentMethod.card,
   PaymentMethod.upi,
+  PaymentMethod.bank_transfer,
+  PaymentMethod.wallet,
+  PaymentMethod.qr,
+  PaymentMethod.emi,
   PaymentMethod.store_credit,
   PaymentMethod.gift_card,
 ];
@@ -102,10 +106,23 @@ export class PaymentsService {
             `Insufficient store credit (have ${bal.toFixed(2)})`,
           );
         }
+        const nextBal = Number((bal - Number(dto.amount.toFixed(2))).toFixed(2));
         await tx.customer.update({
           where: { id: orderFull.customerId },
           data: {
-            storeCreditBalance: { decrement: dto.amount.toFixed(2) },
+            storeCreditBalance: nextBal.toFixed(2),
+          },
+        });
+        await tx.storeCreditLedgerEntry.create({
+          data: {
+            tenantId: user.tenantId,
+            customerId: orderFull.customerId,
+            kind: 'debit',
+            amount: dto.amount.toFixed(2),
+            balanceAfter: nextBal.toFixed(2),
+            orderId: dto.orderId,
+            note: 'Order payment',
+            actorUserId: user.userId,
           },
         });
       }

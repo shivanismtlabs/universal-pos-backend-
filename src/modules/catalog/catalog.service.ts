@@ -11,7 +11,14 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../database/database.module';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
+import {
+  BARCODE_TYPE_CODE128,
+  detectBarcodeType,
+  nextInternalCode128Candidate,
+  normalizeBarcode,
+} from '../../common/barcode';
 import { validateSku } from '../../common/sell-units';
+import { resolveProductTaxRatePercent } from '../../common/tax-engine';
 import type { AuthUser } from '../auth/types';
 import {
   CreateBatchDto,
@@ -95,6 +102,7 @@ function mapProduct(p: {
   shortName: string | null;
   skuCode: string;
   barcode: string | null;
+  barcodeType?: string | null;
   qrCode: string | null;
   internalCode: string | null;
   kind: ProductKind;
@@ -136,6 +144,7 @@ function mapProduct(p: {
     skuCode: p.skuCode,
     sku: p.skuCode,
     barcode: p.barcode,
+    barcodeType: p.barcodeType ?? (p.barcode ? detectBarcodeType(p.barcode) : null),
     qrCode: p.qrCode,
     internalCode: p.internalCode,
     kind: p.kind,
@@ -229,6 +238,23 @@ export class CatalogService {
     }
   }
 
+  /** Soft-delete = deactivate. Hard-delete only when unused by products. */
+  async deleteBrand(user: AuthUser, id: string) {
+    await this.requireBrand(user.tenantId, id);
+    const used = await this.prisma.product.count({
+      where: { tenantId: user.tenantId, brandId: id },
+    });
+    if (used > 0) {
+      const row = await this.prisma.brand.update({
+        where: { id },
+        data: { isActive: false },
+      });
+      return { ok: true, deleted: false, softDeleted: true, brand: row };
+    }
+    await this.prisma.brand.delete({ where: { id } });
+    return { ok: true, deleted: true, softDeleted: false };
+  }
+
   // ── Categories ──────────────────────────────────────────────────────────
 
   listCategories(user: AuthUser) {
@@ -299,7 +325,29 @@ export class CatalogService {
     }
   }
 
-  // ── SKU generation ──────────────────────────────────────────────────────
+  /** Soft-delete = deactivate. Hard-delete only when unused (no products/children). */
+  async deleteCategory(user: AuthUser, id: string) {
+    await this.requireCategory(user.tenantId, id);
+    const [products, children] = await Promise.all([
+      this.prisma.product.count({
+        where: { tenantId: user.tenantId, categoryId: id },
+      }),
+      this.prisma.category.count({
+        where: { tenantId: user.tenantId, parentId: id },
+      }),
+    ]);
+    if (products > 0 || children > 0) {
+      const row = await this.prisma.category.update({
+        where: { id },
+        data: { isActive: false },
+      });
+      return { ok: true, deleted: false, softDeleted: true, category: row };
+    }
+    await this.prisma.category.delete({ where: { id } });
+    return { ok: true, deleted: true, softDeleted: false };
+  }
+
+  // ── SKU / barcode generation ────────────────────────────────────────────
 
   async generateSku(user: AuthUser, dto: GenerateSkuDto = {}) {
     const prefix = (
@@ -325,6 +373,87 @@ export class CatalogService {
       if (!exists && !vExists) return { sku: candidate, skuCode: candidate };
     }
     throw new BadRequestException('Could not generate a unique SKU — try again');
+  }
+
+  /**
+   * Internal Code 128 payload (not GS1 EAN/UPC).
+   * Unique per tenant across product + variant barcodes.
+   */
+  async generateBarcode(user: AuthUser) {
+    for (let i = 0; i < 32; i++) {
+      const candidate = nextInternalCode128Candidate();
+      const taken = await this.barcodeTaken(user.tenantId, candidate);
+      if (!taken) {
+        return {
+          barcode: candidate,
+          barcodeType: BARCODE_TYPE_CODE128,
+        };
+      }
+    }
+    throw new BadRequestException(
+      'Could not generate a unique barcode — try again',
+    );
+  }
+
+  async checkBarcode(
+    user: AuthUser,
+    code: string,
+    excludeProductId?: string,
+  ) {
+    const barcode = normalizeBarcode(code);
+    if (!barcode) {
+      return {
+        available: false,
+        barcode: '',
+        barcodeType: BARCODE_TYPE_CODE128,
+        reason: 'empty',
+      };
+    }
+    if (barcode.length < 4 || barcode.length > 64) {
+      return {
+        available: false,
+        barcode,
+        barcodeType: detectBarcodeType(barcode),
+        reason: 'length',
+      };
+    }
+    const taken = await this.barcodeTaken(
+      user.tenantId,
+      barcode,
+      excludeProductId,
+    );
+    return {
+      available: !taken,
+      barcode,
+      barcodeType: detectBarcodeType(barcode),
+      reason: taken ? 'duplicate' : null,
+    };
+  }
+
+  private async barcodeTaken(
+    tenantId: string,
+    barcode: string,
+    excludeProductId?: string,
+  ) {
+    const normalized = normalizeBarcode(barcode);
+    const [p, v] = await Promise.all([
+      this.prisma.product.findFirst({
+        where: {
+          tenantId,
+          barcode: { equals: normalized, mode: 'insensitive' },
+          ...(excludeProductId ? { id: { not: excludeProductId } } : {}),
+        },
+        select: { id: true },
+      }),
+      this.prisma.productVariant.findFirst({
+        where: {
+          tenantId,
+          barcode: { equals: normalized, mode: 'insensitive' },
+        },
+        select: { id: true },
+      }),
+    ]);
+    return Boolean(p || v);
   }
 
   // ── Products (catalog master) ───────────────────────────────────────────
@@ -513,6 +642,22 @@ export class CatalogService {
       if (skuErr) throw new BadRequestException(skuErr);
     }
 
+    let barcode = dto.barcode?.trim()
+      ? normalizeBarcode(dto.barcode)
+      : null;
+    let barcodeType =
+      dto.barcodeType?.trim()?.toLowerCase() ||
+      (barcode ? detectBarcodeType(barcode) : null);
+    if (!barcode) {
+      const gen = await this.generateBarcode(user);
+      barcode = gen.barcode;
+      barcodeType = gen.barcodeType;
+    } else if (await this.barcodeTaken(user.tenantId, barcode)) {
+      throw new BadRequestException('Barcode already exists');
+    } else if (!barcodeType) {
+      barcodeType = detectBarcodeType(barcode);
+    }
+
     if (dto.categoryId) {
       await this.requireCategory(user.tenantId, dto.categoryId);
     }
@@ -545,10 +690,18 @@ export class CatalogService {
       ...((dto.images ?? []).filter(Boolean) as string[]),
     ]);
     const photoUrl = resolvedImages[0] ?? null;
+    const taxCode = dto.taxCode?.trim() || null;
+    const extra =
+      dto.extraFields && typeof dto.extraFields === 'object'
+        ? { ...(dto.extraFields as Record<string, unknown>) }
+        : {};
+    const rateFromForm = resolveProductTaxRatePercent({
+      taxCode,
+      meta: extra,
+    });
     const meta: Record<string, unknown> = {
-      ...(dto.extraFields && typeof dto.extraFields === 'object'
-        ? dto.extraFields
-        : {}),
+      ...extra,
+      ...(rateFromForm != null ? { taxRatePercent: rateFromForm } : {}),
       ...(resolvedImages.length ? { images: resolvedImages } : {}),
       sellUnit: unit,
     };
@@ -566,13 +719,14 @@ export class CatalogService {
             isActive: statusToActive(status),
             categoryId: dto.categoryId ?? null,
             brandId: dto.brandId ?? null,
-            barcode: dto.barcode?.trim() || null,
+            barcode,
+            barcodeType,
             qrCode: dto.qrCode?.trim() || null,
             internalCode: dto.internalCode?.trim() || null,
             shortDescription: dto.shortDescription?.trim() || null,
             description: dto.description?.trim() || null,
             photoUrl,
-            taxCode: dto.taxCode?.trim() || null,
+            taxCode,
             basePrice: price,
             costPrice: dec(dto.costPrice),
             mrp: dec(dto.mrp),
@@ -664,6 +818,26 @@ export class CatalogService {
       if (skuErr) throw new BadRequestException(skuErr);
     }
 
+    let nextBarcode: string | null | undefined;
+    let nextBarcodeType: string | null | undefined;
+    if (dto.barcode !== undefined) {
+      nextBarcode = dto.barcode?.trim()
+        ? normalizeBarcode(dto.barcode)
+        : null;
+      if (
+        nextBarcode &&
+        (await this.barcodeTaken(user.tenantId, nextBarcode, id))
+      ) {
+        throw new BadRequestException('Barcode already exists');
+      }
+      nextBarcodeType = nextBarcode
+        ? dto.barcodeType?.trim()?.toLowerCase() ||
+          detectBarcodeType(nextBarcode)
+        : null;
+    } else if (dto.barcodeType !== undefined) {
+      nextBarcodeType = dto.barcodeType?.trim()?.toLowerCase() || null;
+    }
+
     const prevMeta = (existing.meta ?? {}) as Record<string, unknown>;
     let nextMeta = { ...prevMeta };
     let nextPhotoUrl: string | null | undefined;
@@ -697,6 +871,17 @@ export class CatalogService {
     if (dto.unitOfMeasure) {
       nextMeta.sellUnit = dto.unitOfMeasure;
     }
+    const nextTaxCode =
+      dto.taxCode !== undefined ? dto.taxCode?.trim() || null : existing.taxCode;
+    const rateFromForm = resolveProductTaxRatePercent({
+      taxCode: nextTaxCode,
+      meta: nextMeta,
+    });
+    if (rateFromForm != null) {
+      nextMeta.taxRatePercent = rateFromForm;
+    } else if (dto.taxCode !== undefined || dto.extraFields) {
+      delete nextMeta.taxRatePercent;
+    }
 
     const status = dto.status ?? existing.status;
     try {
@@ -729,8 +914,13 @@ export class CatalogService {
               : {}),
             ...(dto.brandId !== undefined ? { brandId: dto.brandId } : {}),
             ...(dto.barcode !== undefined
-              ? { barcode: dto.barcode?.trim() || null }
-              : {}),
+              ? {
+                  barcode: nextBarcode ?? null,
+                  barcodeType: nextBarcodeType ?? null,
+                }
+              : dto.barcodeType !== undefined
+                ? { barcodeType: nextBarcodeType ?? null }
+                : {}),
             ...(dto.qrCode !== undefined
               ? { qrCode: dto.qrCode?.trim() || null }
               : {}),
@@ -862,7 +1052,8 @@ export class CatalogService {
       where: { tenantId: user.tenantId, productId: id },
     });
     if (used > 0) {
-      return this.setStatus(user, id, ProductStatus.archived);
+      const row = await this.setStatus(user, id, ProductStatus.archived);
+      return { ok: true, deleted: false, softDeleted: true, product: row };
     }
     await this.prisma.product.delete({ where: { id } });
     await this.prisma.auditLog.create({
@@ -874,7 +1065,7 @@ export class CatalogService {
         action: 'catalog.product.deleted',
       },
     });
-    return { ok: true, deleted: true };
+    return { ok: true, deleted: true, softDeleted: false };
   }
 
   qrForProduct(user: AuthUser, id: string) {

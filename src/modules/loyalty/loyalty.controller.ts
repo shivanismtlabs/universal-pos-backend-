@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RoleGroup } from '../../common/roles';
@@ -77,6 +78,22 @@ export class LoyaltyController {
     @Body() dto: PatchLoyaltySettingsDto,
   ) {
     return this.loyalty.patchLoyaltySettings(user, dto);
+  }
+
+  @Get('ledger')
+  @Roles(...RoleGroup.lead, ...RoleGroup.pos)
+  @ApiOperation({
+    summary: 'Loyalty points ledger (earn / redeem / adjust history)',
+  })
+  listLedger(
+    @CurrentUser() user: AuthUser,
+    @Query('kind') kind?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.loyalty.listLedger(user, {
+      kind: kind?.trim() || undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
   }
 
   @Post('points/quote')

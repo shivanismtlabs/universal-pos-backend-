@@ -249,6 +249,43 @@ export class LoyaltyService {
     };
   }
 
+  async listLedger(
+    user: AuthUser,
+    opts?: { kind?: string; limit?: number },
+  ) {
+    const kind = opts?.kind?.trim().toLowerCase();
+    const take = Math.min(Math.max(Number(opts?.limit) || 100, 1), 300);
+    const rows = await this.prisma.loyaltyLedgerEntry.findMany({
+      where: {
+        tenantId: user.tenantId,
+        ...(kind && ['earn', 'redeem', 'adjust'].includes(kind)
+          ? { kind }
+          : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: {
+        customer: { select: { id: true, fullName: true, phone: true } },
+      },
+    });
+    return {
+      items: rows.map((r) => ({
+        id: r.id,
+        kind: r.kind,
+        points: r.points,
+        balanceAfter: r.balanceAfter,
+        orderId: r.orderId,
+        note: r.note,
+        createdAt: r.createdAt,
+        customer: {
+          id: r.customer.id,
+          fullName: r.customer.fullName,
+          phone: r.customer.phone,
+        },
+      })),
+    };
+  }
+
   /** Redeem points inside an existing prisma transaction */
   async redeemPointsInTx(
     tx: Prisma.TransactionClient,

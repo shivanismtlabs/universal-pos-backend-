@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, TaxMode } from '@prisma/client';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
@@ -13,6 +13,7 @@ import {
   UpdateLocationDto,
   UpdateTenantDto,
 } from './dto/tenants.dto';
+import { ensureTenantTaxSettings } from '../../common/tax-engine';
 
 const TENANT_SELECT = {
   id: true,
@@ -38,6 +39,36 @@ export class TenantsService {
       select: TENANT_SELECT,
     });
     if (!tenant) throw new NotFoundException('Tenant not found');
+
+    const settingsRoot =
+      tenant.settings && typeof tenant.settings === 'object'
+        ? (tenant.settings as Record<string, unknown>)
+        : {};
+    const taxBlock =
+      settingsRoot.tax && typeof settingsRoot.tax === 'object'
+        ? (settingsRoot.tax as Record<string, unknown>)
+        : null;
+    const needsTaxBackfill =
+      !taxBlock ||
+      (typeof taxBlock.ratePercent !== 'number' &&
+        typeof taxBlock.ratePercent !== 'string');
+
+    if (needsTaxBackfill) {
+      const nextSettings = ensureTenantTaxSettings(
+        tenant.settings,
+        tenant.taxMode as TaxMode,
+      );
+      const updated = await this.prisma.tenant.update({
+        where: { id: user.tenantId },
+        data: { settings: nextSettings as Prisma.InputJsonValue },
+        select: TENANT_SELECT,
+      });
+      return {
+        ...updated,
+        gstin: updated.taxId,
+      };
+    }
+
     return {
       ...tenant,
       gstin: tenant.taxId,

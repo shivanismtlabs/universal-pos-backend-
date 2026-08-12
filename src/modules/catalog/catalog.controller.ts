@@ -66,6 +66,19 @@ export class CatalogController {
     return this.catalog.updateBrand(user, id, dto);
   }
 
+  @Delete('brands/:id')
+  @Roles(...RoleGroup.catalogWrite)
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Delete brand (hard if unused; otherwise soft-deactivate)',
+  })
+  deleteBrand(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.catalog.deleteBrand(user, id);
+  }
+
   // ── Categories ─────────────────────────────────────────────────────────
 
   @Get('categories')
@@ -93,6 +106,20 @@ export class CatalogController {
     return this.catalog.updateCategory(user, id, dto);
   }
 
+  @Delete('categories/:id')
+  @Roles(...RoleGroup.catalogWrite)
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Delete category (hard if unused; otherwise soft-deactivate)',
+  })
+  deleteCategory(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.catalog.deleteCategory(user, id);
+  }
+
   // ── Products ───────────────────────────────────────────────────────────
 
   @Post('sku/generate')
@@ -100,6 +127,24 @@ export class CatalogController {
   @ApiOperation({ summary: 'Generate unique tenant SKU' })
   generateSku(@CurrentUser() user: AuthUser, @Body() dto: GenerateSkuDto) {
     return this.catalog.generateSku(user, dto);
+  }
+
+  @Post('barcode/generate')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Generate unique internal Code 128 barcode' })
+  generateBarcode(@CurrentUser() user: AuthUser) {
+    return this.catalog.generateBarcode(user);
+  }
+
+  @Get('barcode/check')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'Check barcode uniqueness for tenant' })
+  checkBarcode(
+    @CurrentUser() user: AuthUser,
+    @Query('code') code?: string,
+    @Query('excludeId') excludeId?: string,
+  ) {
+    return this.catalog.checkBarcode(user, code ?? '', excludeId);
   }
 
   @Get('batches/expiring')

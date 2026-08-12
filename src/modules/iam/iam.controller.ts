@@ -19,11 +19,13 @@ import type { AuthUser } from '../auth/types';
 import {
   AssignShiftDto,
   ClockDto,
+  CreateAttendanceDto,
   CreateRoleDto,
   CreateShiftDto,
   ListAttendanceQueryDto,
   ListShiftsQueryDto,
   SetRolePermissionsDto,
+  UpdateAttendanceDto,
   UpdateRoleDto,
   UpdateShiftDto,
   WebAuthnAuthDto,
@@ -130,6 +132,47 @@ export class IamController {
     return this.attendance.list(user, query);
   }
 
+  @Post('attendance')
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Create manual attendance entry' })
+  createAttendance(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateAttendanceDto,
+  ) {
+    return this.attendance.createManual(user, dto);
+  }
+
+  @Get('attendance/:id')
+  @Roles(...RoleGroup.all)
+  @ApiOperation({ summary: 'View attendance entry' })
+  getAttendance(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.attendance.getOne(user, id);
+  }
+
+  @Patch('attendance/:id')
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Update attendance entry' })
+  updateAttendance(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateAttendanceDto,
+  ) {
+    return this.attendance.update(user, id, dto);
+  }
+
+  @Delete('attendance/:id')
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Delete attendance entry' })
+  deleteAttendance(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.attendance.remove(user, id);
+  }
+
   // ── Shifts ───────────────────────────────────────────────────────
   @Get('shifts')
   @Roles(...RoleGroup.all)
@@ -192,8 +235,12 @@ export class IamController {
   regOptions(
     @CurrentUser() user: AuthUser,
     @Headers('origin') origin?: string,
+    @Body() dto?: WebAuthnLabelDto,
   ) {
-    return this.webauthn.registrationOptions(user, origin);
+    return this.webauthn.registrationOptions(
+      user,
+      dto?.clientOrigin || origin,
+    );
   }
 
   @Post('webauthn/register/verify')
@@ -205,9 +252,9 @@ export class IamController {
   ) {
     return this.webauthn.registrationVerify(
       user,
-      dto.response as RegistrationResponseJSON,
+      dto.response as unknown as RegistrationResponseJSON,
       dto.label,
-      origin,
+      dto.clientOrigin || origin,
     );
   }
 
@@ -233,7 +280,10 @@ export class IamController {
     @Body() dto: WebAuthnAuthDto,
     @Headers('origin') origin?: string,
   ) {
-    return this.webauthn.authenticationOptions(dto.email, origin);
+    return this.webauthn.authenticationOptions(
+      dto.email,
+      dto.clientOrigin || origin,
+    );
   }
 
   @Public()
@@ -245,8 +295,8 @@ export class IamController {
   ) {
     return this.webauthn.authenticationVerify(
       dto.email,
-      dto.response as AuthenticationResponseJSON,
-      origin,
+      dto.response as unknown as AuthenticationResponseJSON,
+      dto.clientOrigin || origin,
     );
   }
 }

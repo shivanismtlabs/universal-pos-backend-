@@ -28,6 +28,7 @@ import {
 } from '../../common/sell-units';
 import { saveProductImage } from '../../common/product-image';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
+import { nextInternalCode128Candidate } from '../../common/barcode';
 
 const MAX_PRODUCT_IMAGES = 8;
 
@@ -58,6 +59,7 @@ function productImageList(
 import {
   buildTaxProfile,
   computeLineTax,
+  resolveProductTaxRatePercent,
 } from '../../common/tax-engine';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
@@ -91,6 +93,10 @@ const IMMEDIATE_PAY: PaymentMethod[] = [
   PaymentMethod.cash,
   PaymentMethod.card,
   PaymentMethod.upi,
+  PaymentMethod.bank_transfer,
+  PaymentMethod.wallet,
+  PaymentMethod.qr,
+  PaymentMethod.emi,
   PaymentMethod.store_credit,
   PaymentMethod.gift_card,
 ];
@@ -249,6 +255,19 @@ export class PosService {
       isService ? false : dto.trackInventory !== false;
     const trackSerial = Boolean(dto.serialTracking) && !isService;
 
+    let barcode = dto.barcode?.trim() || dto.upc?.trim() || null;
+    let barcodeType: string | null = null;
+    if (!barcode) {
+      barcode = await this.allocateUniqueBarcode(user.tenantId);
+      barcodeType = 'code128';
+    } else {
+      barcodeType = /^\d{13}$/.test(barcode)
+        ? 'ean13'
+        : /^\d{12}$/.test(barcode)
+          ? 'upca'
+          : 'code128';
+    }
+
     try {
       const product = await this.prisma.product.create({
         data: {
@@ -272,7 +291,16 @@ export class PosService {
             dto.costPrice != null && Number.isFinite(dto.costPrice)
               ? Number(dto.costPrice)
               : null,
-          barcode: dto.barcode?.trim() || dto.upc?.trim() || null,
+          barcode,
+          barcodeType,
+          taxCode:
+            dto.taxPreference === 'non_taxable'
+              ? null
+              : dto.taxRatePercent != null &&
+                  Number.isFinite(dto.taxRatePercent) &&
+                  dto.taxRatePercent > 0
+                ? `GST${Number(dto.taxRatePercent)}`
+                : null,
           unitOfMeasure: sellUnit,
           canSell: true,
           canPurchase: !isService,
@@ -311,8 +339,12 @@ export class PosService {
               ? { taxPreference: dto.taxPreference }
               : {}),
             ...(dto.taxRatePercent != null &&
-            Number.isFinite(dto.taxRatePercent)
+            Number.isFinite(dto.taxRatePercent) &&
+            dto.taxRatePercent > 0
               ? { taxRatePercent: Number(dto.taxRatePercent) }
+              : {}),
+            ...(dto.taxPreference === 'non_taxable'
+              ? { taxRatePercent: 0 }
               : {}),
             ...(dto.openingStockValue != null &&
             Number.isFinite(dto.openingStockValue)
@@ -1142,6 +1174,7 @@ export class PosService {
       locationId?: string;
       q?: string;
       limit?: number;
+      page?: number;
       lowStock?: boolean;
       maxQty?: number;
     },
@@ -1156,7 +1189,9 @@ export class PosService {
     });
     if (!loc) throw new NotFoundException('Location not found');
 
-    const limit = Math.min(Math.max(opts.limit ?? 80, 1), 200);
+    const limit = Math.min(Math.max(opts.limit ?? 40, 1), 100);
+    const page = Math.max(opts.page ?? 1, 1);
+    const skip = (page - 1) * limit;
     const q = opts.q?.trim();
     const threshold = Math.min(Math.max(opts.maxQty ?? 5, 1), 100);
 
@@ -1208,35 +1243,50 @@ export class PosService {
       ],
     };
 
-    const items = await this.prisma.stockLevel.findMany({
-      where,
-      take: limit,
-      orderBy: [{ product: { name: 'asc' } }, { sku: 'asc' }],
-      include: {
-        product: {
-          select: {
-            id: true,
-            name: true,
-            skuCode: true,
-            barcode: true,
-            description: true,
-            photoUrl: true,
-            meta: true,
-            category: { select: { id: true, name: true } },
+    const [total, items] = await Promise.all([
+      this.prisma.stockLevel.count({ where }),
+      this.prisma.stockLevel.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: [{ product: { name: 'asc' } }, { sku: 'asc' }],
+        include: {
+          product: {
+            select: {
+              id: true,
+              name: true,
+              skuCode: true,
+              barcode: true,
+              description: true,
+              photoUrl: true,
+              taxCode: true,
+              meta: true,
+              category: { select: { id: true, name: true } },
+            },
           },
+          location: { select: { id: true, name: true, code: true } },
         },
-        location: { select: { id: true, name: true, code: true } },
-      },
-    });
+      }),
+    ]);
+
+    const totalPages = Math.max(1, Math.ceil(total / limit));
 
     return {
       locationId,
       lowStock: Boolean(opts.lowStock),
       maxQty: opts.lowStock ? threshold : undefined,
+      page,
+      limit,
+      total,
+      totalPages,
       items: items.map((row) => {
         const qty = Number(row.qtyOnHand);
         const images = productImageList(row.product.photoUrl, row.product.meta);
         const cover = images[0] ?? row.product.photoUrl ?? null;
+        const taxRatePercent = resolveProductTaxRatePercent({
+          taxCode: row.product.taxCode,
+          meta: row.product.meta,
+        });
         return {
           id: row.id,
           sku: row.sku,
@@ -1251,6 +1301,8 @@ export class PosService {
           image: cover,
           photoUrl: cover,
           images,
+          taxCode: row.product.taxCode,
+          taxRatePercent,
           category: row.product.category,
           location: row.location,
         };
@@ -1318,6 +1370,8 @@ export class PosService {
             skuCode: true,
             barcode: true,
             photoUrl: true,
+            taxCode: true,
+            meta: true,
             category: { select: { id: true, name: true } },
           },
         },
@@ -1334,6 +1388,13 @@ export class PosService {
       );
     }
 
+    const images = productImageList(row.product.photoUrl, row.product.meta);
+    const cover = images[0] ?? row.product.photoUrl ?? null;
+    const taxRatePercent = resolveProductTaxRatePercent({
+      taxCode: row.product.taxCode,
+      meta: row.product.meta,
+    });
+
     return {
       id: row.id,
       sku: row.sku,
@@ -1343,8 +1404,11 @@ export class PosService {
       name: row.product.name,
       productSku: row.product.skuCode,
       barcode: row.product.barcode,
-      image: row.product.photoUrl,
-      photoUrl: row.product.photoUrl,
+      image: cover,
+      photoUrl: cover,
+      images,
+      taxCode: row.product.taxCode,
+      taxRatePercent,
       category: row.product.category,
     };
   }
@@ -1452,7 +1516,16 @@ export class PosService {
             ? money(line.unitPrice)
             : money(level.sellPrice);
         const lineGross = unitPrice.mul(qty);
-        const taxed = computeLineTax(taxProfile, { lineGross });
+        const productRatePct = resolveProductTaxRatePercent({
+          taxCode: level.product.taxCode,
+          meta: level.product.meta,
+        });
+        const taxed = computeLineTax(taxProfile, {
+          lineGross,
+          ...(productRatePct != null
+            ? { rate: productRatePct / 100 }
+            : {}),
+        });
 
         await tx.orderItem.create({
           data: {
@@ -1467,8 +1540,12 @@ export class PosService {
             lineTotal: taxed.lineTotal.toFixed(2),
             taxAmount: taxed.taxAmount.toFixed(2),
             meta: {
-              taxRate: taxProfile.rate,
+              taxRate:
+                productRatePct != null
+                  ? productRatePct / 100
+                  : taxProfile.rate,
               taxInclusive: taxProfile.inclusive,
+              taxCode: level.product.taxCode ?? null,
             },
           },
         });
@@ -1817,7 +1894,16 @@ export class PosService {
             ? money(line.unitPrice)
             : money(level.sellPrice);
         const lineGross = unitPrice.mul(qty);
-        const taxed = computeLineTax(taxProfile, { lineGross });
+        const productRatePct = resolveProductTaxRatePercent({
+          taxCode: level.product.taxCode,
+          meta: level.product.meta,
+        });
+        const taxed = computeLineTax(taxProfile, {
+          lineGross,
+          ...(productRatePct != null
+            ? { rate: productRatePct / 100 }
+            : {}),
+        });
 
         await tx.stockLevel.update({
           where: { id: level.id },
@@ -1837,8 +1923,12 @@ export class PosService {
             lineTotal: taxed.lineTotal.toFixed(2),
             taxAmount: taxed.taxAmount.toFixed(2),
             meta: {
-              taxRate: taxProfile.rate,
+              taxRate:
+                productRatePct != null
+                  ? productRatePct / 100
+                  : taxProfile.rate,
               taxInclusive: taxProfile.inclusive,
+              taxCode: level.product.taxCode ?? null,
             },
           },
         });
@@ -1964,6 +2054,16 @@ export class PosService {
         ...p,
         amount: Number(p.amount),
       }));
+      const clientPayHint = paymentLines.reduce((s, p) => s + p.amount, 0);
+      // Full-ticket cash: always collect server Due (includes exclusive tax).
+      // Stops client tax/settings drift from recording a tax-free payment.
+      if (
+        dto.allowPartial !== true &&
+        paymentLines.length === 1 &&
+        paymentLines[0]!.method === PaymentMethod.cash
+      ) {
+        paymentLines[0]!.amount = Number(due.toFixed(2));
+      }
       const paidSum = paymentLines.reduce((s, p) => s + p.amount, 0);
       if (paidSum <= 0) {
         throw new BadRequestException('Payment amount must be greater than 0');
@@ -2002,8 +2102,18 @@ export class PosService {
       const cashPortion = paymentLines
         .filter((p) => p.method === PaymentMethod.cash)
         .reduce((s, p) => s + p.amount, 0);
-      if (cashPortion > 0 && dto.cashTendered !== undefined) {
-        if (Number(dto.cashTendered) + 1e-9 < cashPortion) {
+      let cashTendered = dto.cashTendered;
+      // Exact-charge: tendered matched the (possibly tax-free) client total — lift to Due
+      if (
+        cashTendered !== undefined &&
+        cashPortion > 0 &&
+        Number(cashTendered) + 1e-9 < cashPortion &&
+        Math.abs(Number(cashTendered) - clientPayHint) < 0.021
+      ) {
+        cashTendered = cashPortion;
+      }
+      if (cashPortion > 0 && cashTendered !== undefined) {
+        if (Number(cashTendered) + 1e-9 < cashPortion) {
           throw new BadRequestException(
             'Cash tendered is less than cash payment amount',
           );
@@ -2035,10 +2145,25 @@ export class PosService {
               `Insufficient store credit (have ${bal.toFixed(2)})`,
             );
           }
+          const nextBal = Number(
+            (bal - Number(money(p.amount).toFixed(2))).toFixed(2),
+          );
           await tx.customer.update({
             where: { id: dto.customerId },
             data: {
-              storeCreditBalance: { decrement: money(p.amount).toFixed(2) },
+              storeCreditBalance: nextBal.toFixed(2),
+            },
+          });
+          await tx.storeCreditLedgerEntry.create({
+            data: {
+              tenantId: user.tenantId,
+              customerId: dto.customerId,
+              kind: 'debit',
+              amount: money(p.amount).toFixed(2),
+              balanceAfter: nextBal.toFixed(2),
+              orderId: created.id,
+              note: 'POS payment',
+              actorUserId: user.userId,
             },
           });
         }
@@ -2162,6 +2287,8 @@ export class PosService {
         loyaltyPointsRedeemed,
         loyaltyAmountOff,
         pointsEarned,
+        cashTendered:
+          cashTendered !== undefined ? Number(cashTendered) : undefined,
       };
     });
 
@@ -2171,7 +2298,7 @@ export class PosService {
       .filter((p) => p.method === PaymentMethod.cash)
       .reduce((s, p) => s + Number(p.amount), 0);
     const tendered =
-      dto.cashTendered !== undefined ? Number(dto.cashTendered) : cashPaid;
+      result.cashTendered !== undefined ? result.cashTendered : cashPaid;
     const change = Math.max(0, tendered - cashPaid);
 
     // Persist tendered/change so reprint / getReceipt can show them
@@ -2856,10 +2983,30 @@ export class PosService {
         dto.refundMethod === PaymentMethod.store_credit &&
         order.customerId
       ) {
+        const cust = await tx.customer.findFirst({
+          where: { id: order.customerId, tenantId: user.tenantId },
+          select: { storeCreditBalance: true },
+        });
+        const bal = Number(cust?.storeCreditBalance ?? 0);
+        const nextBal = Number(
+          (bal + Number(refundAmount.toFixed(2))).toFixed(2),
+        );
         await tx.customer.update({
           where: { id: order.customerId },
           data: {
-            storeCreditBalance: { increment: refundAmount.toFixed(2) },
+            storeCreditBalance: nextBal.toFixed(2),
+          },
+        });
+        await tx.storeCreditLedgerEntry.create({
+          data: {
+            tenantId: user.tenantId,
+            customerId: order.customerId,
+            kind: 'credit',
+            amount: refundAmount.toFixed(2),
+            balanceAfter: nextBal.toFixed(2),
+            orderId: order.id,
+            note: 'POS refund to store credit',
+            actorUserId: user.userId,
           },
         });
       }
@@ -3002,5 +3149,25 @@ export class PosService {
         'Every rental stock unit line must have a stockUnitId',
       );
     }
+  }
+
+  private async allocateUniqueBarcode(tenantId: string): Promise<string> {
+    for (let i = 0; i < 32; i++) {
+      const candidate = nextInternalCode128Candidate();
+      const [p, v] = await Promise.all([
+        this.prisma.product.findFirst({
+          where: { tenantId, barcode: candidate },
+          select: { id: true },
+        }),
+        this.prisma.productVariant.findFirst({
+          where: { tenantId, barcode: candidate },
+          select: { id: true },
+        }),
+      ]);
+      if (!p && !v) return candidate;
+    }
+    throw new BadRequestException(
+      'Could not generate a unique barcode — try again',
+    );
   }
 }

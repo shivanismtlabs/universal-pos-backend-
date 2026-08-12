@@ -110,11 +110,255 @@ export class CustomersService {
       },
     });
     if (!customer) throw new NotFoundException('Customer not found');
+
+    const [orderAgg, dueAgg, noteCount] = await Promise.all([
+      this.prisma.order.aggregate({
+        where: { tenantId: user.tenantId, customerId: id },
+        _count: { _all: true },
+      }),
+      this.prisma.order.aggregate({
+        where: {
+          tenantId: user.tenantId,
+          customerId: id,
+          balanceDue: { gt: 0 },
+        },
+        _sum: { balanceDue: true },
+        _count: { _all: true },
+      }),
+      this.prisma.customerNote.count({
+        where: { tenantId: user.tenantId, customerId: id },
+      }),
+    ]);
+
     const { rentalMeasurements, rentalPartyMemberships, ...rest } = customer;
+    const meta = (rest.meta as Record<string, unknown>) ?? {};
     return {
       ...rest,
+      eventDate:
+        typeof meta.eventDate === 'string' ? meta.eventDate : null,
       measurements: rentalMeasurements,
       partyMemberships: rentalPartyMemberships,
+      summary: {
+        orderCount: orderAgg._count._all,
+        openDueCount: dueAgg._count._all,
+        openDueTotal: Number(dueAgg._sum.balanceDue ?? 0),
+        loyaltyPoints: rest.loyaltyPoints,
+        storeCreditBalance: Number(rest.storeCreditBalance),
+        noteCount,
+      },
+    };
+  }
+
+  async listOrders(user: AuthUser, customerId: string, limit = 50) {
+    await this.assertCustomer(user.tenantId, customerId);
+    const take = Math.min(Math.max(limit, 1), 200);
+    const rows = await this.prisma.order.findMany({
+      where: { tenantId: user.tenantId, customerId },
+      orderBy: { createdAt: 'desc' },
+      take,
+      select: {
+        id: true,
+        orderNumber: true,
+        kind: true,
+        status: true,
+        subtotal: true,
+        taxTotal: true,
+        discountTotal: true,
+        balanceDue: true,
+        currencyCode: true,
+        createdAt: true,
+      },
+    });
+    return {
+      items: rows.map((o) => ({
+        ...o,
+        subtotal: Number(o.subtotal),
+        taxTotal: Number(o.taxTotal),
+        discountTotal: Number(o.discountTotal),
+        balanceDue: Number(o.balanceDue),
+        grandTotal:
+          Number(o.subtotal) +
+          Number(o.taxTotal) -
+          Number(o.discountTotal),
+      })),
+    };
+  }
+
+  async listDues(user: AuthUser, customerId: string, limit = 50) {
+    await this.assertCustomer(user.tenantId, customerId);
+    const take = Math.min(Math.max(limit, 1), 200);
+    const rows = await this.prisma.order.findMany({
+      where: {
+        tenantId: user.tenantId,
+        customerId,
+        balanceDue: { gt: 0 },
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+      select: {
+        id: true,
+        orderNumber: true,
+        kind: true,
+        status: true,
+        balanceDue: true,
+        currencyCode: true,
+        createdAt: true,
+      },
+    });
+    const totalDue = rows.reduce((s, o) => s + Number(o.balanceDue), 0);
+    return {
+      totalDue,
+      items: rows.map((o) => ({
+        ...o,
+        balanceDue: Number(o.balanceDue),
+      })),
+    };
+  }
+
+  async listLoyaltyLedger(user: AuthUser, customerId: string, limit = 50) {
+    await this.assertCustomer(user.tenantId, customerId);
+    const take = Math.min(Math.max(limit, 1), 200);
+    const rows = await this.prisma.loyaltyLedgerEntry.findMany({
+      where: { tenantId: user.tenantId, customerId },
+      orderBy: { createdAt: 'desc' },
+      take,
+    });
+    return { items: rows };
+  }
+
+  async listStoreCreditLedger(
+    user: AuthUser,
+    customerId: string,
+    limit = 50,
+  ) {
+    await this.assertCustomer(user.tenantId, customerId);
+    const take = Math.min(Math.max(limit, 1), 200);
+    const rows = await this.prisma.storeCreditLedgerEntry.findMany({
+      where: { tenantId: user.tenantId, customerId },
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: {
+        actor: { select: { id: true, fullName: true } },
+      },
+    });
+    return {
+      items: rows.map((r) => ({
+        id: r.id,
+        kind: r.kind,
+        amount: Number(r.amount),
+        balanceAfter: Number(r.balanceAfter),
+        orderId: r.orderId,
+        note: r.note,
+        createdAt: r.createdAt,
+        actorName: r.actor?.fullName ?? null,
+      })),
+    };
+  }
+
+  async adjustStoreCredit(
+    user: AuthUser,
+    customerId: string,
+    amount: number,
+    note?: string,
+  ) {
+    if (!Number.isFinite(amount) || amount === 0) {
+      throw new ConflictException('Amount must be a non-zero number');
+    }
+    const customer = await this.prisma.customer.findFirst({
+      where: { id: customerId, tenantId: user.tenantId, deletedAt: null },
+    });
+    if (!customer) throw new NotFoundException('Customer not found');
+
+    const current = Number(customer.storeCreditBalance);
+    const next = Math.round((current + amount) * 100) / 100;
+    if (next < -1e-9) {
+      throw new ConflictException(
+        `Insufficient store credit (have ${current.toFixed(2)})`,
+      );
+    }
+
+    const kind = amount > 0 ? 'credit' : 'debit';
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.customer.update({
+        where: { id: customerId },
+        data: { storeCreditBalance: next.toFixed(2) },
+      });
+      await tx.storeCreditLedgerEntry.create({
+        data: {
+          tenantId: user.tenantId,
+          customerId,
+          kind,
+          amount: Math.abs(amount).toFixed(2),
+          balanceAfter: next.toFixed(2),
+          note: note?.trim() || (amount > 0 ? 'Wallet top-up' : 'Wallet debit'),
+          actorUserId: user.userId,
+        },
+      });
+      return row;
+    });
+
+    return {
+      customerId,
+      storeCreditBalance: Number(updated.storeCreditBalance),
+      amount,
+      kind,
+    };
+  }
+
+  async listNotes(user: AuthUser, customerId: string, limit = 50) {
+    await this.assertCustomer(user.tenantId, customerId);
+    const take = Math.min(Math.max(limit, 1), 200);
+    const rows = await this.prisma.customerNote.findMany({
+      where: { tenantId: user.tenantId, customerId },
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: {
+        createdBy: { select: { id: true, fullName: true } },
+      },
+    });
+    return {
+      items: rows.map((n) => ({
+        id: n.id,
+        body: n.body,
+        createdAt: n.createdAt,
+        createdByName: n.createdBy?.fullName ?? null,
+      })),
+    };
+  }
+
+  async addNote(user: AuthUser, customerId: string, body: string) {
+    const customer = await this.prisma.customer.findFirst({
+      where: { id: customerId, tenantId: user.tenantId, deletedAt: null },
+    });
+    if (!customer) throw new NotFoundException('Customer not found');
+    const text = body.trim();
+    if (!text) throw new ConflictException('Note body is required');
+
+    const note = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.customerNote.create({
+        data: {
+          tenantId: user.tenantId,
+          customerId,
+          body: text,
+          createdById: user.userId,
+        },
+        include: {
+          createdBy: { select: { id: true, fullName: true } },
+        },
+      });
+      // Keep legacy summary field as latest note preview
+      await tx.customer.update({
+        where: { id: customerId },
+        data: { notes: text.slice(0, 2000) },
+      });
+      return created;
+    });
+
+    return {
+      id: note.id,
+      body: note.body,
+      createdAt: note.createdAt,
+      createdByName: note.createdBy?.fullName ?? null,
     };
   }
 

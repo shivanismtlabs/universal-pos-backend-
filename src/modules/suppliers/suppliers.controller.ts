@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RoleGroup } from '../../common/roles';
@@ -15,6 +16,9 @@ import type { AuthUser } from '../auth/types';
 import {
   CreatePurchaseOrderDto,
   CreateSupplierDto,
+  CreateSupplierInvoiceDto,
+  CreateSupplierPaymentDto,
+  PaySupplierInvoiceDto,
   ReceivePurchaseOrderDto,
   ReturnPurchaseOrderDto,
   UpdatePurchaseOrderDto,
@@ -48,6 +52,15 @@ export class SuppliersController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.suppliersService.getSupplier(user, id);
+  }
+
+  @Get('suppliers/:id/ledger')
+  @ApiOperation({ summary: 'Supplier AP ledger (invoices + payments)' })
+  supplierLedger(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.suppliersService.supplierLedger(user, id);
   }
 
   @Patch('suppliers/:id')
@@ -96,7 +109,7 @@ export class SuppliersController {
 
   @Post('purchase-orders/:id/receive')
   @ApiOperation({
-    summary: 'Receive goods — increments StockLevel qty on the shelf',
+    summary: 'Receive goods — creates GRN + increments StockLevel',
   })
   receivePo(
     @CurrentUser() user: AuthUser,
@@ -116,5 +129,81 @@ export class SuppliersController {
     @Body() dto: ReturnPurchaseOrderDto,
   ) {
     return this.suppliersService.returnPo(user, id, dto);
+  }
+
+  @Get('goods-receipts')
+  @ApiOperation({ summary: 'List goods received notes (GRN)' })
+  listGrns(@CurrentUser() user: AuthUser) {
+    return this.suppliersService.listGoodsReceipts(user);
+  }
+
+  @Get('goods-receipts/:id')
+  @ApiOperation({ summary: 'Get GRN' })
+  getGrn(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.suppliersService.getGoodsReceipt(user, id);
+  }
+
+  @Post('goods-receipts/:id/invoice')
+  @ApiOperation({ summary: 'Create supplier invoice from GRN line costs' })
+  invoiceFromGrn(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.suppliersService.createInvoiceFromGrn(user, id);
+  }
+
+  @Post('supplier-invoices')
+  @ApiOperation({ summary: 'Create supplier invoice / credit note' })
+  createInvoice(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateSupplierInvoiceDto,
+  ) {
+    return this.suppliersService.createInvoice(user, dto);
+  }
+
+  @Get('supplier-invoices')
+  @ApiOperation({ summary: 'List supplier invoices' })
+  listInvoices(
+    @CurrentUser() user: AuthUser,
+    @Query('status') status?: string,
+  ) {
+    return this.suppliersService.listInvoices(user, status);
+  }
+
+  @Get('supplier-invoices/outstanding')
+  @ApiOperation({ summary: 'Open / partial supplier balances' })
+  listOutstanding(@CurrentUser() user: AuthUser) {
+    return this.suppliersService.listOutstanding(user);
+  }
+
+  @Post('supplier-invoices/:id/pay')
+  @ApiOperation({ summary: 'Record payment against supplier invoice' })
+  payInvoice(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: PaySupplierInvoiceDto,
+  ) {
+    return this.suppliersService.payInvoice(user, id, dto);
+  }
+
+  @Post('supplier-payments')
+  @ApiOperation({ summary: 'Record supplier payment (optionally against invoice)' })
+  createPayment(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateSupplierPaymentDto,
+  ) {
+    return this.suppliersService.createPayment(user, dto);
+  }
+
+  @Get('supplier-payments')
+  @ApiOperation({ summary: 'List supplier payments' })
+  listPayments(
+    @CurrentUser() user: AuthUser,
+    @Query('supplierId') supplierId?: string,
+  ) {
+    return this.suppliersService.listPayments(user, supplierId);
   }
 }

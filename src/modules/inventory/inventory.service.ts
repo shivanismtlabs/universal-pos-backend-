@@ -10,6 +10,7 @@ import {
   ReservationStatus,
   StockUnitStatus,
 } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { pageMeta, paginate } from '../../common/dto/pagination.dto';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import { PrismaService } from '../../database/database.module';
@@ -539,18 +540,23 @@ export class InventoryService {
         });
       }
 
+      const transferId = randomUUID();
+
       await tx.auditLog.create({
         data: {
           tenantId: user.tenantId,
           actorUserId: user.userId,
           entityType: 'stock_transfer',
+          entityId: transferId,
           action: 'inventory.stock_transfer',
           beforeAfter: {
+            transferId,
             fromLocationId: dto.fromLocationId,
             toLocationId: dto.toLocationId,
             notes: dto.notes ?? null,
             lines: moved.map((m) => ({
               productId: m.productId,
+              productName: m.productName,
               sku: m.sku,
               qty: m.qty,
             })),
@@ -570,6 +576,7 @@ export class InventoryService {
             qtyAfter: m.fromQtyOnHand,
             reason: dto.notes ?? null,
             referenceType: 'stock_transfer',
+            referenceId: transferId,
             actorUserId: user.userId,
           },
         });
@@ -584,19 +591,91 @@ export class InventoryService {
             qtyAfter: m.toQtyOnHand,
             reason: dto.notes ?? null,
             referenceType: 'stock_transfer',
+            referenceId: transferId,
             actorUserId: user.userId,
           },
         });
       }
 
-      return moved;
+      return { transferId, moved };
     });
 
     return {
+      id: result.transferId,
       fromLocationId: dto.fromLocationId,
       toLocationId: dto.toLocationId,
       notes: dto.notes ?? null,
-      lines: result.map(({ fromLevelId: _f, toLevelId: _t, ...rest }) => rest),
+      lines: result.moved.map(({ fromLevelId: _f, toLevelId: _t, ...rest }) => rest),
+    };
+  }
+
+  /** Transfer history (Zoho-style list). Source: audit logs + location names. */
+  async listStockTransfers(user: AuthUser, limit = 100) {
+    const take = Math.min(Math.max(Number(limit) || 100, 1), 300);
+    const rows = await this.prisma.auditLog.findMany({
+      where: {
+        tenantId: user.tenantId,
+        entityType: 'stock_transfer',
+        action: 'inventory.stock_transfer',
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: { actor: { select: { id: true, fullName: true } } },
+    });
+
+    const locIds = new Set<string>();
+    for (const r of rows) {
+      const ba = (r.beforeAfter ?? {}) as Record<string, unknown>;
+      if (typeof ba.fromLocationId === 'string') locIds.add(ba.fromLocationId);
+      if (typeof ba.toLocationId === 'string') locIds.add(ba.toLocationId);
+    }
+    const locations = locIds.size
+      ? await this.prisma.location.findMany({
+          where: { tenantId: user.tenantId, id: { in: [...locIds] } },
+          select: { id: true, name: true, code: true },
+        })
+      : [];
+    const locMap = new Map(locations.map((l) => [l.id, l]));
+
+    return {
+      items: rows.map((r) => {
+        const ba = (r.beforeAfter ?? {}) as {
+          transferId?: string;
+          fromLocationId?: string;
+          toLocationId?: string;
+          notes?: string | null;
+          lines?: Array<{
+            productId?: string;
+            productName?: string;
+            sku?: string;
+            qty?: number;
+          }>;
+        };
+        const from = ba.fromLocationId
+          ? locMap.get(ba.fromLocationId)
+          : undefined;
+        const to = ba.toLocationId ? locMap.get(ba.toLocationId) : undefined;
+        const lines = Array.isArray(ba.lines) ? ba.lines : [];
+        const totalQty = lines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
+        return {
+          id: r.entityId ?? (ba.transferId as string | undefined) ?? r.id,
+          createdAt: r.createdAt,
+          notes: ba.notes ?? null,
+          fromLocationId: ba.fromLocationId ?? null,
+          toLocationId: ba.toLocationId ?? null,
+          fromLocationName: from?.name ?? '—',
+          toLocationName: to?.name ?? '—',
+          lineCount: lines.length,
+          totalQty,
+          lines: lines.map((l) => ({
+            productId: l.productId ?? null,
+            productName: l.productName ?? '—',
+            sku: l.sku ?? '—',
+            qty: Number(l.qty) || 0,
+          })),
+          actorName: r.actor?.fullName ?? 'Staff',
+        };
+      }),
     };
   }
 

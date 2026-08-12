@@ -3,12 +3,15 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { PoType } from '@prisma/client';
+import { PoType, Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import {
   CreatePurchaseOrderDto,
   CreateSupplierDto,
+  CreateSupplierInvoiceDto,
+  CreateSupplierPaymentDto,
+  PaySupplierInvoiceDto,
   ReceivePurchaseOrderDto,
   UpdatePurchaseOrderDto,
 } from './dto/suppliers.dto';
@@ -91,6 +94,7 @@ export class SuppliersService {
         supplierId: dto.supplierId,
         poType: dto.poType ?? PoType.purchase,
         linkedOrderId: dto.linkedOrderId,
+        poNumber: await this.nextDocNumber(user.tenantId, 'PO'),
         expectedDelivery: dto.expectedDelivery
           ? new Date(dto.expectedDelivery)
           : undefined,
@@ -230,6 +234,8 @@ export class SuppliersService {
         sku: string;
         qtyAdded: number;
         qtyOnHand: number;
+        unitCost: number | null;
+        purchaseOrderLineId: string;
       }> = [];
 
       for (const incoming of dto.lines) {
@@ -277,7 +283,7 @@ export class SuppliersService {
             type: 'purchase_receive',
             qtyDelta: incoming.qty,
             qtyAfter: Number(updated.qtyOnHand),
-            reason: `PO ${po.id}`,
+            reason: `PO ${po.poNumber ?? po.id}`,
             referenceType: 'purchase_order',
             referenceId: po.id,
             actorUserId: user.userId,
@@ -289,8 +295,43 @@ export class SuppliersService {
           sku: level.sku,
           qtyAdded: incoming.qty,
           qtyOnHand: Number(updated.qtyOnHand),
+          unitCost: line.unitCost != null ? Number(line.unitCost) : null,
+          purchaseOrderLineId: line.id,
         });
       }
+
+      const grnNumber = await this.nextDocNumber(user.tenantId, 'GRN', tx);
+      const grn = await tx.goodsReceipt.create({
+        data: {
+          tenantId: user.tenantId,
+          supplierId: po.supplierId,
+          purchaseOrderId: po.id,
+          grnNumber,
+          actorUserId: user.userId,
+          lines: {
+            create: results.map((r) => ({
+              tenantId: user.tenantId,
+              stockLevelId: r.stockLevelId,
+              purchaseOrderLineId: r.purchaseOrderLineId,
+              qty: r.qtyAdded,
+              unitCost: r.unitCost ?? undefined,
+            })),
+          },
+        },
+        include: {
+          lines: {
+            include: {
+              stockLevel: {
+                select: {
+                  id: true,
+                  sku: true,
+                  product: { select: { name: true } },
+                },
+              },
+            },
+          },
+        },
+      });
 
       const refreshed = await tx.purchaseOrderLine.findMany({
         where: { purchaseOrderId: po.id, tenantId: user.tenantId },
@@ -328,7 +369,11 @@ export class SuppliersService {
         },
       });
 
-      return { purchaseOrder: updatedPo, received: results };
+      return {
+        purchaseOrder: updatedPo,
+        goodsReceipt: this.mapGrn(grn),
+        received: results.map(({ purchaseOrderLineId: _p, unitCost: _u, ...r }) => r),
+      };
     });
   }
 
@@ -462,5 +507,485 @@ export class SuppliersService {
 
       return { purchaseOrder: updatedPo, returned: results };
     });
+  }
+
+  // ── GRN / AP invoices / payments / ledger ───────────────────────────────
+
+  listGoodsReceipts(user: AuthUser) {
+    return this.prisma.goodsReceipt
+      .findMany({
+        where: { tenantId: user.tenantId },
+        orderBy: { receivedAt: 'desc' },
+        include: {
+          supplier: { select: { id: true, name: true } },
+          purchaseOrder: {
+            select: { id: true, poNumber: true, status: true },
+          },
+          lines: {
+            include: {
+              stockLevel: {
+                select: {
+                  id: true,
+                  sku: true,
+                  product: { select: { name: true } },
+                },
+              },
+            },
+          },
+        },
+      })
+      .then((rows) => rows.map((r) => this.mapGrn(r)));
+  }
+
+  async getGoodsReceipt(user: AuthUser, id: string) {
+    const row = await this.prisma.goodsReceipt.findFirst({
+      where: { id, tenantId: user.tenantId },
+      include: {
+        supplier: { select: { id: true, name: true } },
+        purchaseOrder: {
+          select: { id: true, poNumber: true, status: true },
+        },
+        lines: {
+          include: {
+            stockLevel: {
+              select: {
+                id: true,
+                sku: true,
+                product: { select: { name: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!row) throw new NotFoundException('GRN not found');
+    return this.mapGrn(row);
+  }
+
+  async createInvoice(user: AuthUser, dto: CreateSupplierInvoiceDto) {
+    await this.getSupplier(user, dto.supplierId);
+    if (dto.purchaseOrderId) {
+      const po = await this.prisma.purchaseOrder.findFirst({
+        where: {
+          id: dto.purchaseOrderId,
+          tenantId: user.tenantId,
+          supplierId: dto.supplierId,
+        },
+      });
+      if (!po) throw new NotFoundException('Purchase order not found');
+    }
+    if (dto.goodsReceiptId) {
+      const grn = await this.prisma.goodsReceipt.findFirst({
+        where: {
+          id: dto.goodsReceiptId,
+          tenantId: user.tenantId,
+          supplierId: dto.supplierId,
+        },
+      });
+      if (!grn) throw new NotFoundException('GRN not found');
+    }
+
+    const subtotal = Number(dto.subtotal);
+    const taxTotal = Number(dto.taxTotal ?? 0);
+    const isCredit = dto.isCredit === true;
+    const grandTotal = Number((subtotal + taxTotal).toFixed(2));
+    const invoiceNumber =
+      dto.invoiceNumber?.trim() ||
+      (await this.nextDocNumber(user.tenantId, isCredit ? 'SCN' : 'SINV'));
+
+    const row = await this.prisma.supplierInvoice.create({
+      data: {
+        tenantId: user.tenantId,
+        supplierId: dto.supplierId,
+        purchaseOrderId: dto.purchaseOrderId ?? null,
+        goodsReceiptId: dto.goodsReceiptId ?? null,
+        invoiceNumber,
+        invoiceDate: dto.invoiceDate ? new Date(dto.invoiceDate) : new Date(),
+        dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
+        subtotal: subtotal.toFixed(2),
+        taxTotal: taxTotal.toFixed(2),
+        grandTotal: grandTotal.toFixed(2),
+        amountPaid: '0',
+        status: isCredit ? 'credit' : 'open',
+        notes: dto.notes?.trim() || null,
+      },
+      include: {
+        supplier: { select: { id: true, name: true } },
+        purchaseOrder: { select: { id: true, poNumber: true } },
+        goodsReceipt: { select: { id: true, grnNumber: true } },
+      },
+    });
+    return this.mapInvoice(row);
+  }
+
+  async createInvoiceFromGrn(user: AuthUser, grnId: string) {
+    const grn = await this.prisma.goodsReceipt.findFirst({
+      where: { id: grnId, tenantId: user.tenantId },
+      include: { lines: true },
+    });
+    if (!grn) throw new NotFoundException('GRN not found');
+    const existing = await this.prisma.supplierInvoice.findFirst({
+      where: { tenantId: user.tenantId, goodsReceiptId: grnId },
+    });
+    if (existing) {
+      throw new BadRequestException('Invoice already exists for this GRN');
+    }
+    const subtotal = grn.lines.reduce((s, l) => {
+      const cost = l.unitCost != null ? Number(l.unitCost) : 0;
+      return s + cost * Number(l.qty);
+    }, 0);
+    if (subtotal <= 0) {
+      throw new BadRequestException(
+        'GRN has no unit costs — create invoice manually with amounts',
+      );
+    }
+    return this.createInvoice(user, {
+      supplierId: grn.supplierId,
+      purchaseOrderId: grn.purchaseOrderId,
+      goodsReceiptId: grn.id,
+      subtotal: Number(subtotal.toFixed(2)),
+      taxTotal: 0,
+      notes: `From GRN ${grn.grnNumber}`,
+    });
+  }
+
+  listInvoices(user: AuthUser, status?: string) {
+    return this.prisma.supplierInvoice
+      .findMany({
+        where: {
+          tenantId: user.tenantId,
+          ...(status ? { status } : {}),
+        },
+        orderBy: { invoiceDate: 'desc' },
+        include: {
+          supplier: { select: { id: true, name: true } },
+          purchaseOrder: { select: { id: true, poNumber: true } },
+          goodsReceipt: { select: { id: true, grnNumber: true } },
+        },
+      })
+      .then((rows) => rows.map((r) => this.mapInvoice(r)));
+  }
+
+  listOutstanding(user: AuthUser) {
+    return this.prisma.supplierInvoice
+      .findMany({
+        where: {
+          tenantId: user.tenantId,
+          status: { in: ['open', 'partial', 'credit'] },
+        },
+        orderBy: [{ dueDate: 'asc' }, { invoiceDate: 'asc' }],
+        include: {
+          supplier: { select: { id: true, name: true } },
+          purchaseOrder: { select: { id: true, poNumber: true } },
+          goodsReceipt: { select: { id: true, grnNumber: true } },
+        },
+      })
+      .then((rows) =>
+        rows
+          .map((r) => this.mapInvoice(r))
+          .filter((r) => Math.abs(r.balanceDue) > 0.009),
+      );
+  }
+
+  async payInvoice(
+    user: AuthUser,
+    invoiceId: string,
+    dto: PaySupplierInvoiceDto,
+  ) {
+    const inv = await this.prisma.supplierInvoice.findFirst({
+      where: { id: invoiceId, tenantId: user.tenantId },
+    });
+    if (!inv) throw new NotFoundException('Supplier invoice not found');
+    if (inv.status === 'void' || inv.status === 'paid') {
+      throw new BadRequestException(`Invoice is ${inv.status}`);
+    }
+
+    const amount = Number(dto.amount);
+    const paid = Number(inv.amountPaid);
+    const total = Number(inv.grandTotal);
+    const isCredit = inv.status === 'credit' || total < 0;
+    const balance = isCredit
+      ? Math.abs(total) - paid
+      : total - paid;
+    if (amount > balance + 1e-9) {
+      throw new BadRequestException(
+        `Payment ${amount.toFixed(2)} exceeds balance ${balance.toFixed(2)}`,
+      );
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const payment = await tx.supplierPayment.create({
+        data: {
+          tenantId: user.tenantId,
+          supplierId: inv.supplierId,
+          supplierInvoiceId: inv.id,
+          amount: amount.toFixed(2),
+          method: (dto.method?.trim() || 'bank_transfer').slice(0, 32),
+          reference: dto.reference?.trim() || null,
+          notes: dto.notes?.trim() || null,
+          actorUserId: user.userId,
+        },
+      });
+      const nextPaid = Number((paid + amount).toFixed(2));
+      const nextStatus =
+        nextPaid + 1e-9 >= Math.abs(total)
+          ? 'paid'
+          : nextPaid > 0
+            ? 'partial'
+            : inv.status === 'credit'
+              ? 'credit'
+              : 'open';
+      const updated = await tx.supplierInvoice.update({
+        where: { id: inv.id },
+        data: {
+          amountPaid: nextPaid.toFixed(2),
+          status: nextStatus,
+        },
+        include: {
+          supplier: { select: { id: true, name: true } },
+          purchaseOrder: { select: { id: true, poNumber: true } },
+          goodsReceipt: { select: { id: true, grnNumber: true } },
+        },
+      });
+      return {
+        invoice: this.mapInvoice(updated),
+        payment: this.mapPayment(payment),
+      };
+    });
+  }
+
+  async createPayment(user: AuthUser, dto: CreateSupplierPaymentDto) {
+    await this.getSupplier(user, dto.supplierId);
+    if (dto.supplierInvoiceId) {
+      return this.payInvoice(user, dto.supplierInvoiceId, {
+        amount: dto.amount,
+        method: dto.method,
+        reference: dto.reference,
+        notes: dto.notes,
+      });
+    }
+    const payment = await this.prisma.supplierPayment.create({
+      data: {
+        tenantId: user.tenantId,
+        supplierId: dto.supplierId,
+        amount: Number(dto.amount).toFixed(2),
+        method: (dto.method?.trim() || 'bank_transfer').slice(0, 32),
+        reference: dto.reference?.trim() || null,
+        notes: dto.notes?.trim() || null,
+        actorUserId: user.userId,
+      },
+    });
+    return { payment: this.mapPayment(payment) };
+  }
+
+  listPayments(user: AuthUser, supplierId?: string) {
+    return this.prisma.supplierPayment
+      .findMany({
+        where: {
+          tenantId: user.tenantId,
+          ...(supplierId ? { supplierId } : {}),
+        },
+        orderBy: { paidAt: 'desc' },
+        include: {
+          supplier: { select: { id: true, name: true } },
+          invoice: {
+            select: { id: true, invoiceNumber: true, status: true },
+          },
+        },
+      })
+      .then((rows) => rows.map((r) => this.mapPayment(r)));
+  }
+
+  async supplierLedger(user: AuthUser, supplierId: string) {
+    await this.getSupplier(user, supplierId);
+    const [invoices, payments] = await Promise.all([
+      this.prisma.supplierInvoice.findMany({
+        where: { tenantId: user.tenantId, supplierId },
+        orderBy: { invoiceDate: 'asc' },
+      }),
+      this.prisma.supplierPayment.findMany({
+        where: { tenantId: user.tenantId, supplierId },
+        orderBy: { paidAt: 'asc' },
+      }),
+    ]);
+
+    type Entry = {
+      at: string;
+      kind: 'invoice' | 'credit' | 'payment';
+      ref: string;
+      debit: number;
+      credit: number;
+      note?: string | null;
+    };
+    const entries: Entry[] = [];
+    for (const inv of invoices) {
+      if (inv.status === 'void') continue;
+      const total = Number(inv.grandTotal);
+      const isCredit = inv.status === 'credit' || total < 0;
+      entries.push({
+        at: inv.invoiceDate.toISOString(),
+        kind: isCredit ? 'credit' : 'invoice',
+        ref: inv.invoiceNumber,
+        debit: isCredit ? 0 : Math.abs(total),
+        credit: isCredit ? Math.abs(total) : 0,
+        note: inv.notes,
+      });
+    }
+    for (const pay of payments) {
+      entries.push({
+        at: pay.paidAt.toISOString(),
+        kind: 'payment',
+        ref: pay.reference || pay.id.slice(0, 8),
+        debit: 0,
+        credit: Number(pay.amount),
+        note: pay.notes,
+      });
+    }
+    entries.sort((a, b) => a.at.localeCompare(b.at));
+    let balance = 0;
+    const items = entries.map((e) => {
+      balance = Number((balance + e.debit - e.credit).toFixed(2));
+      return { ...e, balance };
+    });
+    return {
+      supplierId,
+      balance,
+      items,
+    };
+  }
+
+  private async nextDocNumber(
+    tenantId: string,
+    prefix: 'PO' | 'GRN' | 'SINV' | 'SCN',
+    tx?: Prisma.TransactionClient,
+  ) {
+    const db = tx ?? this.prisma;
+    const year = new Date().getFullYear();
+    const count =
+      prefix === 'PO'
+        ? await db.purchaseOrder.count({ where: { tenantId } })
+        : prefix === 'GRN'
+          ? await db.goodsReceipt.count({ where: { tenantId } })
+          : await db.supplierInvoice.count({ where: { tenantId } });
+    return `${prefix}-${year}-${String(count + 1).padStart(5, '0')}`;
+  }
+
+  private mapGrn(r: {
+    id: string;
+    grnNumber: string;
+    supplierId: string;
+    purchaseOrderId: string;
+    notes: string | null;
+    receivedAt: Date;
+    supplier?: { id: string; name: string } | null;
+    purchaseOrder?: {
+      id: string;
+      poNumber: string | null;
+      status?: string;
+    } | null;
+    lines?: Array<{
+      id: string;
+      qty: unknown;
+      unitCost: unknown;
+      stockLevelId: string;
+      stockLevel?: {
+        id: string;
+        sku: string;
+        product?: { name: string } | null;
+      } | null;
+    }>;
+  }) {
+    return {
+      id: r.id,
+      grnNumber: r.grnNumber,
+      supplierId: r.supplierId,
+      purchaseOrderId: r.purchaseOrderId,
+      notes: r.notes,
+      receivedAt: r.receivedAt,
+      supplier: r.supplier ?? undefined,
+      purchaseOrder: r.purchaseOrder ?? undefined,
+      lines: (r.lines ?? []).map((l) => ({
+        id: l.id,
+        stockLevelId: l.stockLevelId,
+        qty: Number(l.qty),
+        unitCost: l.unitCost != null ? Number(l.unitCost) : null,
+        stockLevel: l.stockLevel ?? undefined,
+      })),
+    };
+  }
+
+  private mapInvoice(r: {
+    id: string;
+    supplierId: string;
+    purchaseOrderId: string | null;
+    goodsReceiptId: string | null;
+    invoiceNumber: string;
+    invoiceDate: Date;
+    dueDate: Date | null;
+    subtotal: unknown;
+    taxTotal: unknown;
+    grandTotal: unknown;
+    amountPaid: unknown;
+    status: string;
+    notes: string | null;
+    supplier?: { id: string; name: string } | null;
+    purchaseOrder?: { id: string; poNumber: string | null } | null;
+    goodsReceipt?: { id: string; grnNumber: string } | null;
+  }) {
+    const grandTotal = Number(r.grandTotal);
+    const amountPaid = Number(r.amountPaid);
+    const balanceDue =
+      r.status === 'credit' || grandTotal < 0
+        ? -(Math.abs(grandTotal) - amountPaid)
+        : grandTotal - amountPaid;
+    return {
+      id: r.id,
+      supplierId: r.supplierId,
+      purchaseOrderId: r.purchaseOrderId,
+      goodsReceiptId: r.goodsReceiptId,
+      invoiceNumber: r.invoiceNumber,
+      invoiceDate: r.invoiceDate,
+      dueDate: r.dueDate,
+      subtotal: Number(r.subtotal),
+      taxTotal: Number(r.taxTotal),
+      grandTotal,
+      amountPaid,
+      balanceDue: Number(balanceDue.toFixed(2)),
+      status: r.status,
+      notes: r.notes,
+      supplier: r.supplier ?? undefined,
+      purchaseOrder: r.purchaseOrder ?? undefined,
+      goodsReceipt: r.goodsReceipt ?? undefined,
+    };
+  }
+
+  private mapPayment(r: {
+    id: string;
+    supplierId: string;
+    supplierInvoiceId?: string | null;
+    amount: unknown;
+    method: string;
+    reference: string | null;
+    notes: string | null;
+    paidAt: Date;
+    supplier?: { id: string; name: string } | null;
+    invoice?: {
+      id: string;
+      invoiceNumber: string;
+      status: string;
+    } | null;
+  }) {
+    return {
+      id: r.id,
+      supplierId: r.supplierId,
+      supplierInvoiceId: r.supplierInvoiceId ?? null,
+      amount: Number(r.amount),
+      method: r.method,
+      reference: r.reference,
+      notes: r.notes,
+      paidAt: r.paidAt,
+      supplier: r.supplier ?? undefined,
+      invoice: r.invoice ?? undefined,
+    };
   }
 }

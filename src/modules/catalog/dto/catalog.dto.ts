@@ -189,6 +189,14 @@ export class CreateCatalogProductDto {
   @MaxLength(64)
   barcode?: string;
 
+  @ApiPropertyOptional({
+    description: 'code128 | ean13 | upca | ean8 — defaults to code128',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  barcodeType?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -346,6 +354,12 @@ export class UpdateCatalogProductDto {
   @IsOptional()
   @IsString()
   barcode?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  barcodeType?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()

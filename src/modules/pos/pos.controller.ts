@@ -253,6 +253,7 @@ export class PosController {
     @Query('locationId') locationId?: string,
     @Query('q') q?: string,
     @Query('limit') limit?: string,
+    @Query('page') page?: string,
     @Query('lowStock') lowStock?: string,
     @Query('maxQty') maxQty?: string,
   ) {
@@ -260,6 +261,7 @@ export class PosController {
       locationId,
       q,
       limit: limit ? Number(limit) : undefined,
+      page: page ? Number(page) : undefined,
       lowStock: lowStock === '1' || lowStock === 'true',
       maxQty: maxQty ? Number(maxQty) : undefined,
     });

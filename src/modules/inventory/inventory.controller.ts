@@ -209,6 +209,19 @@ export class InventoryController {
     return this.inventoryService.listStockAtLocation(user, locationId, q);
   }
 
+  @Get('stock-transfers')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'List stock transfer history' })
+  listStockTransfers(
+    @CurrentUser() user: AuthUser,
+    @Query('limit') limit?: string,
+  ) {
+    return this.inventoryService.listStockTransfers(
+      user,
+      limit ? Number(limit) : 100,
+    );
+  }
+
   @Post('stock-transfers')
   @HttpCode(200)
   @Roles(...RoleGroup.catalogWrite)

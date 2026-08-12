@@ -17,10 +17,13 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
 import { CustomersService } from './customers.service';
 import {
+  AddCustomerNoteDto,
   AddPartyMemberDto,
+  AdjustStoreCreditDto,
   CreateCustomerDto,
   CreateMeasurementDto,
   CreatePartyDto,
+  CrmListQueryDto,
   ListCustomersQueryDto,
   UpdateCustomerDto,
 } from './dto/customers.dto';
@@ -45,12 +48,87 @@ export class CustomersController {
   }
 
   @Get('customers/:id')
-  @ApiOperation({ summary: 'Get customer by id' })
+  @ApiOperation({ summary: 'Get customer by id (CRM summary)' })
   getOne(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.customersService.getById(user, id);
+  }
+
+  @Get('customers/:id/orders')
+  @ApiOperation({ summary: 'Purchase history for customer' })
+  listOrders(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: CrmListQueryDto,
+  ) {
+    return this.customersService.listOrders(user, id, query.limit);
+  }
+
+  @Get('customers/:id/dues')
+  @ApiOperation({ summary: 'Open balance / due payments for customer' })
+  listDues(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: CrmListQueryDto,
+  ) {
+    return this.customersService.listDues(user, id, query.limit);
+  }
+
+  @Get('customers/:id/loyalty-ledger')
+  @ApiOperation({ summary: 'Loyalty points ledger for customer' })
+  listLoyalty(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: CrmListQueryDto,
+  ) {
+    return this.customersService.listLoyaltyLedger(user, id, query.limit);
+  }
+
+  @Get('customers/:id/store-credit')
+  @ApiOperation({ summary: 'Store credit / wallet ledger' })
+  listStoreCredit(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: CrmListQueryDto,
+  ) {
+    return this.customersService.listStoreCreditLedger(user, id, query.limit);
+  }
+
+  @Post('customers/:id/store-credit')
+  @ApiOperation({ summary: 'Top-up or debit store credit wallet' })
+  adjustStoreCredit(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AdjustStoreCreditDto,
+  ) {
+    return this.customersService.adjustStoreCredit(
+      user,
+      id,
+      dto.amount,
+      dto.note,
+    );
+  }
+
+  @Get('customers/:id/notes')
+  @ApiOperation({ summary: 'Customer note timeline' })
+  listNotes(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: CrmListQueryDto,
+  ) {
+    return this.customersService.listNotes(user, id, query.limit);
+  }
+
+  @Post('customers/:id/notes')
+  @ApiOperation({ summary: 'Add customer note' })
+  addNote(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AddCustomerNoteDto,
+  ) {
+    return this.customersService.addNote(user, id, dto.body);
   }
 
   @Patch('customers/:id')
@@ -93,19 +171,19 @@ export class CustomersController {
   }
 
   @Post('parties')
-  @ApiOperation({ summary: 'Create customer group / party' })
+  @ApiOperation({ summary: 'Create customer group' })
   createParty(@CurrentUser() user: AuthUser, @Body() dto: CreatePartyDto) {
     return this.customersService.createParty(user, dto);
   }
 
   @Get('parties')
-  @ApiOperation({ summary: 'List parties' })
+  @ApiOperation({ summary: 'List customer groups' })
   listParties(@CurrentUser() user: AuthUser) {
     return this.customersService.listParties(user);
   }
 
   @Get('parties/:id')
-  @ApiOperation({ summary: 'Get party with members' })
+  @ApiOperation({ summary: 'Get customer group with members' })
   getParty(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
@@ -114,7 +192,7 @@ export class CustomersController {
   }
 
   @Post('parties/:id/members')
-  @ApiOperation({ summary: 'Add member to party' })
+  @ApiOperation({ summary: 'Add member to customer group' })
   addMember(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
@@ -125,7 +203,7 @@ export class CustomersController {
 
   @Delete('parties/:id/members/:customerId')
   @HttpCode(200)
-  @ApiOperation({ summary: 'Remove member from party' })
+  @ApiOperation({ summary: 'Remove member from customer group' })
   removeMember(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,

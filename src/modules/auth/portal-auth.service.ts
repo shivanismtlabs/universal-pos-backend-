@@ -337,6 +337,11 @@ export class PortalAuthService {
         commerceModes: modes,
         commerceSetupAt: new Date().toISOString(),
         pos: { pinSwitchEnabled: true },
+        /** Exclusive tax by default so Due = Subtotal + Tax at counter */
+        tax: {
+          ratePercent: provisioned.tenant.taxMode === 'none' ? 0 : 5,
+          inclusive: false,
+        },
         organizationProfile: {
           phone: dto.phone?.trim() || identity.phone || null,
           addressLine1: dto.addressLine1?.trim() || null,

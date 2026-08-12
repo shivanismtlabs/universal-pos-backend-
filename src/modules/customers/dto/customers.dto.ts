@@ -206,3 +206,34 @@ export class AddPartyMemberDto {
   @MaxLength(100)
   roleLabel?: string;
 }
+
+export class AdjustStoreCreditDto {
+  @ApiProperty({ example: 500, description: 'Positive to credit wallet, negative to debit' })
+  @Type(() => Number)
+  @IsNumber()
+  amount!: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string;
+}
+
+export class AddCustomerNoteDto {
+  @ApiProperty()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(4000)
+  body!: string;
+}
+
+export class CrmListQueryDto {
+  @ApiPropertyOptional({ default: 50 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  limit?: number;
+}

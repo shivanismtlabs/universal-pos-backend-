@@ -118,6 +118,23 @@ export class IamWebAuthnService {
     return { rpID, origin };
   }
 
+  /** Origins accepted during verify (client + configured list). */
+  private expectedOrigins(primary: string): string | string[] {
+    const set = new Set<string>([primary, ...this.configuredOrigins()]);
+    try {
+      const u = new URL(primary);
+      if (u.hostname === 'localhost') {
+        set.add(`${u.protocol}//127.0.0.1${u.port ? `:${u.port}` : ''}`);
+      } else if (u.hostname === '127.0.0.1') {
+        set.add(`${u.protocol}//localhost${u.port ? `:${u.port}` : ''}`);
+      }
+    } catch {
+      /* ignore */
+    }
+    const list = [...set];
+    return list.length === 1 ? list[0]! : list;
+  }
+
   async registrationOptions(user: AuthUser, clientOrigin?: string | null) {
     const { rpID } = this.resolveRpContext(clientOrigin);
     const existing = await this.prisma.webAuthnCredential.findMany({
@@ -132,11 +149,13 @@ export class IamWebAuthnService {
       attestationType: 'none',
       excludeCredentials: existing.map((c) => ({
         id: c.credentialId,
-        transports: c.transports as AuthenticatorTransportFuture[],
+        transports: (c.transports?.length
+          ? c.transports
+          : ['internal']) as AuthenticatorTransportFuture[],
       })),
       authenticatorSelection: {
-        // Platform biometric (Windows Hello / Face ID / Touch ID) preferred;
-        // omit attachment so USB keys still work on the same flow.
+        // Fingerprint / Windows Hello / Touch ID / Face ID
+        authenticatorAttachment: 'platform',
         residentKey: 'preferred',
         userVerification: 'preferred',
       },
@@ -160,6 +179,11 @@ export class IamWebAuthnService {
     label?: string,
     clientOrigin?: string | null,
   ) {
+    if (!body || typeof body !== 'object' || !body.id) {
+      throw new BadRequestException(
+        'Missing biometric response — complete the fingerprint / Windows Hello prompt',
+      );
+    }
     const row = await this.prisma.webAuthnChallenge.findFirst({
       where: {
         userId: user.userId,
@@ -176,7 +200,7 @@ export class IamWebAuthnService {
       verification = await verifyRegistrationResponse({
         response: body,
         expectedChallenge: row.challenge,
-        expectedOrigin: origin,
+        expectedOrigin: this.expectedOrigins(origin),
         expectedRPID: rpID,
         // Match authenticatorSelection.userVerification: 'preferred'
         requireUserVerification: false,
@@ -189,7 +213,7 @@ export class IamWebAuthnService {
       throw new BadRequestException(
         detail.includes('User verification')
           ? 'Biometric registration failed — complete Windows Hello / passkey prompt, then try again'
-          : 'Biometric registration failed — use HTTPS (or localhost), and ensure WEBAUTHN_ORIGIN matches this site',
+          : 'Biometric registration failed — use the same address bar host (localhost vs 127.0.0.1), HTTPS or localhost, and retry',
       );
     }
 
@@ -200,6 +224,11 @@ export class IamWebAuthnService {
     const { credential, credentialDeviceType, credentialBackedUp } =
       verification.registrationInfo;
 
+    const transports =
+      body.response.transports?.length
+        ? body.response.transports
+        : (['internal'] as AuthenticatorTransportFuture[]);
+
     await this.prisma.webAuthnCredential.create({
       data: {
         tenantId: user.tenantId,
@@ -209,7 +238,7 @@ export class IamWebAuthnService {
         counter: BigInt(credential.counter),
         deviceType: credentialDeviceType,
         backedUp: credentialBackedUp,
-        transports: body.response.transports ?? [],
+        transports,
         label: label?.trim() || 'Device biometric',
       },
     });
@@ -269,7 +298,9 @@ export class IamWebAuthnService {
       rpID,
       allowCredentials: creds.map((c) => ({
         id: c.credentialId,
-        transports: c.transports as AuthenticatorTransportFuture[],
+        transports: (c.transports?.length
+          ? c.transports
+          : ['internal']) as AuthenticatorTransportFuture[],
       })),
       userVerification: 'preferred',
     });
@@ -277,7 +308,7 @@ export class IamWebAuthnService {
     // Challenge is keyed by email so multi-tenant same-email still works
     await this.prisma.webAuthnChallenge.create({
       data: {
-        userId: creds[0].userId,
+        userId: creds[0]!.userId,
         email: normalized,
         challenge: options.challenge,
         type: 'authentication',
@@ -293,6 +324,11 @@ export class IamWebAuthnService {
     body: AuthenticationResponseJSON,
     clientOrigin?: string | null,
   ) {
+    if (!body || typeof body !== 'object' || !body.id) {
+      throw new UnauthorizedException(
+        'Missing biometric response — complete the fingerprint / Windows Hello prompt',
+      );
+    }
     const normalized = email.trim().toLowerCase();
     const challenge = await this.prisma.webAuthnChallenge.findFirst({
       where: {
@@ -325,7 +361,7 @@ export class IamWebAuthnService {
       verification = await verifyAuthenticationResponse({
         response: body,
         expectedChallenge: challenge.challenge,
-        expectedOrigin: origin,
+        expectedOrigin: this.expectedOrigins(origin),
         expectedRPID: rpID,
         // Options use userVerification: 'preferred' — do not hard-require UV
         // (Windows Hello often returns without UV when PIN/face is skipped).
@@ -334,7 +370,9 @@ export class IamWebAuthnService {
           id: cred.credentialId,
           publicKey: new Uint8Array(cred.publicKey),
           counter: Number(cred.counter),
-          transports: cred.transports as AuthenticatorTransportFuture[],
+          transports: (cred.transports?.length
+            ? cred.transports
+            : ['internal']) as AuthenticatorTransportFuture[],
         },
       });
     } catch (e) {
@@ -344,9 +382,9 @@ export class IamWebAuthnService {
       );
       throw new UnauthorizedException(
         detail.includes('User verification')
-          ? 'Biometric verification failed — complete Windows Hello / passkey prompt'
+          ? 'Biometric verification failed — complete Windows Hello / fingerprint prompt'
           : detail.includes('origin') || detail.includes('RP ID')
-            ? 'Biometric verification failed — origin/RP mismatch (re-register passkey on this site)'
+            ? 'Biometric verification failed — open the same site host you used when registering (localhost vs 127.0.0.1), then re-register if needed'
             : 'Biometric verification failed — cancelled or credential not accepted',
       );
     }

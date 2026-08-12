@@ -162,6 +162,9 @@ enum PaymentMethod {
   store_credit
   gift_card
   collect_later
+  wallet
+  qr
+  emi
   other
 }
 
@@ -312,6 +315,10 @@ model Tenant {
   stockMovements     StockMovement[]
   purchaseOrders     PurchaseOrder[]
   purchaseOrderLines PurchaseOrderLine[]
+  goodsReceipts      GoodsReceipt[]
+  goodsReceiptLines  GoodsReceiptLine[]
+  supplierInvoices   SupplierInvoice[]
+  supplierPayments   SupplierPayment[]
   orders             Order[]
   orderItems         OrderItem[]
   appointments            Appointment[]
@@ -336,6 +343,8 @@ model Tenant {
   giftCards          GiftCard[]
   giftCardTxns       GiftCardTxn[]
   loyaltyLedger      LoyaltyLedgerEntry[]
+  storeCreditLedger  StoreCreditLedgerEntry[]
+  customerNotes      CustomerNote[]
   // rental module
   rentalOrders       ModRentalOrder[]
   rentalParties      ModRentalParty[]
@@ -638,6 +647,8 @@ model User {
   shiftAssignments   ShiftAssignment[]
   attendanceEntries  AttendanceEntry[]
   webAuthnCredentials WebAuthnCredential[]
+  storeCreditLedger   StoreCreditLedgerEntry[]
+  customerNotes       CustomerNote[]
 
   @@unique([tenantId, email])
   @@map("users")
@@ -768,6 +779,7 @@ model WorkShift {
 
   tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   assignments ShiftAssignment[]
+  attendance  AttendanceEntry[]
 
   @@index([tenantId])
   @@map("work_shifts")
@@ -795,25 +807,35 @@ model ShiftAssignment {
   @@map("shift_assignments")
 }
 
-/// Clock-in / clock-out attendance
+/// Clock-in / clock-out attendance (also supports manual day entries)
 model AttendanceEntry {
   id           String    @id @default(uuid()) @db.Uuid
   tenantId     String    @map("tenant_id") @db.Uuid
   userId       String    @map("user_id") @db.Uuid
   locationId   String?   @map("location_id") @db.Uuid
-  clockInAt    DateTime  @map("clock_in_at") @db.Timestamptz(6)
+  /// Calendar day for the attendance record (one per staff/day preferred)
+  workDate     DateTime? @map("work_date") @db.Date
+  shiftId      String?   @map("shift_id") @db.Uuid
+  clockInAt    DateTime? @map("clock_in_at") @db.Timestamptz(6)
   clockOutAt   DateTime? @map("clock_out_at") @db.Timestamptz(6)
+  /// Break length in minutes (deducted from worked time)
+  breakMinutes Int       @default(0) @map("break_minutes")
+  /// present | absent | half_day | late | early_leave | leave | holiday | off_day
+  status       String    @default("present")
   /// pin | password | biometric | manual
   method       String    @default("manual")
   notes        String?
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  location Location? @relation(fields: [locationId], references: [id])
+  tenant   Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  location Location?  @relation(fields: [locationId], references: [id])
+  shift    WorkShift? @relation(fields: [shiftId], references: [id])
 
   @@index([tenantId, userId, clockInAt])
+  @@index([tenantId, userId, workDate])
+  @@index([tenantId, workDate, status])
   @@map("attendance_entries")
 }
 
@@ -907,11 +929,52 @@ model Customer {
   couponRedemptions CouponRedemption[]
   giftCards        GiftCard[]
   loyaltyLedger    LoyaltyLedgerEntry[]
+  storeCreditLedger StoreCreditLedgerEntry[]
+  customerNotes    CustomerNote[]
 
   @@unique([tenantId, phone])
   @@index([tenantId, createdAt])
   @@index([tenantId, fullName])
   @@map("customers")
+}
+
+/// Manual / counter store-credit movements (wallet ledger)
+model StoreCreditLedgerEntry {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  customerId   String   @map("customer_id") @db.Uuid
+  /// credit | debit | adjust
+  kind         String
+  amount       Decimal  @db.Decimal(12, 2)
+  balanceAfter Decimal  @map("balance_after") @db.Decimal(12, 2)
+  orderId      String?  @map("order_id") @db.Uuid
+  note         String?
+  actorUserId  String?  @map("actor_user_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  customer Customer @relation(fields: [customerId], references: [id])
+  actor    User?    @relation(fields: [actorUserId], references: [id])
+
+  @@index([tenantId, customerId, createdAt])
+  @@map("store_credit_ledger")
+}
+
+/// CRM note timeline (keeps Customer.notes as latest summary)
+model CustomerNote {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  customerId  String   @map("customer_id") @db.Uuid
+  body        String
+  createdById String?  @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  customer  Customer @relation(fields: [customerId], references: [id])
+  createdBy User?    @relation(fields: [createdById], references: [id])
+
+  @@index([tenantId, customerId, createdAt])
+  @@map("customer_notes")
 }
 
 // ─── Catalog / inventory (commerce core) ────────────────────────────────────
@@ -969,6 +1032,8 @@ model Product {
   skuCode         String          @map("sku_code") @db.VarChar(18)
   /// Scan identifier — separate from SKU
   barcode         String?         @db.VarChar(64)
+  /// Symbology for labels: code128 (default) | ean13 | upca | ean8
+  barcodeType     String?         @map("barcode_type") @db.VarChar(16)
   /// Optional QR payload (defaults to structured catalog ref when empty)
   qrCode          String?         @map("qr_code") @db.VarChar(255)
   internalCode    String?         @map("internal_code") @db.VarChar(64)
@@ -1140,6 +1205,9 @@ model Supplier {
   tenant         Tenant          @relation(fields: [tenantId], references: [id])
   stockUnits     StockUnit[]
   purchaseOrders PurchaseOrder[]
+  goodsReceipts  GoodsReceipt[]
+  invoices       SupplierInvoice[]
+  payments       SupplierPayment[]
 
   @@map("suppliers")
 }
@@ -1213,6 +1281,7 @@ model StockLevel {
   purchaseOrderLines PurchaseOrderLine[]
   ledgerEntries      StockLedgerEntry[]
   countLines         StockCountLine[]
+  goodsReceiptLines  GoodsReceiptLine[]
 
   @@unique([tenantId, locationId, productId])
   /// Same product SKU may exist at multiple locations (multi-store)
@@ -1358,16 +1427,21 @@ model PurchaseOrder {
   supplierId       String    @map("supplier_id") @db.Uuid
   linkedOrderId    String?   @map("linked_order_id") @db.Uuid
   poType           PoType    @default(purchase) @map("po_type")
+  /// Human-readable PO number (tenant-scoped)
+  poNumber         String?   @map("po_number")
   expectedDelivery DateTime? @map("expected_delivery") @db.Date
   status           String    @default("draft")
   notes            String?
   createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant   Tenant              @relation(fields: [tenantId], references: [id])
-  supplier Supplier            @relation(fields: [supplierId], references: [id])
-  lines    PurchaseOrderLine[]
+  tenant        Tenant              @relation(fields: [tenantId], references: [id])
+  supplier      Supplier            @relation(fields: [supplierId], references: [id])
+  lines         PurchaseOrderLine[]
+  goodsReceipts GoodsReceipt[]
+  invoices      SupplierInvoice[]
 
+  @@index([tenantId, poNumber])
   @@map("purchase_orders")
 }
 
@@ -1386,9 +1460,107 @@ model PurchaseOrderLine {
   tenant        Tenant        @relation(fields: [tenantId], references: [id])
   purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
   stockLevel    StockLevel    @relation(fields: [stockLevelId], references: [id])
+  receiptLines  GoodsReceiptLine[]
 
   @@index([tenantId, purchaseOrderId])
   @@map("purchase_order_lines")
+}
+
+/// Goods Received Note — created when stock is received against a PO
+model GoodsReceipt {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  supplierId      String   @map("supplier_id") @db.Uuid
+  purchaseOrderId String   @map("purchase_order_id") @db.Uuid
+  grnNumber       String   @map("grn_number")
+  notes           String?
+  actorUserId     String?  @map("actor_user_id") @db.Uuid
+  receivedAt      DateTime @default(now()) @map("received_at") @db.Timestamptz(6)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant        Tenant             @relation(fields: [tenantId], references: [id])
+  supplier      Supplier           @relation(fields: [supplierId], references: [id])
+  purchaseOrder PurchaseOrder      @relation(fields: [purchaseOrderId], references: [id])
+  lines         GoodsReceiptLine[]
+  invoices      SupplierInvoice[]
+
+  @@unique([tenantId, grnNumber])
+  @@index([tenantId, supplierId, receivedAt])
+  @@map("goods_receipts")
+}
+
+model GoodsReceiptLine {
+  id                  String   @id @default(uuid()) @db.Uuid
+  tenantId            String   @map("tenant_id") @db.Uuid
+  goodsReceiptId      String   @map("goods_receipt_id") @db.Uuid
+  stockLevelId        String   @map("stock_level_id") @db.Uuid
+  purchaseOrderLineId String?  @map("purchase_order_line_id") @db.Uuid
+  qty                 Decimal  @db.Decimal(12, 3)
+  unitCost            Decimal? @map("unit_cost") @db.Decimal(12, 2)
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant            Tenant             @relation(fields: [tenantId], references: [id])
+  goodsReceipt      GoodsReceipt       @relation(fields: [goodsReceiptId], references: [id], onDelete: Cascade)
+  stockLevel        StockLevel         @relation(fields: [stockLevelId], references: [id])
+  purchaseOrderLine PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id])
+
+  @@index([tenantId, goodsReceiptId])
+  @@map("goods_receipt_lines")
+}
+
+/// Supplier bill / AP invoice
+model SupplierInvoice {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  supplierId      String    @map("supplier_id") @db.Uuid
+  purchaseOrderId String?   @map("purchase_order_id") @db.Uuid
+  goodsReceiptId  String?   @map("goods_receipt_id") @db.Uuid
+  invoiceNumber   String    @map("invoice_number")
+  invoiceDate     DateTime  @default(now()) @map("invoice_date") @db.Date
+  dueDate         DateTime? @map("due_date") @db.Date
+  subtotal        Decimal   @default(0) @db.Decimal(12, 2)
+  taxTotal        Decimal   @default(0) @map("tax_total") @db.Decimal(12, 2)
+  grandTotal      Decimal   @default(0) @map("grand_total") @db.Decimal(12, 2)
+  amountPaid      Decimal   @default(0) @map("amount_paid") @db.Decimal(12, 2)
+  /// open | partial | paid | void | credit
+  status          String    @default("open")
+  notes           String?
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant        Tenant            @relation(fields: [tenantId], references: [id])
+  supplier      Supplier          @relation(fields: [supplierId], references: [id])
+  purchaseOrder PurchaseOrder?    @relation(fields: [purchaseOrderId], references: [id])
+  goodsReceipt  GoodsReceipt?     @relation(fields: [goodsReceiptId], references: [id])
+  payments      SupplierPayment[]
+
+  @@unique([tenantId, invoiceNumber])
+  @@index([tenantId, supplierId, status])
+  @@index([tenantId, dueDate])
+  @@map("supplier_invoices")
+}
+
+/// Payment against supplier AP (or unallocated supplier payment)
+model SupplierPayment {
+  id                String   @id @default(uuid()) @db.Uuid
+  tenantId          String   @map("tenant_id") @db.Uuid
+  supplierId        String   @map("supplier_id") @db.Uuid
+  supplierInvoiceId String?  @map("supplier_invoice_id") @db.Uuid
+  amount            Decimal  @db.Decimal(12, 2)
+  /// cash | card | upi | bank_transfer | wallet | other…
+  method            String   @default("bank_transfer")
+  reference         String?
+  notes             String?
+  actorUserId       String?  @map("actor_user_id") @db.Uuid
+  paidAt            DateTime @default(now()) @map("paid_at") @db.Timestamptz(6)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant   Tenant           @relation(fields: [tenantId], references: [id])
+  supplier Supplier         @relation(fields: [supplierId], references: [id])
+  invoice  SupplierInvoice? @relation(fields: [supplierInvoiceId], references: [id])
+
+  @@index([tenantId, supplierId, paidAt])
+  @@map("supplier_payments")
 }
 
 // ─── Orders / payments / POS ────────────────────────────────────────────────

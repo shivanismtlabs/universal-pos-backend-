@@ -49,17 +49,66 @@ function defaultRateForMode(mode: TaxMode): number {
   }
 }
 
+/** Default percent (e.g. 5) for a tax mode — used when settings.tax is unset. */
+export function defaultRatePercentForMode(mode: TaxMode): number {
+  return Math.round(defaultRateForMode(mode) * 10000) / 100;
+}
+
+function coerceRatePercent(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const n = Number(value.replace(/%/g, '').trim());
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
 export function parseTaxSettings(raw: unknown): TenantTaxSettings {
   if (!raw || typeof raw !== 'object') return {};
   const root = raw as Record<string, unknown>;
-  const tax = (root.tax ?? root) as Record<string, unknown>;
+  const tax =
+    root.tax && typeof root.tax === 'object'
+      ? (root.tax as Record<string, unknown>)
+      : (root as Record<string, unknown>);
   const out: TenantTaxSettings = {};
-  if (typeof tax.ratePercent === 'number' && Number.isFinite(tax.ratePercent)) {
-    out.ratePercent = tax.ratePercent;
-  }
+  const rate = coerceRatePercent(tax.ratePercent);
+  if (rate !== undefined) out.ratePercent = rate;
   if (typeof tax.inclusive === 'boolean') out.inclusive = tax.inclusive;
+  else if (typeof root.taxInclusive === 'boolean')
+    out.inclusive = root.taxInclusive;
   if (typeof tax.receiptFooter === 'string') out.receiptFooter = tax.receiptFooter;
   return out;
+}
+
+/** Ensure tenant.settings.tax has ratePercent + inclusive (exclusive by default). */
+export function ensureTenantTaxSettings(
+  settings: unknown,
+  taxMode: TaxMode,
+): Record<string, unknown> {
+  const root =
+    settings && typeof settings === 'object' && !Array.isArray(settings)
+      ? { ...(settings as Record<string, unknown>) }
+      : {};
+  const prev =
+    root.tax && typeof root.tax === 'object'
+      ? { ...(root.tax as Record<string, unknown>) }
+      : {};
+  const parsed = parseTaxSettings(root);
+  const ratePercent =
+    parsed.ratePercent !== undefined
+      ? parsed.ratePercent
+      : defaultRatePercentForMode(taxMode);
+  root.tax = {
+    ...prev,
+    ratePercent: taxMode === TaxMode.none ? 0 : ratePercent,
+    inclusive: parsed.inclusive === true,
+    ...(typeof prev.receiptFooter === 'string'
+      ? { receiptFooter: prev.receiptFooter }
+      : typeof parsed.receiptFooter === 'string'
+        ? { receiptFooter: parsed.receiptFooter }
+        : {}),
+  };
+  return root;
 }
 
 export function buildTaxProfile(input: {
@@ -100,27 +149,66 @@ export function buildTaxProfile(input: {
   };
 }
 
-/** Compute net lineTotal + taxAmount for one cart line. */
+/** Compute net lineTotal + taxAmount for one cart line.
+ * Optional `rate` overrides the tenant profile rate (product-level GST %).
+ */
 export function computeLineTax(
   profile: TaxProfile,
-  input: LineTaxInput,
+  input: LineTaxInput & { rate?: number },
 ): LineTaxResult {
   const gross = money(input.lineGross);
-  if (profile.rate <= 0 || profile.taxMode === TaxMode.none) {
+  const rate =
+    input.rate !== undefined && Number.isFinite(input.rate)
+      ? Math.min(0.4, Math.max(0, input.rate))
+      : profile.rate;
+
+  if (rate <= 0 || profile.taxMode === TaxMode.none) {
     return { lineTotal: gross, taxAmount: money(0) };
   }
 
   if (profile.inclusive) {
     // gross includes tax: net = gross / (1+r), tax = gross - net
-    const divisor = money(1).add(profile.rate);
+    const divisor = money(1).add(rate);
     const net = gross.div(divisor).toDecimalPlaces(2);
     const tax = gross.sub(net).toDecimalPlaces(2);
     return { lineTotal: net, taxAmount: tax };
   }
 
   // exclusive: tax on net; lineTotal stays net
-  const tax = gross.mul(profile.rate).toDecimalPlaces(2);
+  const tax = gross.mul(rate).toDecimalPlaces(2);
   return { lineTotal: gross.toDecimalPlaces(2), taxAmount: tax };
+}
+
+/** Resolve product tax % from meta.taxRatePercent or taxCode (GST5 / 18 / VAT20). */
+export function resolveProductTaxRatePercent(input: {
+  taxCode?: string | null;
+  meta?: unknown;
+}): number | null {
+  const meta =
+    input.meta && typeof input.meta === 'object' && !Array.isArray(input.meta)
+      ? (input.meta as Record<string, unknown>)
+      : {};
+  if (meta.taxPreference === 'non_taxable') return 0;
+  if (
+    typeof meta.taxRatePercent === 'number' &&
+    Number.isFinite(meta.taxRatePercent)
+  ) {
+    return Math.min(40, Math.max(0, meta.taxRatePercent));
+  }
+  if (
+    typeof meta.taxRatePercent === 'string' &&
+    meta.taxRatePercent.trim() !== ''
+  ) {
+    const n = Number(meta.taxRatePercent);
+    if (Number.isFinite(n)) return Math.min(40, Math.max(0, n));
+  }
+  const code = input.taxCode?.trim();
+  if (!code) return null;
+  const m = code.match(/(?:GST|VAT|TAX)?\s*(\d+(?:\.\d+)?)\s*%?/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(40, Math.max(0, n));
 }
 
 /** Invoice breakdown from order subtotal (net) using profile rate. */

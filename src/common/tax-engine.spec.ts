@@ -36,6 +36,15 @@ describe('tax-engine', () => {
     expect(line.taxAmount.toFixed(2)).toBe('0.00');
   });
 
+  it('parses string ratePercent and seeds missing tax block', () => {
+    const profile = buildTaxProfile({
+      taxMode: TaxMode.simple,
+      settings: { tax: { ratePercent: '18' } },
+    });
+    expect(profile.rate).toBe(0.18);
+    expect(profile.inclusive).toBe(false);
+  });
+
   it('computes invoice tax from profile', () => {
     const profile = buildTaxProfile({
       taxMode: TaxMode.in_gst,

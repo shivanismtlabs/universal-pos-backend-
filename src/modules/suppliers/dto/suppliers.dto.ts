@@ -4,6 +4,7 @@ import { Type } from 'class-transformer';
 import {
   ArrayMinSize,
   IsArray,
+  IsBoolean,
   IsDateString,
   IsEnum,
   IsInt,
@@ -153,4 +154,125 @@ export class ReturnPurchaseOrderDto {
   @IsString()
   @MaxLength(500)
   reason?: string;
+}
+
+export class CreateSupplierInvoiceDto {
+  @ApiProperty()
+  @IsUUID()
+  supplierId!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  purchaseOrderId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  goodsReceiptId?: string;
+
+  @ApiPropertyOptional({ example: 'SUP-INV-1001' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  invoiceNumber?: string;
+
+  @ApiPropertyOptional({ example: '2026-08-12' })
+  @IsOptional()
+  @IsDateString()
+  invoiceDate?: string;
+
+  @ApiPropertyOptional({ example: '2026-09-12' })
+  @IsOptional()
+  @IsDateString()
+  dueDate?: string;
+
+  @ApiProperty({ example: 5000 })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  subtotal!: number;
+
+  @ApiPropertyOptional({ example: 900 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  taxTotal?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
+
+  /** When true, bill is a credit note (reduces AP). */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isCredit?: boolean;
+}
+
+export class PaySupplierInvoiceDto {
+  @ApiProperty({ example: 1000 })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  amount!: number;
+
+  @ApiPropertyOptional({
+    example: 'bank_transfer',
+    description: 'cash | card | upi | bank_transfer | wallet | other',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  method?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  reference?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
+}
+
+export class CreateSupplierPaymentDto {
+  @ApiProperty()
+  @IsUUID()
+  supplierId!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  supplierInvoiceId?: string;
+
+  @ApiProperty({ example: 1000 })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  amount!: number;
+
+  @ApiPropertyOptional({ example: 'bank_transfer' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  method?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  reference?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
 }

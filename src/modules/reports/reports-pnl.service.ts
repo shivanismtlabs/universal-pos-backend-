@@ -243,6 +243,7 @@ export class ReportsPnlService {
         this.prisma.expense.findMany({
           where: {
             tenantId,
+            status: 'approved',
             spentAt: { gte: range.start, lte: range.end },
             ...(locationIds.length
               ? { locationId: { in: locationIds } }

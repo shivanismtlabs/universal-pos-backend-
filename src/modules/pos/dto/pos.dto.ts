@@ -1125,6 +1125,116 @@ export class SaleReturnDto {
   @Min(0)
   amount?: number;
 
+  @ApiProperty({ description: 'Catalog reason code', example: 'damaged' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(64)
+  reasonCode!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
+
+  @ApiProperty()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(255)
+  idempotencyKey!: string;
+}
+
+export class CreateRefundReasonDto {
+  @ApiProperty({ example: 'damaged' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(64)
+  code!: string;
+
+  @ApiProperty({ example: 'Damaged / defective' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(120)
+  label!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  sortOrder?: number;
+}
+
+export class ListSaleReturnsQueryDto {
+  @ApiPropertyOptional({ enum: ['pending', 'completed', 'rejected', 'all'] })
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+}
+
+export class RejectSaleReturnDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
+}
+
+export class SaleExchangeReplaceItemDto {
+  @ApiProperty()
+  @IsUUID()
+  stockLevelId!: string;
+
+  @ApiProperty({ example: 1 })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.001)
+  quantity!: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  unitPrice?: number;
+}
+
+/** Return selected lines + sell replacement items; settle net */
+export class SaleExchangeDto {
+  @ApiProperty()
+  @IsUUID()
+  orderId!: string;
+
+  @ApiProperty({ type: [SaleReturnItemDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => SaleReturnItemDto)
+  returnItems!: SaleReturnItemDto[];
+
+  @ApiProperty({ type: [SaleExchangeReplaceItemDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => SaleExchangeReplaceItemDto)
+  replaceItems!: SaleExchangeReplaceItemDto[];
+
+  @ApiProperty({ enum: PaymentMethod, example: PaymentMethod.cash })
+  @IsEnum(PaymentMethod)
+  settleMethod!: PaymentMethod;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  reasonCode?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()

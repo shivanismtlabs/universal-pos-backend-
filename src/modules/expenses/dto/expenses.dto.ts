@@ -1,8 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
   IsDateString,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
@@ -41,10 +42,12 @@ export class CreateExpenseDto {
   @IsUUID()
   locationId?: string;
 
-  @ApiPropertyOptional({ example: 'cash' })
+  @ApiPropertyOptional({
+    example: 'cash',
+    enum: ['cash', 'upi', 'card', 'bank_transfer'],
+  })
   @IsOptional()
-  @IsString()
-  @MaxLength(32)
+  @IsIn(['cash', 'upi', 'card', 'bank_transfer'])
   paymentMethod?: string;
 
   @ApiPropertyOptional()
@@ -57,6 +60,66 @@ export class CreateExpenseDto {
   @IsOptional()
   @IsBoolean()
   isPettyCash?: boolean;
+
+  @ApiPropertyOptional({ description: 'Receipt image as data URL or base64' })
+  @IsOptional()
+  @IsString()
+  receiptBase64?: string;
+}
+
+export class UpdateExpenseDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  amount?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsDateString()
+  spentAt?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  categoryId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsIn(['cash', 'upi', 'card', 'bank_transfer'])
+  paymentMethod?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isPettyCash?: boolean;
+}
+
+export class UploadExpenseReceiptDto {
+  @ApiProperty({ description: 'Image as data URL or raw base64' })
+  @IsString()
+  @MinLength(8)
+  imageBase64!: string;
+}
+
+export class RejectExpenseDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
 }
 
 export class ListExpensesQueryDto {
@@ -79,4 +142,15 @@ export class ListExpensesQueryDto {
   @IsOptional()
   @IsUUID()
   categoryId?: string;
+
+  @ApiPropertyOptional({ enum: ['pending', 'approved', 'rejected', 'voided', 'all'] })
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true' || value === '1')
+  @IsBoolean()
+  pettyCash?: boolean;
 }

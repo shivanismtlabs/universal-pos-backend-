@@ -8,6 +8,7 @@ import { CommerceEngine } from '../commerce/commerce-engine';
 import { PosController } from './pos.controller';
 import { PosService } from './pos.service';
 import { RentalPosService } from './rental-pos.service';
+import { SaleReturnsService } from './sale-returns.service';
 
 /** Checkout, sale + rental terminals — FR-POS */
 @Module({
@@ -16,9 +17,10 @@ import { RentalPosService } from './rental-pos.service';
   providers: [
     PosService,
     RentalPosService,
+    SaleReturnsService,
     CommerceEngine,
     CommerceModeGuard,
   ],
-  exports: [PosService, RentalPosService, CommerceEngine],
+  exports: [PosService, RentalPosService, SaleReturnsService, CommerceEngine],
 })
 export class PosModule {}

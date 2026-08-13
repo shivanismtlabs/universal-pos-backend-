@@ -36,6 +36,10 @@ import {
   ExtendRentalDto,
   SaleCheckoutDto,
   SaleReturnDto,
+  SaleExchangeDto,
+  CreateRefundReasonDto,
+  ListSaleReturnsQueryDto,
+  RejectSaleReturnDto,
   UpdateRentalProductDto,
   UpdateRentalUnitDto,
   RemoveSaleImageDto,
@@ -44,6 +48,7 @@ import {
 } from './dto/pos.dto';
 import { PosService } from './pos.service';
 import { RentalPosService } from './rental-pos.service';
+import { SaleReturnsService } from './sale-returns.service';
 
 @ApiTags('pos')
 @ApiBearerAuth('access-token')
@@ -52,6 +57,7 @@ export class PosController {
   constructor(
     private readonly posService: PosService,
     private readonly rentalPos: RentalPosService,
+    private readonly saleReturns: SaleReturnsService,
   ) {}
 
   @Get('sale/schema')
@@ -397,12 +403,94 @@ export class PosController {
   }
 
   @Post('sale/returns')
-  @Roles(...RoleGroup.finance)
+  @Roles(...RoleGroup.returns, Role.accountant)
   @ApiOperation({
-    summary: 'Qty return on closed sale — restock + refund (admin/manager)',
+    summary:
+      'Request/complete sale return — cashiers may pending; leads auto-complete',
   })
   saleReturn(@CurrentUser() user: AuthUser, @Body() dto: SaleReturnDto) {
-    return this.posService.saleReturn(user, dto);
+    return this.saleReturns.saleReturn(user, dto);
+  }
+
+  @Get('sale/returns')
+  @Roles(...RoleGroup.returns, Role.accountant)
+  @ApiOperation({ summary: 'List sale returns (pending / history)' })
+  listSaleReturns(
+    @CurrentUser() user: AuthUser,
+    @Query() query: ListSaleReturnsQueryDto,
+  ) {
+    return this.saleReturns.listSaleReturns(
+      user,
+      query.status,
+      query.limit ?? 50,
+    );
+  }
+
+  @Get('sale/returns/returned-qty/:orderId')
+  @Roles(...RoleGroup.returns, Role.accountant)
+  @ApiOperation({ summary: 'Cumulative returned qty per stock level for order' })
+  returnedQuantities(
+    @CurrentUser() user: AuthUser,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    return this.saleReturns.returnedQuantities(user, orderId);
+  }
+
+  @Post('sale/returns/:id/approve')
+  @Roles(...RoleGroup.finance)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Approve pending sale return (restock + refund)' })
+  approveSaleReturn(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.saleReturns.approveSaleReturn(user, id);
+  }
+
+  @Post('sale/returns/:id/reject')
+  @Roles(...RoleGroup.finance)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Reject pending sale return' })
+  rejectSaleReturn(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RejectSaleReturnDto,
+  ) {
+    return this.saleReturns.rejectSaleReturn(user, id, dto.reason);
+  }
+
+  @Get('refund-reasons')
+  @Roles(...RoleGroup.returns, Role.accountant)
+  @ApiOperation({ summary: 'List refund reason catalog' })
+  listRefundReasons(@CurrentUser() user: AuthUser) {
+    return this.saleReturns.listRefundReasons(user);
+  }
+
+  @Post('refund-reasons')
+  @Roles(...RoleGroup.finance)
+  @ApiOperation({ summary: 'Create refund reason' })
+  createRefundReason(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateRefundReasonDto,
+  ) {
+    return this.saleReturns.createRefundReason(user, dto);
+  }
+
+  @Post('refund-reasons/seed')
+  @Roles(...RoleGroup.finance)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Seed default refund reasons if empty' })
+  seedRefundReasons(@CurrentUser() user: AuthUser) {
+    return this.saleReturns.seedRefundReasons(user);
+  }
+
+  @Post('sale/exchange')
+  @Roles(...RoleGroup.finance)
+  @ApiOperation({
+    summary: 'Sale exchange — return lines + replacement sale, net settle',
+  })
+  saleExchange(@CurrentUser() user: AuthUser, @Body() dto: SaleExchangeDto) {
+    return this.saleReturns.saleExchange(user, dto);
   }
 
   // ─── Universal Rental floor (any rentable item) ───────────────────────────

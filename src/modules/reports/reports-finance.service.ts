@@ -320,6 +320,7 @@ export class ReportsFinanceService {
       this.prisma.expense.findMany({
         where: {
           tenantId: user.tenantId,
+          status: 'approved',
           spentAt: {
             gte: new Date(`${fromYmd}T00:00:00.000Z`),
             lte: new Date(`${toYmd}T00:00:00.000Z`),
@@ -467,6 +468,7 @@ export class ReportsFinanceService {
     const items = await this.prisma.expense.findMany({
       where: {
         tenantId: user.tenantId,
+        status: 'approved',
         spentAt: {
           gte: new Date(`${fromYmd}T00:00:00.000Z`),
           lte: new Date(`${toYmd}T00:00:00.000Z`),

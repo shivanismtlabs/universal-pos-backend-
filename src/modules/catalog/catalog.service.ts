@@ -1084,24 +1084,97 @@ export class CatalogService {
 
   async deleteProduct(user: AuthUser, id: string) {
     await this.requireProduct(user.tenantId, id);
-    const used = await this.prisma.orderItem.count({
+
+    const [orderUsed, subUsed, bundleUsed, units] = await Promise.all([
+      this.prisma.orderItem.count({
+        where: { tenantId: user.tenantId, productId: id },
+      }),
+      this.prisma.customerSubscription.count({
+        where: { tenantId: user.tenantId, productId: id },
+      }),
+      this.prisma.productBundleLine.count({
+        where: { tenantId: user.tenantId, componentProductId: id },
+      }),
+      this.prisma.stockUnit.count({
+        where: { tenantId: user.tenantId, productId: id },
+      }),
+    ]);
+
+    const levels = await this.prisma.stockLevel.findMany({
       where: { tenantId: user.tenantId, productId: id },
+      select: { id: true },
     });
-    if (used > 0) {
+    const levelIds = levels.map((l) => l.id);
+
+    let stockHistory = 0;
+    if (levelIds.length) {
+      const [ledger, poLines, grnLines, countLines, orderOnLevel] =
+        await Promise.all([
+          this.prisma.stockLedgerEntry.count({
+            where: { tenantId: user.tenantId, productId: id },
+          }),
+          this.prisma.purchaseOrderLine.count({
+            where: { tenantId: user.tenantId, stockLevelId: { in: levelIds } },
+          }),
+          this.prisma.goodsReceiptLine.count({
+            where: { tenantId: user.tenantId, stockLevelId: { in: levelIds } },
+          }),
+          this.prisma.stockCountLine.count({
+            where: { productId: id },
+          }),
+          this.prisma.orderItem.count({
+            where: {
+              tenantId: user.tenantId,
+              stockLevelId: { in: levelIds },
+            },
+          }),
+        ]);
+      stockHistory = ledger + poLines + grnLines + countLines + orderOnLevel;
+    }
+
+    // Prefer archive when the item has sales / purchases / stock history
+    if (
+      orderUsed > 0 ||
+      subUsed > 0 ||
+      bundleUsed > 0 ||
+      units > 0 ||
+      stockHistory > 0
+    ) {
       const row = await this.setStatus(user, id, ProductStatus.archived);
       return { ok: true, deleted: false, softDeleted: true, product: row };
     }
-    await this.prisma.product.delete({ where: { id } });
-    await this.prisma.auditLog.create({
-      data: {
-        tenantId: user.tenantId,
-        actorUserId: user.userId,
-        entityType: 'product',
-        entityId: id,
-        action: 'catalog.product.deleted',
-      },
-    });
-    return { ok: true, deleted: true, softDeleted: false };
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        if (levelIds.length) {
+          await tx.stockLedgerEntry.deleteMany({
+            where: { tenantId: user.tenantId, productId: id },
+          });
+          await tx.stockCountLine.deleteMany({
+            where: { productId: id },
+          });
+          await tx.stockLevel.deleteMany({
+            where: { tenantId: user.tenantId, productId: id },
+          });
+        }
+        // Variants / batches cascade via schema
+        await tx.product.delete({ where: { id } });
+        await tx.auditLog.create({
+          data: {
+            tenantId: user.tenantId,
+            actorUserId: user.userId,
+            entityType: 'product',
+            entityId: id,
+            action: 'catalog.product.deleted',
+          },
+        });
+      });
+      return { ok: true, deleted: true, softDeleted: false };
+    } catch {
+      // Last resort: archive instead of 500 on unexpected FK
+      const row = await this.setStatus(user, id, ProductStatus.archived);
+      return { ok: true, deleted: false, softDeleted: true, product: row };
+    }
   }
 
   qrForProduct(user: AuthUser, id: string) {

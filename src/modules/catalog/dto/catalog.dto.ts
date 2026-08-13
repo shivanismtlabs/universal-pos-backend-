@@ -298,11 +298,11 @@ export class CreateCatalogProductDto {
   @IsUUID()
   locationId?: string;
 
-  @ApiPropertyOptional({ description: 'Opening stock at default location (qty-tracked only)' })
+  @ApiPropertyOptional({ description: 'Opening stock at default location (qty-tracked only; min 1)' })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
-  @Min(0)
+  @Min(1)
   openingQty?: number;
 
   @ApiPropertyOptional()

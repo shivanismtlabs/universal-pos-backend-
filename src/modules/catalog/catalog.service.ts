@@ -749,7 +749,13 @@ export class CatalogService {
           },
         });
 
-        if (trackQty && (dto.openingQty == null || dto.openingQty >= 0)) {
+        if (trackQty) {
+          const opening = dto.openingQty;
+          if (opening == null || !(opening >= 1)) {
+            throw new BadRequestException(
+              'Opening quantity must be at least 1 (not 0 or a fraction below 1)',
+            );
+          }
           const locationId =
             dto.locationId ??
             (
@@ -759,19 +765,49 @@ export class CatalogService {
                 select: { id: true },
               })
             )?.id;
-          if (locationId) {
-            await tx.stockLevel.create({
-              data: {
-                tenantId: user.tenantId,
-                locationId,
-                productId: created.id,
-                sku: sku!,
-                sellUnit: unit.slice(0, 8),
-                qtyOnHand: dto.openingQty ?? 0,
-                sellPrice: price,
-              },
-            });
+          if (!locationId) {
+            throw new BadRequestException(
+              'No store location configured — add a location before creating stocked items',
+            );
           }
+          await tx.stockLevel.create({
+            data: {
+              tenantId: user.tenantId,
+              locationId,
+              productId: created.id,
+              sku: sku!,
+              sellUnit: unit.slice(0, 8),
+              qtyOnHand: opening,
+              sellPrice: price,
+            },
+          });
+        } else if (canSell && availableInPos) {
+          // Services / non-tracked items still need a stock row so Counter can find them
+          const locationId =
+            dto.locationId ??
+            (
+              await tx.location.findFirst({
+                where: { tenantId: user.tenantId, isActive: true },
+                orderBy: { createdAt: 'asc' },
+                select: { id: true },
+              })
+            )?.id;
+          if (!locationId) {
+            throw new BadRequestException(
+              'No store location configured — add a location before creating POS items',
+            );
+          }
+          await tx.stockLevel.create({
+            data: {
+              tenantId: user.tenantId,
+              locationId,
+              productId: created.id,
+              sku: sku!,
+              sellUnit: unit.slice(0, 8),
+              qtyOnHand: 0,
+              sellPrice: price,
+            },
+          });
         }
 
         await tx.auditLog.create({
@@ -1042,7 +1078,7 @@ export class CatalogService {
       canSell: src.canSell,
       canPurchase: src.canPurchase,
       availableInPos: false,
-      openingQty: 0,
+      openingQty: 1,
     });
   }
 

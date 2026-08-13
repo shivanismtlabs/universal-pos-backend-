@@ -311,7 +311,8 @@ export class AddSaleProductDto {
 
   @ApiProperty({
     example: 50,
-    description: 'Stock on hand — whole for pcs/pack/g/ml; decimals for kg/L',
+    description:
+      'Opening stock — must be ≥ 1 when Track Inventory is on (services may send 0)',
   })
   @Type(() => Number)
   @IsNumber()
@@ -1097,6 +1098,30 @@ export class SaleReturnItemDto {
   @IsNumber()
   @Min(1)
   quantity!: number;
+
+  @ApiPropertyOptional({
+    enum: [
+      'good',
+      'damaged',
+      'defective',
+      'opened',
+      'used',
+      'quarantine',
+      'scrap',
+    ],
+    default: 'good',
+  })
+  @IsOptional()
+  @IsIn([
+    'good',
+    'damaged',
+    'defective',
+    'opened',
+    'used',
+    'quarantine',
+    'scrap',
+  ])
+  condition?: string;
 }
 
 /** Qty return against a closed sale — restock + refund */
@@ -1112,9 +1137,17 @@ export class SaleReturnDto {
   @Type(() => SaleReturnItemDto)
   items!: SaleReturnItemDto[];
 
-  @ApiProperty({ enum: PaymentMethod, example: PaymentMethod.cash })
-  @IsEnum(PaymentMethod)
-  refundMethod!: PaymentMethod;
+  @ApiProperty({
+    description:
+      'Refund tender, or "original" to use the linked / primary payment method',
+    example: PaymentMethod.cash,
+  })
+  @IsString()
+  @IsIn([
+    ...Object.values(PaymentMethod),
+    'original',
+  ])
+  refundMethod!: PaymentMethod | 'original';
 
   @ApiPropertyOptional({
     description: 'Refund amount (defaults to returned line totals)',
@@ -1136,6 +1169,13 @@ export class SaleReturnDto {
   @IsString()
   @MaxLength(500)
   reason?: string;
+
+  @ApiPropertyOptional({
+    description: 'Original payment to link this refund to',
+  })
+  @IsOptional()
+  @IsUUID()
+  parentPaymentId?: string;
 
   @ApiProperty()
   @IsString()
@@ -1162,10 +1202,25 @@ export class CreateRefundReasonDto {
   @Type(() => Number)
   @IsNumber()
   sortOrder?: number;
+
+  @ApiPropertyOptional({ enum: ['customer', 'supplier', 'both'] })
+  @IsOptional()
+  @IsIn(['customer', 'supplier', 'both'])
+  appliesTo?: string;
 }
 
 export class ListSaleReturnsQueryDto {
-  @ApiPropertyOptional({ enum: ['pending', 'completed', 'rejected', 'all'] })
+  @ApiPropertyOptional({
+    enum: [
+      'requested',
+      'pending',
+      'approved',
+      'processing',
+      'completed',
+      'rejected',
+      'all',
+    ],
+  })
   @IsOptional()
   @IsString()
   status?: string;

@@ -154,55 +154,72 @@ export class BillingService {
     });
 
     return this.prisma.$transaction(async (tx) => {
-      const subtotal = Number(order.subtotal);
-      // Prefer already-computed order tax when present; else apply profile rate
-      const existingTax = Number(order.taxTotal ?? 0);
-      const { totalTax } =
-        existingTax > 0
-          ? { totalTax: existingTax }
-          : computeInvoiceTax(profile, subtotal);
-
-      const cgst = dto.useIgst ? 0 : totalTax / 2;
-      const sgst = dto.useIgst ? 0 : totalTax / 2;
-      const igst = dto.useIgst ? totalTax : 0;
-
-      const feesAgg = await tx.orderFee.aggregate({
-        where: { tenantId: user.tenantId, orderId },
-        _sum: { amount: true },
-      });
-      const feesTotal = Number(feesAgg._sum.amount ?? 0);
-      const grandTotal = subtotal + totalTax + feesTotal;
-      const invoiceNumber = await this.generateInvoiceNumber(tx, user.tenantId);
-
-      const invoice = await tx.invoice.create({
-        data: {
-          tenantId: user.tenantId,
-          orderId,
-          invoiceNumber,
-          taxIdSnapshot: dto.gstin ?? profile.taxId ?? null,
-          taxBreakdown: {
-            cgst,
-            sgst,
-            igst,
-            rate: profile.rate,
-            taxMode: profile.taxMode,
-            placeOfSupply: dto.placeOfSupply ?? null,
-          },
-          cgst: cgst.toFixed(2),
-          sgst: sgst.toFixed(2),
-          igst: igst.toFixed(2),
-          grandTotal: grandTotal.toFixed(2),
-        },
-      });
-
-      await tx.order.update({
-        where: { id: orderId },
-        data: { taxTotal: totalTax.toFixed(2) },
-      });
-
-      await this.paymentsService.recalculateBalance(tx, user.tenantId, orderId);
-      return invoice;
+      return this.createInvoiceInTx(tx, user, order, profile, dto);
     });
+  }
+
+  /**
+   * Create a sale invoice inside an existing transaction (exchange / checkout).
+   * Prefer order.taxTotal when already computed by the tax engine.
+   */
+  async createInvoiceInTx(
+    tx: PrismaTx,
+    user: AuthUser,
+    order: {
+      id: string;
+      subtotal: Prisma.Decimal | string | number;
+      taxTotal?: Prisma.Decimal | string | number | null;
+    },
+    profile: ReturnType<typeof buildTaxProfile>,
+    dto: CreateInvoiceDto = {},
+  ) {
+    const subtotal = Number(order.subtotal);
+    const existingTax = Number(order.taxTotal ?? 0);
+    const { totalTax } =
+      existingTax > 0
+        ? { totalTax: existingTax }
+        : computeInvoiceTax(profile, subtotal);
+
+    const cgst = dto.useIgst ? 0 : totalTax / 2;
+    const sgst = dto.useIgst ? 0 : totalTax / 2;
+    const igst = dto.useIgst ? totalTax : 0;
+
+    const feesAgg = await tx.orderFee.aggregate({
+      where: { tenantId: user.tenantId, orderId: order.id },
+      _sum: { amount: true },
+    });
+    const feesTotal = Number(feesAgg._sum.amount ?? 0);
+    const grandTotal = subtotal + totalTax + feesTotal;
+    const invoiceNumber = await this.generateInvoiceNumber(tx, user.tenantId);
+
+    const invoice = await tx.invoice.create({
+      data: {
+        tenantId: user.tenantId,
+        orderId: order.id,
+        invoiceNumber,
+        taxIdSnapshot: dto.gstin ?? profile.taxId ?? null,
+        taxBreakdown: {
+          cgst,
+          sgst,
+          igst,
+          rate: profile.rate,
+          taxMode: profile.taxMode,
+          placeOfSupply: dto.placeOfSupply ?? null,
+        },
+        cgst: cgst.toFixed(2),
+        sgst: sgst.toFixed(2),
+        igst: igst.toFixed(2),
+        grandTotal: grandTotal.toFixed(2),
+      },
+    });
+
+    await tx.order.update({
+      where: { id: order.id },
+      data: { taxTotal: totalTax.toFixed(2) },
+    });
+
+    await this.paymentsService.recalculateBalance(tx, user.tenantId, order.id);
+    return invoice;
   }
 
   async listInvoices(user: AuthUser, orderId: string) {

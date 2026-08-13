@@ -231,6 +231,15 @@ export class PosService {
     if (qtyErr) throw new BadRequestException(qtyErr);
     const qty = normalizeQty(rawQty, sellUnit);
 
+    const isServiceEarly = dto.itemType === 'service';
+    const willTrack =
+      isServiceEarly ? false : dto.trackInventory !== false;
+    if (willTrack && qty < 1) {
+      throw new BadRequestException(
+        'Opening quantity must be at least 1 (not 0 or a fraction below 1)',
+      );
+    }
+
     const cat = await this.prisma.category.findFirst({
       where: { id: dto.categoryId, tenantId: user.tenantId },
       select: { id: true, name: true },
@@ -1202,16 +1211,21 @@ export class PosService {
       locationId,
       ...(opts.forPurchase
         ? {}
-        : {
-            qtyOnHand: opts.lowStock
-              ? { gt: 0, lte: threshold }
-              : { gt: 0 },
-          }),
+        : opts.lowStock
+          ? { qtyOnHand: { gt: 0, lte: threshold } }
+          : {
+              // In-stock tracked items, OR non-tracked (services) even at 0 qty
+              OR: [
+                { qtyOnHand: { gt: 0 } },
+                { product: { trackQty: false } },
+              ],
+            }),
       AND: [
         {
           product: {
             fulfillmentMode: FulfillmentMode.sale,
             isActive: true,
+            availableInPos: true,
           },
         },
         ...(q
@@ -1268,6 +1282,7 @@ export class PosService {
               taxCode: true,
               costPrice: true,
               meta: true,
+              trackQty: true,
               category: { select: { id: true, name: true } },
             },
           },
@@ -1303,6 +1318,7 @@ export class PosService {
           costPrice,
           qtyOnHand: qty,
           sellUnit: row.sellUnit,
+          trackQty: row.product.trackQty !== false,
           lowStock: qty > 0 && qty <= threshold,
           name: row.product.name,
           productSku: row.product.skuCode,
@@ -1382,6 +1398,7 @@ export class PosService {
             photoUrl: true,
             taxCode: true,
             meta: true,
+            trackQty: true,
             category: { select: { id: true, name: true } },
           },
         },
@@ -1389,10 +1406,86 @@ export class PosService {
     });
 
     if (!row) {
+      // Catalog item may exist without a stock row (older creates) — seed one for POS
+      const orphan = await this.prisma.product.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          fulfillmentMode: FulfillmentMode.sale,
+          isActive: true,
+          OR: [
+            { skuCode: { equals: raw, mode: 'insensitive' } },
+            { skuCode: { equals: sku, mode: 'insensitive' } },
+            { barcode: { equals: raw, mode: 'insensitive' } },
+            { barcode: { equals: sku, mode: 'insensitive' } },
+            { internalCode: { equals: raw, mode: 'insensitive' } },
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          skuCode: true,
+          barcode: true,
+          photoUrl: true,
+          taxCode: true,
+          meta: true,
+          trackQty: true,
+          basePrice: true,
+          unitOfMeasure: true,
+          category: { select: { id: true, name: true } },
+        },
+      });
+      if (orphan) {
+        const existingLevel = await this.prisma.stockLevel.findFirst({
+          where: {
+            tenantId: user.tenantId,
+            locationId,
+            productId: orphan.id,
+          },
+        });
+        if (!existingLevel) {
+          await this.prisma.stockLevel.create({
+            data: {
+              tenantId: user.tenantId,
+              locationId,
+              productId: orphan.id,
+              sku: orphan.skuCode,
+              sellUnit: (orphan.unitOfMeasure || 'pcs').slice(0, 8),
+              qtyOnHand: orphan.trackQty ? 0 : 0,
+              sellPrice: orphan.basePrice ?? 0,
+            },
+          });
+        }
+        row = await this.prisma.stockLevel.findFirst({
+          where: {
+            tenantId: user.tenantId,
+            locationId,
+            productId: orphan.id,
+          },
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+                skuCode: true,
+                barcode: true,
+                photoUrl: true,
+                taxCode: true,
+                meta: true,
+                trackQty: true,
+                category: { select: { id: true, name: true } },
+              },
+            },
+          },
+        });
+      }
+    }
+
+    if (!row) {
       throw new NotFoundException(`SKU / barcode not found: ${raw}`);
     }
     const onHand = Number(row.qtyOnHand);
-    if (onHand <= 0) {
+    const tracks = row.product.trackQty !== false;
+    if (tracks && onHand <= 0) {
       throw new BadRequestException(
         `Out of stock: ${row.product.barcode || row.sku}`,
       );
@@ -1404,20 +1497,19 @@ export class PosService {
       taxCode: row.product.taxCode,
       meta: row.product.meta,
     });
-
     return {
       id: row.id,
       sku: row.sku,
+      name: row.product.name,
       sellPrice: row.sellPrice,
       qtyOnHand: onHand,
       sellUnit: row.sellUnit,
-      name: row.product.name,
+      trackQty: tracks,
       productSku: row.product.skuCode,
       barcode: row.product.barcode,
       image: cover,
       photoUrl: cover,
       images,
-      taxCode: row.product.taxCode,
       taxRatePercent,
       category: row.product.category,
     };
@@ -1515,7 +1607,8 @@ export class PosService {
           throw new BadRequestException(`${level.sku}: ${qtyErr}`);
         }
         const onHand = Number(level.qtyOnHand);
-        if (onHand < qty) {
+        const tracks = level.product.trackQty !== false;
+        if (tracks && onHand < qty) {
           throw new BadRequestException(
             `Insufficient stock for ${level.sku} (have ${onHand} ${unit}, need ${qty})`,
           );
@@ -1724,19 +1817,22 @@ export class PosService {
         const qty = Number(item.quantity);
         const level = await tx.stockLevel.findFirst({
           where: { id: item.stockLevelId, tenantId: user.tenantId },
+          include: { product: { select: { trackQty: true } } },
         });
         if (!level) {
           throw new NotFoundException(`Stock level missing for line ${item.id}`);
         }
-        if (Number(level.qtyOnHand) < qty) {
-          throw new BadRequestException(
-            `Insufficient stock for ${level.sku} after payment (have ${level.qtyOnHand})`,
-          );
+        if (level.product.trackQty !== false) {
+          if (Number(level.qtyOnHand) < qty) {
+            throw new BadRequestException(
+              `Insufficient stock for ${level.sku} after payment (have ${level.qtyOnHand})`,
+            );
+          }
+          await tx.stockLevel.update({
+            where: { id: level.id },
+            data: { qtyOnHand: { decrement: qty } },
+          });
         }
-        await tx.stockLevel.update({
-          where: { id: level.id },
-          data: { qtyOnHand: { decrement: qty } },
-        });
       }
 
       await this.ordersService.recalculateTotals(tx, user.tenantId, orderId);
@@ -1915,7 +2011,8 @@ export class PosService {
           throw new BadRequestException(`${level.sku}: ${qtyErr}`);
         }
         const onHand = Number(level.qtyOnHand);
-        if (onHand < qty) {
+        const tracks = level.product.trackQty !== false;
+        if (tracks && onHand < qty) {
           throw new BadRequestException(
             `Insufficient stock for ${level.sku} (have ${onHand} ${unit}, need ${qty})`,
           );
@@ -1937,10 +2034,12 @@ export class PosService {
             : {}),
         });
 
-        await tx.stockLevel.update({
-          where: { id: level.id },
-          data: { qtyOnHand: { decrement: qty } },
-        });
+        if (tracks) {
+          await tx.stockLevel.update({
+            where: { id: level.id },
+            data: { qtyOnHand: { decrement: qty } },
+          });
+        }
 
         await tx.orderItem.create({
           data: {

@@ -7,6 +7,7 @@ import {
   IsBoolean,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -160,6 +161,26 @@ export class ReturnPurchaseOrderDto {
   @IsString()
   @MaxLength(500)
   reason?: string;
+
+  @ApiPropertyOptional({ description: 'Catalog reason code' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  reasonCode?: string;
+
+  @ApiPropertyOptional({
+    description: 'Create supplier credit note for returned value (default true)',
+  })
+  @IsOptional()
+  @IsBoolean()
+  createCreditNote?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(255)
+  idempotencyKey?: string;
 }
 
 export class CreateSupplierInvoiceDto {
@@ -235,6 +256,15 @@ export class PaySupplierInvoiceDto {
   @MaxLength(32)
   method?: string;
 
+  @ApiPropertyOptional({
+    enum: ['payment', 'refund'],
+    description:
+      'Use refund when receiving money IN from supplier (e.g. settle credit note)',
+  })
+  @IsOptional()
+  @IsIn(['payment', 'refund'])
+  kind?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -269,6 +299,14 @@ export class CreateSupplierPaymentDto {
   @IsString()
   @MaxLength(32)
   method?: string;
+
+  @ApiPropertyOptional({
+    enum: ['payment', 'refund'],
+    description: 'payment = money OUT; refund = money IN from supplier',
+  })
+  @IsOptional()
+  @IsIn(['payment', 'refund'])
+  kind?: string;
 
   @ApiPropertyOptional()
   @IsOptional()

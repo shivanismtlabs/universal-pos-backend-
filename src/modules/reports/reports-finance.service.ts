@@ -335,7 +335,7 @@ export class ReportsFinanceService {
           tenantId: user.tenantId,
           paidAt: { gte: from, lte: to },
         },
-        select: { amount: true, paidAt: true, method: true },
+        select: { amount: true, paidAt: true, method: true, kind: true },
         take: 10000,
       }),
       this.prisma.payment.findMany({
@@ -355,12 +355,15 @@ export class ReportsFinanceService {
       }),
     ]);
 
-    const cashIn = payments.reduce((s, p) => s + Number(p.amount), 0);
+    const cashInCustomer = payments.reduce((s, p) => s + Number(p.amount), 0);
+    const cashInSupplierRefunds = supplierPays
+      .filter((p) => p.kind === 'refund')
+      .reduce((s, p) => s + Number(p.amount), 0);
+    const cashIn = cashInCustomer + cashInSupplierRefunds;
     const cashOutExpenses = expenses.reduce((s, e) => s + Number(e.amount), 0);
-    const cashOutSuppliers = supplierPays.reduce(
-      (s, p) => s + Number(p.amount),
-      0,
-    );
+    const cashOutSuppliers = supplierPays
+      .filter((p) => p.kind !== 'refund')
+      .reduce((s, p) => s + Number(p.amount), 0);
     const cashOutRefunds = refunds.reduce(
       (s, p) => s + Math.abs(Number(p.amount)),
       0,
@@ -391,7 +394,11 @@ export class ReportsFinanceService {
       bump(e.spentAt.toISOString().slice(0, 10), 'outflow', Number(e.amount));
     }
     for (const p of supplierPays) {
-      bump(ymdInZone(p.paidAt, ctx.timeZone), 'outflow', Number(p.amount));
+      bump(
+        ymdInZone(p.paidAt, ctx.timeZone),
+        p.kind === 'refund' ? 'inflow' : 'outflow',
+        Number(p.amount),
+      );
     }
     for (const p of refunds) {
       bump(
@@ -425,7 +432,8 @@ export class ReportsFinanceService {
         cashIn: round2(cashIn),
         cashOut: round2(cashOut),
         netCash: round2(netCash),
-        customerReceipts: round2(cashIn),
+        customerReceipts: round2(cashInCustomer),
+        supplierRefunds: round2(cashInSupplierRefunds),
         expenses: round2(cashOutExpenses),
         supplierPayments: round2(cashOutSuppliers),
         refunds: round2(cashOutRefunds),
@@ -436,7 +444,16 @@ export class ReportsFinanceService {
         ),
       },
       operating: [
-        { key: 'receipts', label: 'Customer receipts', amount: round2(cashIn) },
+        {
+          key: 'receipts',
+          label: 'Customer receipts',
+          amount: round2(cashInCustomer),
+        },
+        {
+          key: 'supplier_refunds',
+          label: 'Supplier refunds (money in)',
+          amount: round2(cashInSupplierRefunds),
+        },
         {
           key: 'expenses',
           label: 'Operating expenses',

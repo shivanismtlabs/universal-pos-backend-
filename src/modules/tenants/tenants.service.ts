@@ -117,7 +117,23 @@ export class TenantsService {
         : {};
 
     if (dto.settings !== undefined) {
-      Object.assign(prevSettings, dto.settings);
+      for (const [key, value] of Object.entries(dto.settings)) {
+        if (
+          value &&
+          typeof value === 'object' &&
+          !Array.isArray(value) &&
+          prevSettings[key] &&
+          typeof prevSettings[key] === 'object' &&
+          !Array.isArray(prevSettings[key])
+        ) {
+          prevSettings[key] = {
+            ...(prevSettings[key] as Record<string, unknown>),
+            ...(value as Record<string, unknown>),
+          };
+        } else {
+          prevSettings[key] = value;
+        }
+      }
     }
     if (dto.tax !== undefined) {
       const prevTax =
@@ -133,7 +149,9 @@ export class TenantsService {
     }
     if (
       dto.maxCashierDiscountPercent !== undefined ||
-      dto.pinSwitchEnabled !== undefined
+      dto.pinSwitchEnabled !== undefined ||
+      dto.upiVpa !== undefined ||
+      dto.upiPayeeName !== undefined
     ) {
       const prevPos =
         prevSettings.pos && typeof prevSettings.pos === 'object'
@@ -145,13 +163,23 @@ export class TenantsService {
       if (dto.pinSwitchEnabled !== undefined) {
         prevPos.pinSwitchEnabled = dto.pinSwitchEnabled;
       }
+      if (dto.upiVpa !== undefined) {
+        const vpa = dto.upiVpa.trim();
+        prevPos.upiVpa = vpa || null;
+      }
+      if (dto.upiPayeeName !== undefined) {
+        const name = dto.upiPayeeName.trim();
+        prevPos.upiPayeeName = name || null;
+      }
       prevSettings.pos = prevPos;
     }
     if (
       dto.settings !== undefined ||
       dto.tax !== undefined ||
       dto.maxCashierDiscountPercent !== undefined ||
-      dto.pinSwitchEnabled !== undefined
+      dto.pinSwitchEnabled !== undefined ||
+      dto.upiVpa !== undefined ||
+      dto.upiPayeeName !== undefined
     ) {
       data.settings = prevSettings as Prisma.InputJsonValue;
     }

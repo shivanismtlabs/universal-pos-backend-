@@ -462,8 +462,11 @@ export class PosController {
   @Get('refund-reasons')
   @Roles(...RoleGroup.returns, Role.accountant)
   @ApiOperation({ summary: 'List refund reason catalog' })
-  listRefundReasons(@CurrentUser() user: AuthUser) {
-    return this.saleReturns.listRefundReasons(user);
+  listRefundReasons(
+    @CurrentUser() user: AuthUser,
+    @Query('appliesTo') appliesTo?: string,
+  ) {
+    return this.saleReturns.listRefundReasons(user, appliesTo);
   }
 
   @Post('refund-reasons')

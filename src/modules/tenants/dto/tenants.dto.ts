@@ -98,6 +98,24 @@ export class UpdateTenantDto {
   @IsBoolean()
   pinSwitchEnabled?: boolean;
 
+  @ApiPropertyOptional({
+    example: 'shop@okaxis',
+    description: 'Shop UPI VPA used for counter QR payments (pa=)',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  upiVpa?: string;
+
+  @ApiPropertyOptional({
+    example: 'My Shop',
+    description: 'Payee name shown on UPI apps (pn=)',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  upiPayeeName?: string;
+
   @ApiPropertyOptional({ example: 'INR' })
   @IsOptional()
   @IsString()

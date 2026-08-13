@@ -133,6 +133,16 @@ export class SuppliersService {
           },
         },
       },
+    }).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        /po_number|purchase_order_lines|column .* does not exist/i.test(msg)
+      ) {
+        throw new BadRequestException(
+          'Purchase order schema is outdated on this server. Apply migration 20260813193000_purchase_order_number_lines (po_number, notes, purchase_order_lines), then retry.',
+        );
+      }
+      throw err;
     });
   }
 
@@ -387,6 +397,7 @@ export class SuppliersService {
 
   /**
    * Purchase return (RTV) — reverse stock from a received PO line.
+   * Optionally creates a supplier credit note for the returned value.
    */
   async returnPo(
     user: AuthUser,
@@ -394,15 +405,73 @@ export class SuppliersService {
     dto: {
       lines: Array<{ stockLevelId: string; qty: number }>;
       reason?: string;
+      reasonCode?: string;
+      createCreditNote?: boolean;
+      idempotencyKey?: string;
     },
   ) {
     const po = await this.prisma.purchaseOrder.findFirst({
       where: { id, tenantId: user.tenantId },
-      include: { lines: true },
+      include: { lines: true, supplier: true },
     });
     if (!po) throw new NotFoundException('Purchase order not found');
     if (po.status === 'cancelled' || po.status === 'draft') {
       throw new BadRequestException('PO has nothing to return yet');
+    }
+
+    if (dto.idempotencyKey) {
+      const priors = await this.prisma.auditLog.findMany({
+        where: {
+          tenantId: user.tenantId,
+          action: 'purchase.return',
+          entityId: po.id,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      });
+      const prior = priors.find((a) => {
+        const ba = a.beforeAfter as { idempotencyKey?: string } | null;
+        return ba?.idempotencyKey === dto.idempotencyKey;
+      });
+      if (prior) {
+        const ba = prior.beforeAfter as {
+          lines?: unknown;
+          creditNoteId?: string | null;
+        };
+        return {
+          purchaseOrder: await this.getPo(user, po.id),
+          returned: ba.lines ?? [],
+          creditNote: ba.creditNoteId
+            ? await this.prisma.supplierInvoice
+                .findFirst({
+                  where: { id: ba.creditNoteId, tenantId: user.tenantId },
+                  include: {
+                    supplier: { select: { id: true, name: true } },
+                    purchaseOrder: { select: { id: true, poNumber: true } },
+                    goodsReceipt: { select: { id: true, grnNumber: true } },
+                  },
+                })
+                .then((r) => (r ? this.mapInvoice(r) : null))
+            : null,
+          replayed: true,
+        };
+      }
+    }
+
+    if (dto.reasonCode) {
+      const reason = await this.prisma.refundReason.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          code: dto.reasonCode,
+          isActive: true,
+          OR: [{ appliesTo: 'supplier' }, { appliesTo: 'both' }],
+        },
+      });
+      if (!reason) {
+        throw new BadRequestException(
+          `Unknown purchase return reason: ${dto.reasonCode}`,
+        );
+      }
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -411,7 +480,10 @@ export class SuppliersService {
         sku: string;
         qtyReturned: number;
         qtyOnHand: number;
+        unitCost: number;
+        lineValue: number;
       }> = [];
+      let creditValue = 0;
 
       for (const line of dto.lines) {
         if (line.qty < 1) {
@@ -442,6 +514,10 @@ export class SuppliersService {
           );
         }
 
+        const unitCost = Number(poLine.unitCost ?? 0);
+        const lineValue = Number((unitCost * line.qty).toFixed(2));
+        creditValue += lineValue;
+
         await tx.purchaseOrderLine.update({
           where: { id: poLine.id },
           data: { qtyReceived: { decrement: line.qty } },
@@ -459,10 +535,18 @@ export class SuppliersService {
             type: 'purchase_return',
             qtyDelta: -line.qty,
             qtyAfter: Number(updated.qtyOnHand),
-            reason: dto.reason?.trim() || `RTV PO ${po.id}`,
+            reason:
+              dto.reason?.trim() ||
+              dto.reasonCode ||
+              `RTV PO ${po.poNumber}`,
             referenceType: 'purchase_order',
             referenceId: po.id,
             actorUserId: user.userId,
+            meta: {
+              reasonCode: dto.reasonCode ?? null,
+              unitCost,
+              lineValue,
+            },
           },
         });
         results.push({
@@ -470,7 +554,43 @@ export class SuppliersService {
           sku: level.sku,
           qtyReturned: line.qty,
           qtyOnHand: Number(updated.qtyOnHand),
+          unitCost,
+          lineValue,
         });
+      }
+
+      let creditNote: Awaited<ReturnType<typeof this.mapInvoice>> | null =
+        null;
+      const shouldCredit = dto.createCreditNote !== false && creditValue > 0;
+      if (shouldCredit) {
+        const invoiceNumber = await this.nextDocNumber(
+          user.tenantId,
+          'SCN',
+          tx,
+        );
+        const inv = await tx.supplierInvoice.create({
+          data: {
+            tenantId: user.tenantId,
+            supplierId: po.supplierId,
+            purchaseOrderId: po.id,
+            invoiceNumber,
+            invoiceDate: new Date(),
+            subtotal: creditValue.toFixed(2),
+            taxTotal: '0',
+            grandTotal: creditValue.toFixed(2),
+            amountPaid: '0',
+            status: 'credit',
+            notes: `Auto credit from RTV ${po.poNumber}${
+              dto.reasonCode ? ` · ${dto.reasonCode}` : ''
+            }${dto.reason ? ` · ${dto.reason}` : ''}`,
+          },
+          include: {
+            supplier: { select: { id: true, name: true } },
+            purchaseOrder: { select: { id: true, poNumber: true } },
+            goodsReceipt: { select: { id: true, grnNumber: true } },
+          },
+        });
+        creditNote = this.mapInvoice(inv);
       }
 
       await tx.auditLog.create({
@@ -482,7 +602,11 @@ export class SuppliersService {
           action: 'purchase.return',
           beforeAfter: {
             reason: dto.reason ?? null,
+            reasonCode: dto.reasonCode ?? null,
+            idempotencyKey: dto.idempotencyKey ?? null,
             lines: results,
+            creditNoteId: creditNote?.id ?? null,
+            creditValue,
           },
         },
       });
@@ -513,7 +637,7 @@ export class SuppliersService {
         },
       });
 
-      return { purchaseOrder: updatedPo, returned: results };
+      return { purchaseOrder: updatedPo, returned: results, creditNote };
     });
   }
 
@@ -745,6 +869,10 @@ export class SuppliersService {
           supplierInvoiceId: inv.id,
           amount: amount.toFixed(2),
           method: (dto.method?.trim() || 'bank_transfer').slice(0, 32),
+          kind:
+            dto.kind === 'refund' || isCredit
+              ? 'refund'
+              : 'payment',
           reference: dto.reference?.trim() || null,
           notes: dto.notes?.trim() || null,
           actorUserId: user.userId,
@@ -784,6 +912,7 @@ export class SuppliersService {
       return this.payInvoice(user, dto.supplierInvoiceId, {
         amount: dto.amount,
         method: dto.method,
+        kind: dto.kind,
         reference: dto.reference,
         notes: dto.notes,
       });
@@ -794,6 +923,7 @@ export class SuppliersService {
         supplierId: dto.supplierId,
         amount: Number(dto.amount).toFixed(2),
         method: (dto.method?.trim() || 'bank_transfer').slice(0, 32),
+        kind: dto.kind === 'refund' ? 'refund' : 'payment',
         reference: dto.reference?.trim() || null,
         notes: dto.notes?.trim() || null,
         actorUserId: user.userId,
@@ -835,7 +965,7 @@ export class SuppliersService {
 
     type Entry = {
       at: string;
-      kind: 'invoice' | 'credit' | 'payment';
+      kind: 'invoice' | 'credit' | 'payment' | 'supplier_refund';
       ref: string;
       debit: number;
       credit: number;
@@ -856,12 +986,14 @@ export class SuppliersService {
       });
     }
     for (const pay of payments) {
+      const isRefund = pay.kind === 'refund';
       entries.push({
         at: pay.paidAt.toISOString(),
-        kind: 'payment',
+        kind: isRefund ? 'supplier_refund' : 'payment',
         ref: pay.reference || pay.id.slice(0, 8),
-        debit: 0,
-        credit: Number(pay.amount),
+        // payment OUT reduces AP (credit); refund IN clears supplier credit (debit)
+        debit: isRefund ? Number(pay.amount) : 0,
+        credit: isRefund ? 0 : Number(pay.amount),
         note: pay.notes,
       });
     }
@@ -989,6 +1121,7 @@ export class SuppliersService {
     supplierInvoiceId?: string | null;
     amount: unknown;
     method: string;
+    kind?: string;
     reference: string | null;
     notes: string | null;
     paidAt: Date;
@@ -1005,6 +1138,7 @@ export class SuppliersService {
       supplierInvoiceId: r.supplierInvoiceId ?? null,
       amount: Number(r.amount),
       method: r.method,
+      kind: r.kind ?? 'payment',
       reference: r.reference,
       notes: r.notes,
       paidAt: r.paidAt,

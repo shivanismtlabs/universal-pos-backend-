@@ -18,8 +18,16 @@ import type { AuthUser } from '../auth/types';
 import {
   CreateExpenseCategoryDto,
   CreateExpenseDto,
+  ExpenseSummaryQueryDto,
+  ListExpenseCategoriesQueryDto,
   ListExpensesQueryDto,
+  PettyCashAdjustDto,
+  PettyCashLedgerQueryDto,
+  PettyCashOpeningDto,
+  PettyCashQueryDto,
+  PettyCashReplenishDto,
   RejectExpenseDto,
+  UpdateExpenseCategoryDto,
   UpdateExpenseDto,
   UploadExpenseReceiptDto,
 } from './dto/expenses.dto';
@@ -31,11 +39,16 @@ import { ExpensesService } from './expenses.service';
 export class ExpensesController {
   constructor(private readonly expenses: ExpensesService) {}
 
+  // ─── Categories (static) ──────────────────────────────────────────────────
+
   @Get('categories')
   @Roles(...RoleGroup.finance, Role.cashier)
   @ApiOperation({ summary: 'List expense categories' })
-  listCategories(@CurrentUser() user: AuthUser) {
-    return this.expenses.listCategories(user);
+  listCategories(
+    @CurrentUser() user: AuthUser,
+    @Query() query: ListExpenseCategoriesQueryDto,
+  ) {
+    return this.expenses.listCategories(user, query);
   }
 
   @Post('categories')
@@ -55,6 +68,100 @@ export class ExpensesController {
     return this.expenses.seedDefaults(user);
   }
 
+  @Patch('categories/:id')
+  @Roles(...RoleGroup.finance)
+  @ApiOperation({ summary: 'Update expense category' })
+  updateCategory(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateExpenseCategoryDto,
+  ) {
+    return this.expenses.updateCategory(user, id, dto);
+  }
+
+  @Delete('categories/:id')
+  @Roles(...RoleGroup.finance)
+  @ApiOperation({
+    summary: 'Delete category only if unused (prefer soft-deactivate)',
+  })
+  deleteCategory(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.expenses.deleteCategory(user, id);
+  }
+
+  // ─── Petty cash (static) ──────────────────────────────────────────────────
+
+  @Get('petty-cash')
+  @Roles(...RoleGroup.finance, Role.cashier)
+  @ApiOperation({ summary: 'Get petty cash fund + balance (creates if missing)' })
+  getPettyCash(
+    @CurrentUser() user: AuthUser,
+    @Query() query: PettyCashQueryDto,
+  ) {
+    return this.expenses.getPettyCash(user, query);
+  }
+
+  @Get('petty-cash/ledger')
+  @Roles(...RoleGroup.finance, Role.cashier)
+  @ApiOperation({ summary: 'Petty cash ledger entries' })
+  getPettyCashLedger(
+    @CurrentUser() user: AuthUser,
+    @Query() query: PettyCashLedgerQueryDto,
+  ) {
+    return this.expenses.getPettyCashLedger(user, query);
+  }
+
+  @Post('petty-cash/opening')
+  @Roles(...RoleGroup.finance)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Set opening petty cash (only if empty fund)' })
+  pettyCashOpening(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: PettyCashOpeningDto,
+  ) {
+    return this.expenses.pettyCashOpening(user, dto);
+  }
+
+  @Post('petty-cash/replenish')
+  @Roles(...RoleGroup.finance)
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Replenish petty cash (credit fund — not an expense)',
+  })
+  pettyCashReplenish(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: PettyCashReplenishDto,
+  ) {
+    return this.expenses.pettyCashReplenish(user, dto);
+  }
+
+  @Post('petty-cash/adjust')
+  @Roles(...RoleGroup.finance)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Manual petty cash credit/debit adjustment' })
+  pettyCashAdjust(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: PettyCashAdjustDto,
+  ) {
+    return this.expenses.pettyCashAdjust(user, dto);
+  }
+
+  // ─── Summary (static) ─────────────────────────────────────────────────────
+
+  @Get('summary')
+  @Roles(...RoleGroup.finance, Role.cashier)
+  @ApiOperation({ summary: 'Expense + petty cash summary dashboard' })
+  summary(
+    @CurrentUser() user: AuthUser,
+    @Query() query: ExpenseSummaryQueryDto,
+  ) {
+    return this.expenses.summary(user, query);
+  }
+
+  // ─── Expenses collection ──────────────────────────────────────────────────
+
   @Get()
   @Roles(...RoleGroup.finance, Role.cashier)
   @ApiOperation({ summary: 'List expenses' })
@@ -64,14 +171,29 @@ export class ExpensesController {
 
   @Post()
   @Roles(...RoleGroup.finance, Role.cashier)
-  @ApiOperation({ summary: 'Record an expense (pending for cashiers)' })
+  @ApiOperation({
+    summary:
+      'Record an expense (tax snapshot, approval threshold, petty cash debit)',
+  })
   create(@CurrentUser() user: AuthUser, @Body() dto: CreateExpenseDto) {
     return this.expenses.create(user, dto);
   }
 
+  // ─── Expense by id (after static routes) ──────────────────────────────────
+
+  @Get(':id')
+  @Roles(...RoleGroup.finance, Role.cashier)
+  @ApiOperation({ summary: 'Expense detail' })
+  getById(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.expenses.getById(user, id);
+  }
+
   @Patch(':id')
   @Roles(...RoleGroup.finance, Role.cashier)
-  @ApiOperation({ summary: 'Edit pending expense' })
+  @ApiOperation({ summary: 'Edit draft or pending expense' })
   update(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
@@ -118,7 +240,7 @@ export class ExpensesController {
   @Post(':id/void')
   @Roles(...RoleGroup.finance)
   @HttpCode(200)
-  @ApiOperation({ summary: 'Soft-void an expense' })
+  @ApiOperation({ summary: 'Soft-void an expense (reverses petty debit)' })
   voidExpense(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,

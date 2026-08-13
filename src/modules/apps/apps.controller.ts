@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RoleGroup } from '../../common/roles';
 import { Roles } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
 import { AppsService } from './apps.service';
+import { SearchService } from './search.service';
 import {
   CreateCatalogItemDto,
   EnableModuleDto,
@@ -17,7 +18,27 @@ import {
 @ApiBearerAuth('access-token')
 @Controller()
 export class AppsController {
-  constructor(private readonly apps: AppsService) {}
+  constructor(
+    private readonly apps: AppsService,
+    private readonly search: SearchService,
+  ) {}
+
+  @Get('search')
+  @Roles(...RoleGroup.all)
+  @ApiOperation({
+    summary: 'Unified product + customer search (shell / quick find)',
+  })
+  globalSearch(
+    @CurrentUser() user: AuthUser,
+    @Query('q') q?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.search.search(
+      user,
+      q ?? '',
+      limit ? Number(limit) : undefined,
+    );
+  }
 
   @Get('modules')
   @Roles(...RoleGroup.all)

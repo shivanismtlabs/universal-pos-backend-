@@ -1,6 +1,5 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { NotificationChannel } from '@prisma/client';
 import {
+  IsArray,
   IsEnum,
   IsObject,
   IsOptional,
@@ -9,6 +8,8 @@ import {
   MaxLength,
 } from 'class-validator';
 import { PaginationQueryDto } from '../../../common/dto/pagination.dto';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { NotificationChannel } from '@prisma/client';
 
 export class SendNotificationDto {
   @ApiPropertyOptional({ description: 'Customer to notify (uses their phone)' })
@@ -57,4 +58,30 @@ export class ListNotifyLogsQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsUUID()
   customerId?: string;
+}
+
+export class SendInvoiceDto {
+  @ApiProperty({ description: 'Order to invoice' })
+  @IsUUID()
+  orderId!: string;
+
+  @ApiPropertyOptional({
+    example: ['email', 'sms'],
+    description: 'Channels to send (default email+sms)',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  channels?: Array<'email' | 'sms' | 'whatsapp'>;
+}
+
+export class BirthdaySendDto {
+  @ApiPropertyOptional({
+    example: ['sms', 'whatsapp'],
+    description: 'Channels for birthday wishes (opt-in customers only)',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  channels?: Array<'email' | 'sms' | 'whatsapp'>;
 }

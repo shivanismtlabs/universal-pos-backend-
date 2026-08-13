@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import {
@@ -40,8 +40,15 @@ export class CustomersService {
           phone,
           email: dto.email?.trim().toLowerCase(),
           notes: dto.notes?.trim(),
+          dateOfBirth: dto.dateOfBirth
+            ? new Date(`${dto.dateOfBirth.slice(0, 10)}T00:00:00.000Z`)
+            : null,
           marketingOptIn,
           consentAt: marketingOptIn ? new Date() : null,
+          creditLimit:
+            dto.creditLimit === undefined || dto.creditLimit === null
+              ? null
+              : dto.creditLimit,
           meta: meta as Prisma.InputJsonValue,
         },
       });
@@ -111,29 +118,74 @@ export class CustomersService {
     });
     if (!customer) throw new NotFoundException('Customer not found');
 
-    const [orderAgg, dueAgg, noteCount] = await Promise.all([
-      this.prisma.order.aggregate({
-        where: { tenantId: user.tenantId, customerId: id },
-        _count: { _all: true },
-      }),
-      this.prisma.order.aggregate({
-        where: {
-          tenantId: user.tenantId,
-          customerId: id,
-          balanceDue: { gt: 0 },
-        },
-        _sum: { balanceDue: true },
-        _count: { _all: true },
-      }),
-      this.prisma.customerNote.count({
-        where: { tenantId: user.tenantId, customerId: id },
-      }),
-    ]);
-
     const { rentalMeasurements, rentalPartyMemberships, ...rest } = customer;
     const meta = (rest.meta as Record<string, unknown>) ?? {};
+
+    const [orderAgg, dueAgg, noteCount, spentAgg, lastVisit, activeMembership] =
+      await Promise.all([
+        this.prisma.order.aggregate({
+          where: { tenantId: user.tenantId, customerId: id },
+          _count: { _all: true },
+        }),
+        this.prisma.order.aggregate({
+          where: {
+            tenantId: user.tenantId,
+            customerId: id,
+            balanceDue: { gt: 0 },
+          },
+          _sum: { balanceDue: true },
+          _count: { _all: true },
+        }),
+        this.prisma.customerNote.count({
+          where: { tenantId: user.tenantId, customerId: id },
+        }),
+        this.prisma.order.aggregate({
+          where: {
+            tenantId: user.tenantId,
+            customerId: id,
+            status: { notIn: [OrderStatus.cancelled, OrderStatus.draft] },
+          },
+          _sum: { subtotal: true, taxTotal: true, discountTotal: true },
+        }),
+        this.prisma.order.findFirst({
+          where: {
+            tenantId: user.tenantId,
+            customerId: id,
+            status: { notIn: [OrderStatus.cancelled, OrderStatus.draft] },
+          },
+          orderBy: { createdAt: 'desc' },
+          select: { createdAt: true, orderNumber: true },
+        }),
+        this.prisma.customerSubscription.findFirst({
+          where: {
+            tenantId: user.tenantId,
+            customerId: id,
+            status: 'active',
+          },
+          include: {
+            product: { select: { id: true, name: true } },
+          },
+          orderBy: { currentPeriodEnd: 'desc' },
+        }),
+      ]);
+
+    const totalSpent = Math.max(
+      0,
+      Number(spentAgg._sum.subtotal ?? 0) +
+        Number(spentAgg._sum.taxTotal ?? 0) -
+        Number(spentAgg._sum.discountTotal ?? 0),
+    );
+    const openDueTotal = Number(dueAgg._sum.balanceDue ?? 0);
+    const creditLimit =
+      rest.creditLimit == null ? null : Number(rest.creditLimit);
+    const availableCredit =
+      creditLimit == null
+        ? null
+        : Math.max(0, Math.round((creditLimit - openDueTotal) * 100) / 100);
+
     return {
       ...rest,
+      creditLimit,
       eventDate:
         typeof meta.eventDate === 'string' ? meta.eventDate : null,
       measurements: rentalMeasurements,
@@ -141,10 +193,25 @@ export class CustomersService {
       summary: {
         orderCount: orderAgg._count._all,
         openDueCount: dueAgg._count._all,
-        openDueTotal: Number(dueAgg._sum.balanceDue ?? 0),
+        openDueTotal,
         loyaltyPoints: rest.loyaltyPoints,
         storeCreditBalance: Number(rest.storeCreditBalance),
         noteCount,
+        totalSpent: Math.round(totalSpent * 100) / 100,
+        lastVisitAt: lastVisit?.createdAt ?? null,
+        lastVisitOrder: lastVisit?.orderNumber ?? null,
+        creditLimit,
+        availableCredit,
+        activeMembership: activeMembership
+          ? {
+              id: activeMembership.id,
+              status: activeMembership.status,
+              planName: activeMembership.product.name,
+              productId: activeMembership.productId,
+              currentPeriodEnd: activeMembership.currentPeriodEnd,
+              price: Number(activeMembership.price),
+            }
+          : null,
       },
     };
   }
@@ -213,6 +280,205 @@ export class CustomersService {
         balanceDue: Number(o.balanceDue),
       })),
     };
+  }
+
+  async listPayments(user: AuthUser, customerId: string, limit = 50) {
+    await this.assertCustomer(user.tenantId, customerId);
+    const take = Math.min(Math.max(limit, 1), 200);
+    const rows = await this.prisma.payment.findMany({
+      where: {
+        tenantId: user.tenantId,
+        order: { customerId },
+        status: 'succeeded',
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+      select: {
+        id: true,
+        type: true,
+        method: true,
+        amount: true,
+        createdAt: true,
+        order: {
+          select: {
+            id: true,
+            orderNumber: true,
+            kind: true,
+            status: true,
+          },
+        },
+      },
+    });
+    return {
+      items: rows.map((p) => ({
+        id: p.id,
+        type: p.type,
+        method: p.method,
+        amount: Number(p.amount),
+        createdAt: p.createdAt,
+        orderId: p.order.id,
+        orderNumber: p.order.orderNumber,
+        orderKind: p.order.kind,
+        orderStatus: p.order.status,
+      })),
+    };
+  }
+
+  async listMemberships(user: AuthUser, customerId: string, limit = 50) {
+    await this.assertCustomer(user.tenantId, customerId);
+    const take = Math.min(Math.max(limit, 1), 200);
+    const rows = await this.prisma.customerSubscription.findMany({
+      where: { tenantId: user.tenantId, customerId },
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: {
+        product: { select: { id: true, name: true, skuCode: true } },
+      },
+    });
+    return {
+      items: rows.map((r) => ({
+        id: r.id,
+        status: r.status,
+        billingPeriodDays: r.billingPeriodDays,
+        price: Number(r.price),
+        startsAt: r.startsAt,
+        currentPeriodStart: r.currentPeriodStart,
+        currentPeriodEnd: r.currentPeriodEnd,
+        cancelledAt: r.cancelledAt,
+        product: r.product,
+      })),
+    };
+  }
+
+  /** Virtual timeline — notes + loyalty + wallet + orders + payments (no new table) */
+  async listActivity(user: AuthUser, customerId: string, limit = 50) {
+    await this.assertCustomer(user.tenantId, customerId);
+    const take = Math.min(Math.max(limit, 1), 100);
+    const perSource = Math.min(40, take);
+
+    const [notes, loyalty, wallet, orders, payments] = await Promise.all([
+      this.prisma.customerNote.findMany({
+        where: { tenantId: user.tenantId, customerId },
+        orderBy: { createdAt: 'desc' },
+        take: perSource,
+        include: { createdBy: { select: { fullName: true } } },
+      }),
+      this.prisma.loyaltyLedgerEntry.findMany({
+        where: { tenantId: user.tenantId, customerId },
+        orderBy: { createdAt: 'desc' },
+        take: perSource,
+      }),
+      this.prisma.storeCreditLedgerEntry.findMany({
+        where: { tenantId: user.tenantId, customerId },
+        orderBy: { createdAt: 'desc' },
+        take: perSource,
+      }),
+      this.prisma.order.findMany({
+        where: { tenantId: user.tenantId, customerId },
+        orderBy: { createdAt: 'desc' },
+        take: perSource,
+        select: {
+          id: true,
+          orderNumber: true,
+          status: true,
+          kind: true,
+          subtotal: true,
+          taxTotal: true,
+          discountTotal: true,
+          balanceDue: true,
+          createdAt: true,
+        },
+      }),
+      this.prisma.payment.findMany({
+        where: {
+          tenantId: user.tenantId,
+          order: { customerId },
+          status: 'succeeded',
+        },
+        orderBy: { createdAt: 'desc' },
+        take: perSource,
+        select: {
+          id: true,
+          type: true,
+          method: true,
+          amount: true,
+          createdAt: true,
+          order: { select: { id: true, orderNumber: true } },
+        },
+      }),
+    ]);
+
+    type ActivityItem = {
+      id: string;
+      kind: string;
+      title: string;
+      detail: string | null;
+      amount: number | null;
+      createdAt: Date;
+      href?: string | null;
+    };
+
+    const items: ActivityItem[] = [];
+
+    for (const n of notes) {
+      items.push({
+        id: `note:${n.id}`,
+        kind: 'note',
+        title: 'Note',
+        detail: n.body,
+        amount: null,
+        createdAt: n.createdAt,
+      });
+    }
+    for (const l of loyalty) {
+      items.push({
+        id: `loyalty:${l.id}`,
+        kind: `loyalty_${l.kind}`,
+        title: `Loyalty ${l.kind}`,
+        detail: l.note,
+        amount: l.points,
+        createdAt: l.createdAt,
+        href: l.orderId ? `/orders/view?id=${l.orderId}` : null,
+      });
+    }
+    for (const w of wallet) {
+      items.push({
+        id: `wallet:${w.id}`,
+        kind: `wallet_${w.kind}`,
+        title: `Wallet ${w.kind}`,
+        detail: w.note,
+        amount: Number(w.amount),
+        createdAt: w.createdAt,
+        href: w.orderId ? `/orders/view?id=${w.orderId}` : null,
+      });
+    }
+    for (const o of orders) {
+      const total =
+        Number(o.subtotal) + Number(o.taxTotal) - Number(o.discountTotal);
+      items.push({
+        id: `order:${o.id}`,
+        kind: 'order',
+        title: `Order ${o.orderNumber}`,
+        detail: `${o.kind} · ${o.status}`,
+        amount: total,
+        createdAt: o.createdAt,
+        href: `/orders/view?id=${o.id}`,
+      });
+    }
+    for (const p of payments) {
+      items.push({
+        id: `payment:${p.id}`,
+        kind: `payment_${p.type}`,
+        title: `${p.type} · ${p.method}`,
+        detail: p.order.orderNumber,
+        amount: Number(p.amount),
+        createdAt: p.createdAt,
+        href: `/orders/view?id=${p.order.id}`,
+      });
+    }
+
+    items.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    return { items: items.slice(0, take) };
   }
 
   async listLoyaltyLedger(user: AuthUser, customerId: string, limit = 50) {
@@ -397,9 +663,18 @@ export class CustomersService {
     if (dto.phone !== undefined) data.phone = dto.phone.trim();
     if (dto.email !== undefined) data.email = dto.email.trim().toLowerCase();
     if (dto.notes !== undefined) data.notes = dto.notes;
+    if (dto.dateOfBirth !== undefined) {
+      data.dateOfBirth = dto.dateOfBirth
+        ? new Date(`${dto.dateOfBirth.slice(0, 10)}T00:00:00.000Z`)
+        : null;
+    }
     if (dto.marketingOptIn !== undefined) {
       data.marketingOptIn = dto.marketingOptIn;
       data.consentAt = dto.marketingOptIn ? new Date() : null;
+    }
+    if (dto.creditLimit !== undefined) {
+      data.creditLimit =
+        dto.creditLimit === null ? null : dto.creditLimit;
     }
 
     try {
@@ -416,10 +691,18 @@ export class CustomersService {
   }
 
   async softDelete(user: AuthUser, id: string) {
-    await this.getById(user, id);
+    const customer = await this.prisma.customer.findFirst({
+      where: { id, tenantId: user.tenantId, deletedAt: null },
+      select: { id: true, phone: true },
+    });
+    if (!customer) throw new NotFoundException('Customer not found');
+
+    // Free tenant+phone unique so the number can be re-created after soft-delete
+    const freedPhone = `${customer.phone}#deleted#${id.replace(/-/g, '').slice(0, 12)}`;
+
     await this.prisma.customer.update({
       where: { id },
-      data: { deletedAt: new Date() },
+      data: { deletedAt: new Date(), phone: freedPhone },
     });
     return { id, deleted: true };
   }

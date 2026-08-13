@@ -98,6 +98,12 @@ export class CreatePurchaseOrderDto {
   @IsDateString()
   expectedDelivery?: string;
 
+  @ApiPropertyOptional({ example: 'Tax 18% · Coupon SUMMER10' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
+
   @ApiPropertyOptional({ type: [CreatePoLineDto] })
   @IsOptional()
   @IsArray()

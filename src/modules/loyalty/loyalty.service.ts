@@ -363,6 +363,94 @@ export class LoyaltyService {
     return { points };
   }
 
+  /**
+   * Reverse proportional earn points when a sale is returned.
+   * Uses earn ledger rows tied to orderId; prior return clawbacks are deducted.
+   */
+  async clawbackEarnOnReturnInTx(
+    tx: Prisma.TransactionClient,
+    args: {
+      tenantId: string;
+      customerId: string;
+      orderId: string;
+      refundAmount: number;
+    },
+  ) {
+    if (args.refundAmount <= 0) return { points: 0 };
+
+    const earns = await tx.loyaltyLedgerEntry.findMany({
+      where: {
+        tenantId: args.tenantId,
+        customerId: args.customerId,
+        orderId: args.orderId,
+        kind: 'earn',
+      },
+      select: { points: true },
+    });
+    const earned = earns.reduce((s, e) => s + Math.max(0, e.points), 0);
+    if (earned <= 0) return { points: 0 };
+
+    const priorClawbacks = await tx.loyaltyLedgerEntry.findMany({
+      where: {
+        tenantId: args.tenantId,
+        customerId: args.customerId,
+        orderId: args.orderId,
+        kind: 'adjust',
+        note: { contains: 'return clawback' },
+      },
+      select: { points: true },
+    });
+    const alreadyClawed = priorClawbacks.reduce(
+      (s, e) => s + Math.abs(Math.min(0, e.points)),
+      0,
+    );
+    const remaining = Math.max(0, earned - alreadyClawed);
+    if (remaining <= 0) return { points: 0 };
+
+    const paidAgg = await tx.payment.aggregate({
+      where: {
+        tenantId: args.tenantId,
+        orderId: args.orderId,
+        status: 'succeeded',
+        type: { in: ['payment', 'deposit'] },
+      },
+      _sum: { amount: true },
+    });
+    const originalPaid = Number(paidAgg._sum.amount ?? 0);
+    if (originalPaid <= 0) return { points: 0 };
+
+    const ratio = Math.min(1, args.refundAmount / originalPaid);
+    const claw = Math.min(remaining, Math.floor(earned * ratio));
+    if (claw <= 0) return { points: 0 };
+
+    const cust = await tx.customer.findFirst({
+      where: { id: args.customerId, tenantId: args.tenantId },
+      select: { loyaltyPoints: true },
+    });
+    if (!cust) return { points: 0 };
+
+    const take = Math.min(claw, cust.loyaltyPoints);
+    if (take <= 0) return { points: 0 };
+
+    const balanceAfter = cust.loyaltyPoints - take;
+    await tx.customer.update({
+      where: { id: args.customerId },
+      data: { loyaltyPoints: balanceAfter },
+    });
+    await tx.loyaltyLedgerEntry.create({
+      data: {
+        tenantId: args.tenantId,
+        customerId: args.customerId,
+        kind: 'adjust',
+        points: -take,
+        balanceAfter,
+        orderId: args.orderId,
+        note: `Sale return clawback ${take} pts (${(ratio * 100).toFixed(0)}% of earn)`,
+      },
+    });
+    return { points: take };
+  }
+
   // ─── Gift cards ───────────────────────────────────────────────────────────
 
   listGiftCards(user: AuthUser) {

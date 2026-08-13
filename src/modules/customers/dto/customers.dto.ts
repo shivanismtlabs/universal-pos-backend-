@@ -48,10 +48,28 @@ export class CreateCustomerDto {
   @MaxLength(2000)
   notes?: string;
 
+  @ApiPropertyOptional({
+    example: '1990-05-20',
+    description: 'Birthday YYYY-MM-DD (optional reminders)',
+  })
+  @IsOptional()
+  @IsDateString()
+  dateOfBirth?: string;
+
   @ApiPropertyOptional({ default: false })
   @IsOptional()
   @IsBoolean()
   marketingOptIn?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Max open dues; omit/null = unlimited',
+    example: 5000,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  creditLimit?: number | null;
 }
 
 export class UpdateCustomerDto {
@@ -86,10 +104,25 @@ export class UpdateCustomerDto {
   @MaxLength(2000)
   notes?: string | null;
 
+  @ApiPropertyOptional({ example: '1990-05-20' })
+  @IsOptional()
+  @IsDateString()
+  dateOfBirth?: string | null;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
   marketingOptIn?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Max open dues; null clears to unlimited',
+    example: 5000,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  creditLimit?: number | null;
 }
 
 export class ListCustomersQueryDto {

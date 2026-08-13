@@ -256,6 +256,7 @@ export class PosController {
     @Query('page') page?: string,
     @Query('lowStock') lowStock?: string,
     @Query('maxQty') maxQty?: string,
+    @Query('forPurchase') forPurchase?: string,
   ) {
     return this.posService.saleCatalog(user, {
       locationId,
@@ -264,6 +265,7 @@ export class PosController {
       page: page ? Number(page) : undefined,
       lowStock: lowStock === '1' || lowStock === 'true',
       maxQty: maxQty ? Number(maxQty) : undefined,
+      forPurchase: forPurchase === '1' || forPurchase === 'true',
     });
   }
 

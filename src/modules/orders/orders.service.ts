@@ -176,15 +176,55 @@ export class OrdersService {
       return { ...p, take: p.limit };
     })();
     const locationId = query.locationId ?? query.storeId;
+    const q = query.q?.trim();
     const where: Prisma.OrderWhereInput = {
       tenantId: user.tenantId,
       ...(query.status ? { status: query.status } : {}),
       ...(query.kind ? { kind: query.kind } : {}),
       ...(query.customerId ? { customerId: query.customerId } : {}),
       ...(locationId ? { locationId } : {}),
-      ...(query.q
+      ...(q
         ? {
-            orderNumber: { contains: query.q.trim(), mode: 'insensitive' },
+            OR: [
+              { orderNumber: { contains: q, mode: 'insensitive' } },
+              {
+                customer: {
+                  fullName: { contains: q, mode: 'insensitive' },
+                },
+              },
+              {
+                customer: {
+                  phone: { contains: q, mode: 'insensitive' },
+                },
+              },
+              {
+                items: {
+                  some: {
+                    OR: [
+                      {
+                        description: {
+                          contains: q,
+                          mode: 'insensitive',
+                        },
+                      },
+                      {
+                        product: {
+                          name: { contains: q, mode: 'insensitive' },
+                        },
+                      },
+                      {
+                        product: {
+                          skuCode: {
+                            contains: q,
+                            mode: 'insensitive',
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
           }
         : {}),
     };
@@ -199,6 +239,15 @@ export class OrdersService {
           customer: { select: { id: true, fullName: true, phone: true } },
           location: { select: { id: true, name: true, code: true } },
           rentalExt: true,
+          items: {
+            take: 8,
+            select: {
+              id: true,
+              description: true,
+              quantity: true,
+              product: { select: { id: true, name: true, skuCode: true } },
+            },
+          },
           _count: { select: { items: true } },
         },
       }),
@@ -206,12 +255,21 @@ export class OrdersService {
     ]);
 
     return {
-      items: items.map((o) => ({
-        ...o,
-        store: o.location,
-        storeId: o.locationId,
-      })),
-        meta: pageMeta(total, page, limit),
+      items: items.map((o) => {
+        const productNames = o.items.map(
+          (i) => i.product?.name || i.description || 'Item',
+        );
+        const more = Math.max(0, o._count.items - productNames.length);
+        return {
+          ...o,
+          store: o.location,
+          storeId: o.locationId,
+          productSummary: productNames.join(', ') + (more > 0 ? ` +${more}` : ''),
+          productNames,
+          itemCount: o._count.items,
+        };
+      }),
+      meta: pageMeta(total, page, limit),
     };
   }
 

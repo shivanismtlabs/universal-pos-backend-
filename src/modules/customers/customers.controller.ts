@@ -76,6 +76,39 @@ export class CustomersController {
     return this.customersService.listDues(user, id, query.limit);
   }
 
+  @Get('customers/:id/payments')
+  @ApiOperation({ summary: 'Payment history via orders for customer' })
+  listPayments(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: CrmListQueryDto,
+  ) {
+    return this.customersService.listPayments(user, id, query.limit);
+  }
+
+  @Get('customers/:id/memberships')
+  @ApiOperation({ summary: 'CustomerSubscriptions for CRM profile' })
+  listMemberships(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: CrmListQueryDto,
+  ) {
+    return this.customersService.listMemberships(user, id, query.limit);
+  }
+
+  @Get('customers/:id/activity')
+  @ApiOperation({
+    summary:
+      'Unified CRM activity feed (notes, loyalty, wallet, orders, payments)',
+  })
+  listActivity(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: CrmListQueryDto,
+  ) {
+    return this.customersService.listActivity(user, id, query.limit);
+  }
+
   @Get('customers/:id/loyalty-ledger')
   @ApiOperation({ summary: 'Loyalty points ledger for customer' })
   listLoyalty(
@@ -97,7 +130,8 @@ export class CustomersController {
   }
 
   @Post('customers/:id/store-credit')
-  @ApiOperation({ summary: 'Top-up or debit store credit wallet' })
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Top-up or debit store credit wallet (manager+)' })
   adjustStoreCredit(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
@@ -143,7 +177,8 @@ export class CustomersController {
 
   @Delete('customers/:id')
   @HttpCode(200)
-  @ApiOperation({ summary: 'Soft-delete customer' })
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Soft-delete customer (manager+); frees phone' })
   remove(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,

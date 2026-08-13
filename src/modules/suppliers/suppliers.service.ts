@@ -4,6 +4,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PoType, Prisma } from '@prisma/client';
+import {
+  buildTaxProfile,
+  computeInvoiceTax,
+} from '../../common/tax-engine';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import {
@@ -99,13 +103,17 @@ export class SuppliersService {
           ? new Date(dto.expectedDelivery)
           : undefined,
         status: 'draft',
+        notes: dto.notes?.trim() || null,
         lines: lines.length
           ? {
               create: lines.map((l) => ({
                 tenantId: user.tenantId,
                 stockLevelId: l.stockLevelId,
                 qtyOrdered: l.qtyOrdered,
-                unitCost: l.unitCost,
+                unitCost:
+                  l.unitCost !== undefined && l.unitCost !== null
+                    ? l.unitCost
+                    : undefined,
               })),
             }
           : undefined,
@@ -639,12 +647,28 @@ export class SuppliersService {
         'GRN has no unit costs — create invoice manually with amounts',
       );
     }
+    const tenant = await this.prisma.tenant.findFirst({
+      where: { id: user.tenantId },
+      select: { taxMode: true, taxId: true, settings: true },
+    });
+    if (!tenant) {
+      throw new NotFoundException('Tenant not found');
+    }
+    const taxProfile = buildTaxProfile({
+      taxMode: tenant.taxMode,
+      taxId: tenant.taxId ?? null,
+      settings: tenant.settings,
+    });
+    const { totalTax } = computeInvoiceTax(
+      taxProfile,
+      Number(subtotal.toFixed(2)),
+    );
     return this.createInvoice(user, {
       supplierId: grn.supplierId,
       purchaseOrderId: grn.purchaseOrderId,
       goodsReceiptId: grn.id,
       subtotal: Number(subtotal.toFixed(2)),
-      taxTotal: 0,
+      taxTotal: totalTax,
       notes: `From GRN ${grn.grnNumber}`,
     });
   }

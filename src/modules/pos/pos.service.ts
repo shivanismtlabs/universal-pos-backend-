@@ -1177,6 +1177,8 @@ export class PosService {
       page?: number;
       lowStock?: boolean;
       maxQty?: number;
+      /** Include out-of-stock SKUs (purchase orders / restock). */
+      forPurchase?: boolean;
     },
   ) {
     const locationId =
@@ -1189,7 +1191,8 @@ export class PosService {
     });
     if (!loc) throw new NotFoundException('Location not found');
 
-    const limit = Math.min(Math.max(opts.limit ?? 40, 1), 100);
+    const limitCap = opts.forPurchase ? 200 : 100;
+    const limit = Math.min(Math.max(opts.limit ?? 40, 1), limitCap);
     const page = Math.max(opts.page ?? 1, 1);
     const skip = (page - 1) * limit;
     const q = opts.q?.trim();
@@ -1198,9 +1201,13 @@ export class PosService {
     const where: Prisma.StockLevelWhereInput = {
       tenantId: user.tenantId,
       locationId,
-      qtyOnHand: opts.lowStock
-        ? { gt: 0, lte: threshold }
-        : { gt: 0 },
+      ...(opts.forPurchase
+        ? {}
+        : {
+            qtyOnHand: opts.lowStock
+              ? { gt: 0, lte: threshold }
+              : { gt: 0 },
+          }),
       AND: [
         {
           product: {
@@ -1260,6 +1267,7 @@ export class PosService {
               description: true,
               photoUrl: true,
               taxCode: true,
+              costPrice: true,
               meta: true,
               category: { select: { id: true, name: true } },
             },
@@ -1287,10 +1295,13 @@ export class PosService {
           taxCode: row.product.taxCode,
           meta: row.product.meta,
         });
+        const costPrice =
+          row.product.costPrice != null ? Number(row.product.costPrice) : null;
         return {
           id: row.id,
           sku: row.sku,
           sellPrice: row.sellPrice,
+          costPrice,
           qtyOnHand: qty,
           sellUnit: row.sellUnit,
           lowStock: qty > 0 && qty <= threshold,
@@ -1734,23 +1745,41 @@ export class PosService {
         where: { id: orderId },
         select: { balanceDue: true },
       });
-      if (money(final.balanceDue).gt(0)) {
-        throw new BadRequestException(
-          `Sale still has balance due ${final.balanceDue}`,
-        );
-      }
+      const stillDue = money(final.balanceDue).gt(0);
 
-      await tx.order.update({
-        where: { id: orderId },
-        data: {
-          status: OrderStatus.fulfilled,
-          meta: { ...meta, awaitingStripePayment: false },
-        },
-      });
-      await tx.order.update({
-        where: { id: orderId },
-        data: { status: OrderStatus.closed },
-      });
+      // Partial Stripe pays: leave confirmed with balance; full pay → fulfilled/closed
+      if (stillDue) {
+        if (order.customerId) {
+          await this.assertCustomerCreditLimit(
+            tx,
+            user.tenantId,
+            order.customerId,
+          );
+        }
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: OrderStatus.confirmed,
+            meta: {
+              ...meta,
+              awaitingStripePayment: false,
+              partialStripe: true,
+            },
+          },
+        });
+      } else {
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: OrderStatus.fulfilled,
+            meta: { ...meta, awaitingStripePayment: false },
+          },
+        });
+        await tx.order.update({
+          where: { id: orderId },
+          data: { status: OrderStatus.closed },
+        });
+      }
 
       await tx.outboxEvent.create({
         data: {
@@ -1758,7 +1787,11 @@ export class PosService {
           eventType: 'pos.sale.completed',
           aggregateType: 'order',
           aggregateId: orderId,
-          payload: { orderId, via: 'stripe' },
+          payload: {
+            orderId,
+            via: 'stripe',
+            partial: stillDue,
+          },
         },
       });
     });
@@ -2186,6 +2219,18 @@ export class PosService {
           });
         }
 
+        if (p.method === PaymentMethod.bank_transfer) {
+          if (
+            !p.bankAccountName?.trim() ||
+            !p.bankAccountNumber?.trim() ||
+            !p.bankReference?.trim()
+          ) {
+            throw new BadRequestException(
+              'Bank transfer needs account name, account number, and reference / UTR',
+            );
+          }
+        }
+
         const payment = await tx.payment.create({
           data: {
             tenantId: user.tenantId,
@@ -2201,6 +2246,18 @@ export class PosService {
                   gatewayRef: p.giftCardCode.trim().toUpperCase(),
                   gatewayPayload: {
                     giftCardCode: p.giftCardCode.trim().toUpperCase(),
+                  },
+                }
+              : {}),
+            ...(p.method === PaymentMethod.bank_transfer
+              ? {
+                  gatewayRef: p.bankReference?.trim() || null,
+                  gatewayPayload: {
+                    bankReference: p.bankReference?.trim() || null,
+                    bankAccountName: p.bankAccountName?.trim() || null,
+                    bankAccountNumber: p.bankAccountNumber?.trim() || null,
+                    bankIfsc: p.bankIfsc?.trim() || null,
+                    bankName: p.bankName?.trim() || null,
                   },
                 }
               : {}),
@@ -2231,6 +2288,13 @@ export class PosService {
           data: { status: OrderStatus.closed },
         });
       } else {
+        if (dto.customerId) {
+          await this.assertCustomerCreditLimit(
+            tx,
+            user.tenantId,
+            dto.customerId,
+          );
+        }
         const cur = await tx.order.findFirstOrThrow({
           where: { id: created.id },
           select: { meta: true },
@@ -2469,6 +2533,7 @@ export class PosService {
     const meta = (order.meta ?? {}) as Record<string, unknown>;
 
     return {
+      orderId: order.id,
       orderNumber: order.orderNumber,
       status: order.status,
       kind: order.kind,
@@ -2483,6 +2548,7 @@ export class PosService {
       location: order.location,
       customer: order.customer
         ? {
+            id: order.customer.id,
             fullName: order.customer.fullName,
             phone: order.customer.phone,
             email: order.customer.email,
@@ -3011,6 +3077,15 @@ export class PosService {
         });
       }
 
+      if (order.customerId) {
+        await this.loyalty.clawbackEarnOnReturnInTx(tx, {
+          tenantId: user.tenantId,
+          customerId: order.customerId,
+          orderId: order.id,
+          refundAmount: Number(refundAmount.toFixed(2)),
+        });
+      }
+
       await this.paymentsService.recalculateBalance(
         tx,
         user.tenantId,
@@ -3041,6 +3116,38 @@ export class PosService {
         quantity: l.quantity,
       })),
     };
+  }
+
+  /**
+   * Block underpay when resulting open dues would exceed Customer.creditLimit.
+   * null creditLimit = unlimited.
+   */
+  private async assertCustomerCreditLimit(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    customerId: string,
+  ) {
+    const cust = await tx.customer.findFirst({
+      where: { id: customerId, tenantId, deletedAt: null },
+      select: { creditLimit: true, fullName: true },
+    });
+    if (!cust || cust.creditLimit == null) return;
+
+    const limit = Number(cust.creditLimit);
+    const dueAgg = await tx.order.aggregate({
+      where: {
+        tenantId,
+        customerId,
+        balanceDue: { gt: 0 },
+      },
+      _sum: { balanceDue: true },
+    });
+    const openDue = Number(dueAgg._sum.balanceDue ?? 0);
+    if (openDue > limit + 1e-9) {
+      throw new BadRequestException(
+        `Credit limit ₹${limit.toFixed(2)} exceeded for ${cust.fullName} (open dues ₹${openDue.toFixed(2)}). Collect more payment or raise the limit.`,
+      );
+    }
   }
 
   private mapParked(order: {

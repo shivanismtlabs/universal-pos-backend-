@@ -51,6 +51,38 @@ export class PosPaymentInputDto {
   @MinLength(4)
   @MaxLength(40)
   giftCardCode?: string;
+
+  @ApiPropertyOptional({
+    description: 'Bank transfer reference / UTR',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  bankReference?: string;
+
+  @ApiPropertyOptional({ description: 'Payer bank account name' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  bankAccountName?: string;
+
+  @ApiPropertyOptional({ description: 'Payer bank account number (masked OK)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  bankAccountNumber?: string;
+
+  @ApiPropertyOptional({ description: 'IFSC / routing code' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  bankIfsc?: string;
+
+  @ApiPropertyOptional({ description: 'Bank name' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  bankName?: string;
 }
 
 export class CheckoutDto {

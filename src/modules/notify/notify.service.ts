@@ -4,11 +4,16 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { NotificationChannel, Prisma } from '@prisma/client';
 import { pageMeta, paginate } from '../../common/dto/pagination.dto';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
-import { ListNotifyLogsQueryDto, SendNotificationDto } from './dto/notify.dto';
+import {
+  ListNotifyLogsQueryDto,
+  SendInvoiceDto,
+  SendNotificationDto,
+} from './dto/notify.dto';
 import { GupshupWhatsAppProvider } from './gupshup.provider';
 
 const TEMPLATES: Record<
@@ -25,6 +30,10 @@ const TEMPLATES: Record<
     `Gentle reminder: return for ${String(v.orderNumber ?? 'your rental')} is due${v.returnDueDate ? ` on ${String(v.returnDueDate)}` : ''}.`,
   sale_receipt: (v) =>
     `Hi ${String(v.customerName ?? 'there')}, thank you for shopping at ${String(v.storeName ?? 'our store')}. Invoice ${String(v.orderNumber ?? '')} total ${String(v.total ?? '')}${v.balanceDue && Number(v.balanceDue) > 0 ? ` (balance due ${String(v.balanceDue)})` : ' (paid)'}.`,
+  sale_invoice: (v) =>
+    `Hi ${String(v.customerName ?? 'there')}, here is your invoice ${String(v.orderNumber ?? '')} from ${String(v.storeName ?? 'our store')}.\nSubtotal: ${String(v.subtotal ?? '')}\nTax: ${String(v.taxTotal ?? '')}\nTotal: ${String(v.total ?? '')}${v.balanceDue && Number(v.balanceDue) > 0 ? `\nBalance due: ${String(v.balanceDue)}` : '\nStatus: Paid'}.\nThank you!`,
+  birthday_wish: (v) =>
+    `Happy Birthday ${String(v.customerName ?? '')}! 🎉 Wishing you a wonderful year from ${String(v.storeName ?? 'all of us')}.`,
   custom: (v) => String(v.message ?? v.text ?? '').trim(),
 };
 
@@ -35,16 +44,32 @@ export class NotifyService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly gupshup: GupshupWhatsAppProvider,
+    private readonly config: ConfigService,
   ) {}
 
   getConfig() {
+    const emailWebhook = Boolean(
+      this.config.get<string>('EMAIL_WEBHOOK_URL')?.trim(),
+    );
+    const smsWebhook = Boolean(
+      this.config.get<string>('SMS_WEBHOOK_URL')?.trim(),
+    );
     return {
       ...this.gupshup.getStatus(),
       channels: {
         whatsapp: true,
         sms: true,
         email: true,
-        note: 'SMS/email use mock delivery until provider keys are set',
+        emailMode: emailWebhook ? 'webhook' : 'mock',
+        smsMode: smsWebhook ? 'webhook' : 'mock',
+        note: emailWebhook
+          ? 'Email via EMAIL_WEBHOOK_URL'
+          : 'Email mock until EMAIL_WEBHOOK_URL is set; SMS mock until SMS_WEBHOOK_URL',
+      },
+      birthdayReminders: {
+        optional: true,
+        requiresMarketingOptIn: true,
+        templateKey: 'birthday_wish',
       },
     };
   }
@@ -140,19 +165,34 @@ export class NotifyService {
         });
       }
 
-      // SMS / email — mock delivery (logged); wire provider later
-      this.log.log(
-        `[${dto.channel}] mock send → ${destination}: ${text.slice(0, 120)}`,
-      );
+      if (dto.channel === NotificationChannel.email) {
+        const delivered = await this.deliverEmail(destination, text, vars);
+        return this.prisma.notificationLog.update({
+          where: { id: log.id },
+          data: {
+            status: delivered.mode === 'mock' ? 'sent_mock' : 'sent',
+            payload: {
+              ...vars,
+              renderedText: text,
+              destination,
+              providerMode: delivered.mode,
+              providerRaw: delivered.raw ?? null,
+            } as Prisma.InputJsonValue,
+          },
+        });
+      }
+
+      const delivered = await this.deliverSms(destination, text);
       return this.prisma.notificationLog.update({
         where: { id: log.id },
         data: {
-          status: 'sent_mock',
+          status: delivered.mode === 'mock' ? 'sent_mock' : 'sent',
           payload: {
             ...vars,
             renderedText: text,
             destination,
-            providerMode: 'mock',
+            providerMode: delivered.mode,
+            providerRaw: delivered.raw ?? null,
           } as Prisma.InputJsonValue,
         },
       });
@@ -172,6 +212,180 @@ export class NotifyService {
       });
       throw e;
     }
+  }
+
+  /** Email/SMS invoice for an existing order */
+  async sendOrderInvoice(user: AuthUser, dto: SendInvoiceDto) {
+    const order = await this.prisma.order.findFirst({
+      where: { id: dto.orderId, tenantId: user.tenantId },
+      include: {
+        customer: {
+          select: { id: true, fullName: true, phone: true, email: true },
+        },
+        location: { select: { name: true } },
+      },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (!order.customerId || !order.customer) {
+      throw new BadRequestException('Order has no customer to invoice');
+    }
+
+    const tenant = await this.prisma.tenant.findFirst({
+      where: { id: user.tenantId },
+      select: { name: true },
+    });
+    const channels = dto.channels?.length
+      ? dto.channels
+      : (['email', 'sms'] as Array<'email' | 'sms' | 'whatsapp'>);
+    const total =
+      Number(order.subtotal) +
+      Number(order.taxTotal) -
+      Number(order.discountTotal);
+    const results = [];
+    for (const channel of channels) {
+      try {
+        const row = await this.send(user, {
+          customerId: order.customerId,
+          channel: channel as NotificationChannel,
+          templateKey: 'sale_invoice',
+          payload: {
+            orderNumber: order.orderNumber,
+            storeName: tenant?.name ?? order.location.name,
+            subtotal: Number(order.subtotal).toFixed(2),
+            taxTotal: Number(order.taxTotal).toFixed(2),
+            total: total.toFixed(2),
+            balanceDue: Number(order.balanceDue).toFixed(2),
+            customerName: order.customer.fullName,
+          },
+        });
+        results.push({ channel, status: row.status, id: row.id });
+      } catch (e) {
+        results.push({
+          channel,
+          status: 'failed',
+          error: e instanceof Error ? e.message : 'failed',
+        });
+      }
+    }
+    return { orderId: order.id, orderNumber: order.orderNumber, results };
+  }
+
+  async listBirthdayUpcoming(user: AuthUser, days = 30) {
+    const window = Math.min(Math.max(days, 1), 90);
+    const tenant = await this.prisma.tenant.findFirst({
+      where: { id: user.tenantId },
+      select: { timezone: true, name: true },
+    });
+    const tz = tenant?.timezone || 'Asia/Kolkata';
+    const todayParts = this.ymdParts(new Date(), tz);
+    const customers = await this.prisma.customer.findMany({
+      where: {
+        tenantId: user.tenantId,
+        deletedAt: null,
+        dateOfBirth: { not: null },
+      },
+      select: {
+        id: true,
+        fullName: true,
+        phone: true,
+        email: true,
+        dateOfBirth: true,
+        marketingOptIn: true,
+      },
+      take: 2000,
+    });
+
+    const items = customers
+      .map((c) => {
+        const dob = c.dateOfBirth!;
+        const month = dob.getUTCMonth() + 1;
+        const day = dob.getUTCDate();
+        const daysUntil = this.daysUntilNextBirthday(
+          todayParts.month,
+          todayParts.day,
+          todayParts.year,
+          month,
+          day,
+        );
+        if (daysUntil > window) return null;
+        return {
+          id: c.id,
+          fullName: c.fullName,
+          phone: c.phone,
+          email: c.email,
+          dateOfBirth: dob.toISOString().slice(0, 10),
+          month,
+          day,
+          daysUntil,
+          marketingOptIn: c.marketingOptIn,
+          canSend: c.marketingOptIn === true,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x != null)
+      .sort((a, b) => a.daysUntil - b.daysUntil);
+
+    return {
+      timezone: tz,
+      storeName: tenant?.name ?? null,
+      windowDays: window,
+      count: items.length,
+      items,
+    };
+  }
+
+  async sendBirthdayToday(
+    user: AuthUser,
+    channels: Array<'email' | 'sms' | 'whatsapp'> = ['sms', 'whatsapp'],
+  ) {
+    const today = (await this.listBirthdayUpcoming(user, 1)).items.filter(
+      (i) => i.daysUntil === 0 && i.canSend,
+    );
+    const tenant = await this.prisma.tenant.findFirst({
+      where: { id: user.tenantId },
+      select: { name: true },
+    });
+    const results = [];
+    for (const c of today) {
+      for (const channel of channels) {
+        if (channel === 'email' && !c.email) {
+          results.push({
+            customerId: c.id,
+            channel,
+            status: 'skipped',
+            reason: 'no_email',
+          });
+          continue;
+        }
+        try {
+          const row = await this.send(user, {
+            customerId: c.id,
+            channel: channel as NotificationChannel,
+            templateKey: 'birthday_wish',
+            payload: {
+              customerName: c.fullName,
+              storeName: tenant?.name ?? 'our store',
+            },
+          });
+          results.push({
+            customerId: c.id,
+            channel,
+            status: row.status,
+          });
+        } catch (e) {
+          results.push({
+            customerId: c.id,
+            channel,
+            status: 'failed',
+            error: e instanceof Error ? e.message : 'failed',
+          });
+        }
+      }
+    }
+    return {
+      sentFor: today.length,
+      results,
+      note: 'Only marketingOptIn customers with birthday today are included',
+    };
   }
 
   /** Best-effort sale receipt notify (does not throw to caller) */
@@ -238,5 +452,82 @@ export class NotifyService {
     ]);
 
     return { items, meta: pageMeta(total, page, limit) };
+  }
+
+  private async deliverEmail(
+    to: string,
+    text: string,
+    vars: Record<string, unknown>,
+  ): Promise<{ mode: 'mock' | 'webhook'; raw?: unknown }> {
+    const url = this.config.get<string>('EMAIL_WEBHOOK_URL')?.trim();
+    if (!url) {
+      this.log.log(`[email] mock send → ${to}: ${text.slice(0, 120)}`);
+      return { mode: 'mock' };
+    }
+    const from =
+      this.config.get<string>('EMAIL_FROM')?.trim() || 'noreply@universal-pos.local';
+    const subject = `Invoice ${String(vars.orderNumber ?? '')}`.trim() || 'Message from Universal POS';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to, from, subject, text }),
+    });
+    if (!res.ok) {
+      throw new BadRequestException(
+        `Email webhook failed (${res.status})`,
+      );
+    }
+    const raw = await res.json().catch(() => null);
+    return { mode: 'webhook', raw };
+  }
+
+  private async deliverSms(
+    to: string,
+    text: string,
+  ): Promise<{ mode: 'mock' | 'webhook'; raw?: unknown }> {
+    const url = this.config.get<string>('SMS_WEBHOOK_URL')?.trim();
+    if (!url) {
+      this.log.log(`[sms] mock send → ${to}: ${text.slice(0, 120)}`);
+      return { mode: 'mock' };
+    }
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to, text }),
+    });
+    if (!res.ok) {
+      throw new BadRequestException(`SMS webhook failed (${res.status})`);
+    }
+    const raw = await res.json().catch(() => null);
+    return { mode: 'webhook', raw };
+  }
+
+  private ymdParts(date: Date, timeZone: string) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const get = (t: string) =>
+      Number(parts.find((p) => p.type === t)?.value ?? '0');
+    return { year: get('year'), month: get('month'), day: get('day') };
+  }
+
+  private daysUntilNextBirthday(
+    nowMonth: number,
+    nowDay: number,
+    nowYear: number,
+    bMonth: number,
+    bDay: number,
+  ) {
+    const start = Date.UTC(nowYear, nowMonth - 1, nowDay);
+    let targetYear = nowYear;
+    let target = Date.UTC(targetYear, bMonth - 1, bDay);
+    if (target < start) {
+      targetYear += 1;
+      target = Date.UTC(targetYear, bMonth - 1, bDay);
+    }
+    return Math.round((target - start) / (24 * 3600 * 1000));
   }
 }

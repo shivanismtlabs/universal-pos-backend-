@@ -88,6 +88,13 @@ export class StripeService {
       throw new BadRequestException('Order not found');
     }
 
+    const balanceDue = Number(order.balanceDue);
+    if (dto.amount > balanceDue + 0.02) {
+      throw new BadRequestException(
+        `Payment amount exceeds balance due (${balanceDue.toFixed(2)})`,
+      );
+    }
+
     // INR uses paise (2 decimals). Stripe also enforces ~USD/EUR 0.50 minimum
     // after FX — ₹50 often fails, so require ₹60+.
     const amountPaise = Math.round(dto.amount * 100);

@@ -906,10 +906,14 @@ model Customer {
   notes              String?
   marketingOptIn     Boolean   @default(false) @map("marketing_opt_in")
   consentAt          DateTime? @map("consent_at") @db.Timestamptz(6)
+  /// Optional birthday for reminders (marketingOptIn required to send)
+  dateOfBirth        DateTime? @map("date_of_birth") @db.Date
   /// Refunded to store credit / redeemed at counter
   storeCreditBalance Decimal   @default(0) @map("store_credit_balance") @db.Decimal(12, 2)
   /// Loyalty points balance (earn on paid sales, redeem at counter)
   loyaltyPoints      Int       @default(0) @map("loyalty_points")
+  /// Max open balance (dues) allowed; null = unlimited
+  creditLimit        Decimal?  @map("credit_limit") @db.Decimal(12, 2)
   /// Industry-agnostic bag (labels, tags, external ids)
   meta               Json      @default("{}")
   deletedAt          DateTime? @map("deleted_at") @db.Timestamptz(6)
@@ -935,6 +939,7 @@ model Customer {
   @@unique([tenantId, phone])
   @@index([tenantId, createdAt])
   @@index([tenantId, fullName])
+  @@index([tenantId, dateOfBirth])
   @@map("customers")
 }
 

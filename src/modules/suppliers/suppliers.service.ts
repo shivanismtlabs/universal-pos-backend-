@@ -9,6 +9,7 @@ import {
   computeInvoiceTax,
 } from '../../common/tax-engine';
 import { PrismaService } from '../../database/database.module';
+import { AccountingPostingService } from '../accounting/posting.service';
 import type { AuthUser } from '../auth/types';
 import {
   CreatePurchaseOrderDto,
@@ -22,7 +23,10 @@ import {
 
 @Injectable()
 export class SuppliersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly accounting: AccountingPostingService,
+  ) {}
 
   createSupplier(user: AuthUser, dto: CreateSupplierDto) {
     return this.prisma.supplier.create({
@@ -725,27 +729,31 @@ export class SuppliersService {
       dto.invoiceNumber?.trim() ||
       (await this.nextDocNumber(user.tenantId, isCredit ? 'SCN' : 'SINV'));
 
-    const row = await this.prisma.supplierInvoice.create({
-      data: {
-        tenantId: user.tenantId,
-        supplierId: dto.supplierId,
-        purchaseOrderId: dto.purchaseOrderId ?? null,
-        goodsReceiptId: dto.goodsReceiptId ?? null,
-        invoiceNumber,
-        invoiceDate: dto.invoiceDate ? new Date(dto.invoiceDate) : new Date(),
-        dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
-        subtotal: subtotal.toFixed(2),
-        taxTotal: taxTotal.toFixed(2),
-        grandTotal: grandTotal.toFixed(2),
-        amountPaid: '0',
-        status: isCredit ? 'credit' : 'open',
-        notes: dto.notes?.trim() || null,
-      },
-      include: {
-        supplier: { select: { id: true, name: true } },
-        purchaseOrder: { select: { id: true, poNumber: true } },
-        goodsReceipt: { select: { id: true, grnNumber: true } },
-      },
+    const row = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.supplierInvoice.create({
+        data: {
+          tenantId: user.tenantId,
+          supplierId: dto.supplierId,
+          purchaseOrderId: dto.purchaseOrderId ?? null,
+          goodsReceiptId: dto.goodsReceiptId ?? null,
+          invoiceNumber,
+          invoiceDate: dto.invoiceDate ? new Date(dto.invoiceDate) : new Date(),
+          dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
+          subtotal: subtotal.toFixed(2),
+          taxTotal: taxTotal.toFixed(2),
+          grandTotal: grandTotal.toFixed(2),
+          amountPaid: '0',
+          status: isCredit ? 'credit' : 'open',
+          notes: dto.notes?.trim() || null,
+        },
+        include: {
+          supplier: { select: { id: true, name: true } },
+          purchaseOrder: { select: { id: true, poNumber: true } },
+          goodsReceipt: { select: { id: true, grnNumber: true } },
+        },
+      });
+      await this.accounting.postPurchaseInvoice(tx, user, created.id);
+      return created;
     });
     return this.mapInvoice(row);
   }
@@ -899,6 +907,7 @@ export class SuppliersService {
           goodsReceipt: { select: { id: true, grnNumber: true } },
         },
       });
+      await this.accounting.postSupplierPayment(tx, user, payment.id);
       return {
         invoice: this.mapInvoice(updated),
         payment: this.mapPayment(payment),
@@ -917,17 +926,21 @@ export class SuppliersService {
         notes: dto.notes,
       });
     }
-    const payment = await this.prisma.supplierPayment.create({
-      data: {
-        tenantId: user.tenantId,
-        supplierId: dto.supplierId,
-        amount: Number(dto.amount).toFixed(2),
-        method: (dto.method?.trim() || 'bank_transfer').slice(0, 32),
-        kind: dto.kind === 'refund' ? 'refund' : 'payment',
-        reference: dto.reference?.trim() || null,
-        notes: dto.notes?.trim() || null,
-        actorUserId: user.userId,
-      },
+    const payment = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.supplierPayment.create({
+        data: {
+          tenantId: user.tenantId,
+          supplierId: dto.supplierId,
+          amount: Number(dto.amount).toFixed(2),
+          method: (dto.method?.trim() || 'bank_transfer').slice(0, 32),
+          kind: dto.kind === 'refund' ? 'refund' : 'payment',
+          reference: dto.reference?.trim() || null,
+          notes: dto.notes?.trim() || null,
+          actorUserId: user.userId,
+        },
+      });
+      await this.accounting.postSupplierPayment(tx, user, created.id);
+      return created;
     });
     return { payment: this.mapPayment(payment) };
   }

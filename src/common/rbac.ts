@@ -45,6 +45,15 @@ export const PERMISSION_CATALOG: Array<{
   { code: 'suppliers.manage', moduleCode: 'purchases', description: 'Suppliers & POs' },
   { code: 'settings.manage', moduleCode: 'core', description: 'Shop settings' },
   { code: 'plan.manage', moduleCode: 'core', description: 'Subscription plan' },
+  { code: 'accounting.view', moduleCode: 'accounting', description: 'View ledger, reports, and journals' },
+  { code: 'accounting.create', moduleCode: 'accounting', description: 'Create draft journals and accounts' },
+  { code: 'accounting.edit', moduleCode: 'accounting', description: 'Edit accounts, mappings, and drafts' },
+  { code: 'accounting.post', moduleCode: 'accounting', description: 'Post draft journal entries' },
+  { code: 'accounting.reverse', moduleCode: 'accounting', description: 'Reverse posted journals' },
+  { code: 'accounting.close_period', moduleCode: 'accounting', description: 'Close or reopen accounting periods' },
+  { code: 'accounting.export', moduleCode: 'accounting', description: 'Export accounting data' },
+  { code: 'accounting.integrations.manage', moduleCode: 'accounting', description: 'Connect external accounting systems' },
+  { code: 'accounting.sync', moduleCode: 'accounting', description: 'Trigger external accounting sync' },
 ];
 
 export const DEFAULT_PERMISSION_CODES = PERMISSION_CATALOG.map((p) => p.code);
@@ -76,6 +85,15 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<string, string[] | ['*']> = {
     'expenses.manage',
     'suppliers.manage',
     'settings.manage',
+    'accounting.view',
+    'accounting.create',
+    'accounting.edit',
+    'accounting.post',
+    'accounting.reverse',
+    'accounting.close_period',
+    'accounting.export',
+    'accounting.integrations.manage',
+    'accounting.sync',
   ],
   cashier: [
     'attendance.self',
@@ -110,6 +128,15 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<string, string[] | ['*']> = {
     'reports.read',
     'expenses.manage',
     'payments.take',
+    'accounting.view',
+    'accounting.create',
+    'accounting.edit',
+    'accounting.post',
+    'accounting.reverse',
+    'accounting.close_period',
+    'accounting.export',
+    'accounting.integrations.manage',
+    'accounting.sync',
   ],
   staff: ['attendance.self', 'catalog.read', 'orders.read'],
 };
@@ -124,7 +151,7 @@ export const ROLE_PERMISSION_FALLBACK: Record<string, string[]> = {
   cashier: ['pos.checkout'],
   fitter: ['appointments.manage', 'rental.manage'],
   inventory: ['inventory.write', 'catalog.write'],
-  accountant: ['reports.read', 'expenses.manage'],
+  accountant: ['reports.read', 'expenses.manage', 'accounting.view'],
   staff: ['users.manage'],
 };
 

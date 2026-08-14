@@ -65,6 +65,7 @@ import {
 } from '../../common/tax-engine';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
+import { AccountingPostingService } from '../accounting/posting.service';
 import { OrdersService } from '../orders/orders.service';
 import { PaymentsService } from '../payments/payments.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
@@ -115,6 +116,7 @@ export class PosService {
     private readonly loyalty: LoyaltyService,
     private readonly notify: NotifyService,
     private readonly lowStock: LowStockAlertService,
+    private readonly accounting: AccountingPostingService,
   ) {}
 
   /**
@@ -2444,6 +2446,8 @@ export class PosService {
           },
         },
       });
+
+      await this.accounting.postSale(tx, user, created.id);
 
       return {
         orderId: created.id,

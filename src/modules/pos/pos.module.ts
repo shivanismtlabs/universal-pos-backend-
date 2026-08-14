@@ -4,6 +4,7 @@ import { PaymentsModule } from '../payments/payments.module';
 import { LoyaltyModule } from '../loyalty/loyalty.module';
 import { NotifyModule } from '../notify/notify.module';
 import { BillingModule } from '../billing/billing.module';
+import { AccountingModule } from '../accounting/accounting.module';
 import { CommerceModeGuard } from '../../common/guards/commerce-mode.guard';
 import { CommerceEngine } from '../commerce/commerce-engine';
 import { PosController } from './pos.controller';
@@ -19,6 +20,7 @@ import { SaleReturnsService } from './sale-returns.service';
     LoyaltyModule,
     NotifyModule,
     BillingModule,
+    AccountingModule,
   ],
   controllers: [PosController],
   providers: [

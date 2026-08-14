@@ -15,6 +15,7 @@ import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import { OrdersService } from '../orders/orders.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
+import { AccountingPostingService } from '../accounting/posting.service';
 import {
   CreatePaymentDto,
   ListPaymentsQueryDto,
@@ -52,6 +53,7 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly ordersService: OrdersService,
     private readonly loyalty: LoyaltyService,
+    private readonly accounting: AccountingPostingService,
   ) {}
 
   async create(user: AuthUser, dto: CreatePaymentDto) {
@@ -194,6 +196,18 @@ export class PaymentsService {
             payload: { orderId: dto.orderId, amount: dto.amount },
           },
         });
+        const existingSale = await tx.journalEntry.findFirst({
+          where: {
+            tenantId: user.tenantId,
+            sourceKey: `SALE:${dto.orderId}`,
+          },
+          select: { id: true },
+        });
+        if (existingSale) {
+          await this.accounting.postCustomerPayment(tx, user, payment.id);
+        } else {
+          await this.accounting.postSale(tx, user, dto.orderId);
+        }
       }
 
       return payment;

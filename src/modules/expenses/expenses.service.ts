@@ -10,6 +10,7 @@ import {
   computeLineTax,
 } from '../../common/tax-engine';
 import { PrismaService } from '../../database/database.module';
+import { AccountingPostingService } from '../accounting/posting.service';
 import type { AuthUser } from '../auth/types';
 import {
   CreateExpenseCategoryDto,
@@ -75,7 +76,10 @@ type PrismaTx = Prisma.TransactionClient;
 
 @Injectable()
 export class ExpensesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly accounting: AccountingPostingService,
+  ) {}
 
   // ─── Categories ───────────────────────────────────────────────────────────
 
@@ -506,6 +510,10 @@ export class ExpensesService {
           },
         });
 
+        if (status === 'approved') {
+          await this.accounting.postExpense(tx, user, created.id);
+        }
+
         return created;
       } catch (e) {
         if (
@@ -779,6 +787,7 @@ export class ExpensesService {
           },
         },
       });
+      await this.accounting.postExpense(tx, user, id);
       return updated;
     });
   }

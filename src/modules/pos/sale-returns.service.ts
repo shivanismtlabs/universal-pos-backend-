@@ -23,6 +23,7 @@ import type { AuthUser } from '../auth/types';
 import { BillingService } from '../billing/billing.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { PaymentsService } from '../payments/payments.service';
+import { AccountingPostingService } from '../accounting/posting.service';
 import type { SaleExchangeDto, SaleReturnDto } from './dto/pos.dto';
 import {
   computeReturnRefundFromOriginal,
@@ -57,6 +58,7 @@ export class SaleReturnsService {
     private readonly paymentsService: PaymentsService,
     private readonly loyalty: LoyaltyService,
     private readonly billing: BillingService,
+    private readonly accounting: AccountingPostingService,
   ) {}
 
   async saleReturn(user: AuthUser, dto: SaleReturnDto) {
@@ -1631,6 +1633,8 @@ export class SaleReturnsService {
           },
         },
       });
+
+      await this.accounting.postSaleReturn(tx, user, returnEventId!);
 
       return { pay, returnEventId: returnEventId! };
     });

@@ -361,6 +361,16 @@ model Tenant {
   identityMemberships IdentityTenantMembership[]
   /// Universal POS: 1:1 vertical config (order_fields / item_fields / ui_flow JSON)
   businessConfig     BusinessConfig?
+  glAccounts              GlAccount[]
+  journalEntries          JournalEntry[]
+  journalEntryLines       JournalEntryLine[]
+  accountingPeriods       AccountingPeriod[]
+  accountMappings         AccountMapping[]
+  accountingTaxFacts      AccountingTaxFact[]
+  integrationConnections  IntegrationConnection[]
+  integrationExternalMaps IntegrationExternalMap[]
+  integrationSyncJobs     IntegrationSyncJob[]
+  integrationSyncLogs     IntegrationSyncLog[]
 
   @@map("tenants")
 }
@@ -488,6 +498,10 @@ model Location {
   shiftAssignments  ShiftAssignment[]
   attendanceEntries AttendanceEntry[]
   appNotifications  AppNotification[]
+  journalEntries    JournalEntry[]
+  journalEntryLines JournalEntryLine[]
+  accountMappings   AccountMapping[]
+  accountingTaxFacts AccountingTaxFact[]
 
   @@unique([tenantId, code])
   @@map("locations")
@@ -668,6 +682,15 @@ model User {
   appNotifications    AppNotification[]
   notificationPrefs   UserNotificationPreference[]
   devicePushTokens    DevicePushToken[]
+  glAccountsCreated   GlAccount[]           @relation("GlAccountCreatedBy")
+  journalsCreated     JournalEntry[]        @relation("JournalCreatedBy")
+  journalsPosted      JournalEntry[]        @relation("JournalPostedBy")
+  journalsReversed    JournalEntry[]        @relation("JournalReversedBy")
+  periodsCreated      AccountingPeriod[]    @relation("PeriodCreatedBy")
+  periodsClosed       AccountingPeriod[]    @relation("PeriodClosedBy")
+  periodsReopened     AccountingPeriod[]    @relation("PeriodReopenedBy")
+  mappingsCreated     AccountMapping[]      @relation("AccountMappingCreatedBy")
+  integrationConnections IntegrationConnection[] @relation("IntegrationConnectedBy")
 
   @@unique([tenantId, email])
   @@map("users")
@@ -954,6 +977,7 @@ model Customer {
   loyaltyLedger    LoyaltyLedgerEntry[]
   storeCreditLedger StoreCreditLedgerEntry[]
   customerNotes    CustomerNote[]
+  journalEntryLines JournalEntryLine[]
 
   @@unique([tenantId, phone])
   @@index([tenantId, createdAt])
@@ -1232,6 +1256,7 @@ model Supplier {
   goodsReceipts  GoodsReceipt[]
   invoices       SupplierInvoice[]
   payments       SupplierPayment[]
+  journalEntryLines JournalEntryLine[]
 
   @@map("suppliers")
 }
@@ -2073,7 +2098,7 @@ model ExpenseCategory {
   name             String
   isActive         Boolean  @default(true) @map("is_active")
   receiptRequired  Boolean  @default(false) @map("receipt_required")
-  /// Optional GL / accounting account label (no CoA yet — P3)
+  /// Optional GL account code (links to Chart of Accounts when accounting is enabled)
   accountCode      String?  @map("account_code")
   sortOrder        Int      @default(0) @map("sort_order")
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -2386,4 +2411,325 @@ model ModRentalDamageRecord {
   stockUnit StockUnit @relation(fields: [stockUnitId], references: [id])
 
   @@map("mod_rental_damage_records")
+}
+
+// ─── Accounting (double-entry GL + external adapters) ───────────────────────
+
+enum GlAccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum JournalStatus {
+  DRAFT
+  POSTED
+  REVERSED
+}
+
+enum AccountingPeriodStatus {
+  OPEN
+  CLOSED
+}
+
+enum IntegrationSyncStatus {
+  PENDING
+  PROCESSING
+  SYNCED
+  FAILED
+  RETRYING
+}
+
+/// Tenant Chart of Accounts — configurable, not industry-hardcoded.
+model GlAccount {
+  id          String        @id @default(uuid()) @db.Uuid
+  tenantId    String        @map("tenant_id") @db.Uuid
+  parentId    String?       @map("parent_id") @db.Uuid
+  code        String
+  name        String
+  type        GlAccountType
+  /// CURRENT_ASSET | FIXED_ASSET | CURRENT_LIABILITY | LONG_TERM_LIABILITY | EQUITY | REVENUE | CONTRA_REVENUE | COGS | OPERATING_EXPENSE | OTHER_INCOME | OTHER_EXPENSE
+  subtype     String?
+  category    String?
+  description String?
+  isActive    Boolean       @default(true) @map("is_active")
+  isSystem    Boolean       @default(false) @map("is_system")
+  createdById String?       @map("created_by") @db.Uuid
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id])
+  parent   GlAccount?        @relation("GlAccountTree", fields: [parentId], references: [id])
+  children GlAccount[]       @relation("GlAccountTree")
+  createdBy User?            @relation("GlAccountCreatedBy", fields: [createdById], references: [id])
+  lines    JournalEntryLine[]
+  mappings AccountMapping[]
+  externalMaps IntegrationExternalMap[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, type, isActive])
+  @@index([tenantId, parentId])
+  @@map("gl_accounts")
+}
+
+model JournalEntry {
+  id            String        @id @default(uuid()) @db.Uuid
+  tenantId      String        @map("tenant_id") @db.Uuid
+  locationId    String?       @map("location_id") @db.Uuid
+  entryNumber   String        @map("entry_number")
+  entryDate     DateTime      @map("entry_date") @db.Date
+  sourceType    String        @map("source_type")
+  sourceId      String?       @map("source_id") @db.Uuid
+  /// tenant-unique idempotency key e.g. SALE:<orderId>
+  sourceKey     String?       @map("source_key")
+  description   String?
+  status        JournalStatus @default(DRAFT)
+  createdById   String?       @map("created_by") @db.Uuid
+  postedById    String?       @map("posted_by") @db.Uuid
+  reversedById  String?       @map("reversed_by") @db.Uuid
+  postedAt      DateTime?     @map("posted_at") @db.Timestamptz(6)
+  reversedAt    DateTime?     @map("reversed_at") @db.Timestamptz(6)
+  reversalOfId  String?       @map("reversal_of_id") @db.Uuid
+  meta          Json          @default("{}")
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant     Tenant             @relation(fields: [tenantId], references: [id])
+  location   Location?          @relation(fields: [locationId], references: [id])
+  createdBy  User?              @relation("JournalCreatedBy", fields: [createdById], references: [id])
+  postedBy   User?              @relation("JournalPostedBy", fields: [postedById], references: [id])
+  reversedBy User?              @relation("JournalReversedBy", fields: [reversedById], references: [id])
+  reversalOf JournalEntry?      @relation("JournalReversal", fields: [reversalOfId], references: [id])
+  reversals  JournalEntry[]     @relation("JournalReversal")
+  lines      JournalEntryLine[]
+  taxFacts   AccountingTaxFact[]
+  syncJobs   IntegrationSyncJob[]
+
+  @@unique([tenantId, entryNumber])
+  @@unique([tenantId, sourceKey])
+  @@index([tenantId, entryDate, status])
+  @@index([tenantId, sourceType, sourceId])
+  @@index([tenantId, locationId, entryDate])
+  @@map("journal_entries")
+}
+
+model JournalEntryLine {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  journalEntryId String   @map("journal_entry_id") @db.Uuid
+  accountId      String   @map("account_id") @db.Uuid
+  debit          Decimal  @default(0) @db.Decimal(14, 2)
+  credit         Decimal  @default(0) @db.Decimal(14, 2)
+  customerId     String?  @map("customer_id") @db.Uuid
+  supplierId     String?  @map("supplier_id") @db.Uuid
+  locationId     String?  @map("location_id") @db.Uuid
+  taxId          String?  @map("tax_id")
+  description    String?
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant        Tenant       @relation(fields: [tenantId], references: [id])
+  journalEntry  JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  account       GlAccount    @relation(fields: [accountId], references: [id])
+  customer      Customer?    @relation(fields: [customerId], references: [id])
+  supplier      Supplier?    @relation(fields: [supplierId], references: [id])
+  location      Location?    @relation(fields: [locationId], references: [id])
+
+  @@index([tenantId, accountId])
+  @@index([journalEntryId])
+  @@index([tenantId, customerId])
+  @@index([tenantId, supplierId])
+  @@index([tenantId, locationId])
+  @@map("journal_entry_lines")
+}
+
+model AccountingPeriod {
+  id           String                   @id @default(uuid()) @db.Uuid
+  tenantId     String                   @map("tenant_id") @db.Uuid
+  name         String
+  startDate    DateTime                 @map("start_date") @db.Date
+  endDate      DateTime                 @map("end_date") @db.Date
+  status       AccountingPeriodStatus   @default(OPEN)
+  closedAt     DateTime?                @map("closed_at") @db.Timestamptz(6)
+  closedById   String?                  @map("closed_by") @db.Uuid
+  reopenedAt   DateTime?                @map("reopened_at") @db.Timestamptz(6)
+  reopenedById String?                  @map("reopened_by") @db.Uuid
+  createdById  String?                  @map("created_by") @db.Uuid
+  createdAt    DateTime                 @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant     Tenant @relation(fields: [tenantId], references: [id])
+  createdBy  User?  @relation("PeriodCreatedBy", fields: [createdById], references: [id])
+  closedBy   User?  @relation("PeriodClosedBy", fields: [closedById], references: [id])
+  reopenedBy User?  @relation("PeriodReopenedBy", fields: [reopenedById], references: [id])
+
+  @@index([tenantId, startDate, endDate])
+  @@index([tenantId, status])
+  @@map("accounting_periods")
+}
+
+/// Maps POS transaction/payment/tax keys → GL accounts (tenant, optional location).
+model AccountMapping {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  locationId      String?  @map("location_id") @db.Uuid
+  mappingKey      String   @map("mapping_key")
+  /// '*' for tenant-wide, else location UUID — keeps unique constraint with nullable location
+  scopeKey        String   @default("*") @map("scope_key")
+  accountId       String   @map("account_id") @db.Uuid
+  taxType         String?  @map("tax_type")
+  paymentMethod   String?  @map("payment_method")
+  transactionType String?  @map("transaction_type")
+  createdById     String?  @map("created_by") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  location  Location? @relation(fields: [locationId], references: [id])
+  account   GlAccount @relation(fields: [accountId], references: [id])
+  createdBy User?     @relation("AccountMappingCreatedBy", fields: [createdById], references: [id])
+
+  @@unique([tenantId, mappingKey, scopeKey])
+  @@index([tenantId, mappingKey])
+  @@map("account_mappings")
+}
+
+/// Tax breakdown stored when a journal is posted (not recomputed only at report time).
+model AccountingTaxFact {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  journalEntryId String   @map("journal_entry_id") @db.Uuid
+  locationId     String?  @map("location_id") @db.Uuid
+  sourceType     String   @map("source_type")
+  sourceId       String?  @map("source_id") @db.Uuid
+  /// OUTPUT | INPUT
+  direction      String
+  /// CGST | SGST | IGST | CESS | GST | OTHER | VAT
+  taxType        String   @map("tax_type")
+  taxRate        Decimal  @default(0) @map("tax_rate") @db.Decimal(8, 4)
+  taxableValue   Decimal  @default(0) @map("taxable_value") @db.Decimal(14, 2)
+  taxAmount      Decimal  @default(0) @map("tax_amount") @db.Decimal(14, 2)
+  hsnSac         String?  @map("hsn_sac")
+  placeOfSupply  String?  @map("place_of_supply")
+  /// B2B | B2C | UNREGISTERED
+  partyType      String?  @map("party_type")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id])
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  location     Location?    @relation(fields: [locationId], references: [id])
+
+  @@index([tenantId, journalEntryId])
+  @@index([tenantId, direction, taxType])
+  @@index([tenantId, sourceType, sourceId])
+  @@map("accounting_tax_facts")
+}
+
+model IntegrationConnection {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  /// TALLY | QUICKBOOKS | ZOHO_BOOKS
+  provider      String
+  /// disconnected | connected | error
+  status        String    @default("disconnected")
+  /// AES-GCM encrypted JSON (OAuth tokens, company ids) — never plaintext
+  configEnc     String?   @map("config_enc")
+  externalOrgId String?   @map("external_org_id")
+  lastTestedAt  DateTime? @map("last_tested_at") @db.Timestamptz(6)
+  lastSyncedAt  DateTime? @map("last_synced_at") @db.Timestamptz(6)
+  createdById   String?   @map("created_by") @db.Uuid
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id])
+  createdBy User?  @relation("IntegrationConnectedBy", fields: [createdById], references: [id])
+  maps      IntegrationExternalMap[]
+  jobs      IntegrationSyncJob[]
+  logs      IntegrationSyncLog[]
+
+  @@unique([tenantId, provider])
+  @@map("integration_connections")
+}
+
+model IntegrationExternalMap {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  connectionId  String?   @map("connection_id") @db.Uuid
+  provider      String
+  /// account | customer | supplier | item | tax | payment_method
+  entityType    String    @map("entity_type")
+  localId       String    @map("local_id")
+  externalId    String    @map("external_id")
+  externalName  String?   @map("external_name")
+  status        String    @default("mapped")
+  accountId     String?   @map("account_id") @db.Uuid
+  lastSyncedAt  DateTime? @map("last_synced_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant     Tenant                  @relation(fields: [tenantId], references: [id])
+  account    GlAccount?              @relation(fields: [accountId], references: [id])
+  connection IntegrationConnection?  @relation(fields: [connectionId], references: [id])
+
+  @@unique([tenantId, provider, entityType, localId])
+  @@index([tenantId, provider, entityType])
+  @@map("integration_external_maps")
+}
+
+model IntegrationSyncJob {
+  id             String                 @id @default(uuid()) @db.Uuid
+  tenantId       String                 @map("tenant_id") @db.Uuid
+  connectionId   String?                @map("connection_id") @db.Uuid
+  provider       String
+  entityType     String                 @map("entity_type")
+  localEntityId  String                 @map("local_entity_id") @db.Uuid
+  journalEntryId String?                @map("journal_entry_id") @db.Uuid
+  operation      String                 @default("create")
+  status         IntegrationSyncStatus  @default(PENDING)
+  attemptCount   Int                    @default(0) @map("attempt_count")
+  nextAttemptAt  DateTime?              @map("next_attempt_at") @db.Timestamptz(6)
+  lastAttemptAt  DateTime?              @map("last_attempt_at") @db.Timestamptz(6)
+  syncedAt       DateTime?              @map("synced_at") @db.Timestamptz(6)
+  errorMessage   String?                @map("error_message")
+  idempotencyKey String                 @map("idempotency_key")
+  createdAt      DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime               @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant       Tenant                  @relation(fields: [tenantId], references: [id])
+  journalEntry JournalEntry?           @relation(fields: [journalEntryId], references: [id])
+  connection   IntegrationConnection?  @relation(fields: [connectionId], references: [id])
+
+  @@unique([tenantId, provider, entityType, localEntityId, operation])
+  @@index([tenantId, status, nextAttemptAt])
+  @@index([tenantId, idempotencyKey])
+  @@map("integration_sync_jobs")
+}
+
+model IntegrationSyncLog {
+  id               String    @id @default(uuid()) @db.Uuid
+  tenantId         String    @map("tenant_id") @db.Uuid
+  connectionId     String?   @map("connection_id") @db.Uuid
+  provider         String
+  entityType       String    @map("entity_type")
+  localEntityId    String?   @map("local_entity_id")
+  externalEntityId String?   @map("external_entity_id")
+  operation        String
+  status           String
+  /// Non-secret request metadata (ids, counts) — never OAuth tokens
+  requestMeta      Json?     @map("request_meta")
+  errorMessage     String?   @map("error_message")
+  attemptCount     Int       @default(0) @map("attempt_count")
+  lastAttemptAt    DateTime? @map("last_attempt_at") @db.Timestamptz(6)
+  syncedAt         DateTime? @map("synced_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant     Tenant                 @relation(fields: [tenantId], references: [id])
+  connection IntegrationConnection? @relation(fields: [connectionId], references: [id])
+
+  @@index([tenantId, provider, createdAt])
+  @@index([tenantId, localEntityId])
+  @@map("integration_sync_logs")
 }

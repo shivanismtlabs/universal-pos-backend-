@@ -68,6 +68,8 @@ export const RoleGroup = {
 
   finance: [Role.admin, Role.manager, Role.accountant] as string[],
 
+  accounting: [Role.admin, Role.manager, Role.accountant] as string[],
+
   staff: [Role.admin, Role.manager] as string[],
 
   ownerOnly: [Role.admin] as string[],

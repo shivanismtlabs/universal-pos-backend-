@@ -28,6 +28,7 @@ import { SuppliersModule } from './modules/suppliers/suppliers.module';
 import { SyncModule } from './modules/sync/sync.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { UsersModule } from './modules/users/users.module';
+import { AccountingModule } from './modules/accounting/accounting.module';
 
 const enableQueues = process.env.ENABLE_QUEUES === 'true';
 
@@ -59,6 +60,7 @@ const enableQueues = process.env.ENABLE_QUEUES === 'true';
     ReportsModule,
     NotifyModule,
     SecurityModule,
+    AccountingModule,
     ExpensesModule,
     LoyaltyModule,
     IamModule,

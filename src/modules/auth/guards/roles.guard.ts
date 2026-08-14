@@ -44,20 +44,23 @@ export class RolesGuard implements CanActivate {
 
     if (requiredPerms?.length) {
       const ok = requiredPerms.some((p) => hasPermission(user.permissions, p));
-      if (!ok) throw new ForbiddenException('Insufficient permission');
-      return true;
+      if (ok) return true;
     }
 
-    const okRole = requiredRoles!.some((role) => user.roles?.includes(role));
-    if (okRole) return true;
+    if (requiredRoles?.length) {
+      const okRole = requiredRoles.some((role) => user.roles?.includes(role));
+      if (okRole) return true;
 
-    // Custom roles: allow if user holds a permission mapped from required system role
-    const okPerm = requiredRoles!.some((role) => {
-      const fallbacks = ROLE_PERMISSION_FALLBACK[role] ?? [];
-      return fallbacks.some((p) => hasPermission(user.permissions, p));
-    });
-    if (okPerm) return true;
+      const okPerm = requiredRoles.some((role) => {
+        const fallbacks = ROLE_PERMISSION_FALLBACK[role] ?? [];
+        return fallbacks.some((p) => hasPermission(user.permissions, p));
+      });
+      if (okPerm) return true;
+    }
 
+    if (requiredPerms?.length) {
+      throw new ForbiddenException('Insufficient permission');
+    }
     throw new ForbiddenException('Insufficient role');
   }
 }

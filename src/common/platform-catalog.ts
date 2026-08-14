@@ -123,6 +123,27 @@ export const PLATFORM_MODULES: Array<{
       { label: 'Reports', path: '/reports', icon: 'chart' },
     ],
   },
+  {
+    code: 'accounting',
+    name: 'Accounting',
+    description: 'Chart of accounts, journals, GL reports, tax, and external adapters',
+    dependsOn: ['core'],
+    permissions: [
+      'accounting.view',
+      'accounting.create',
+      'accounting.edit',
+      'accounting.post',
+      'accounting.reverse',
+      'accounting.close_period',
+      'accounting.export',
+      'accounting.integrations.manage',
+      'accounting.sync',
+    ],
+    isCore: false,
+    navSchema: [
+      { label: 'Accounting', path: '/accounting', icon: 'book' },
+    ],
+  },
 ];
 
 export const DEFAULT_ROLES = [
@@ -160,6 +181,15 @@ export const DEFAULT_PERMISSION_CODES = [
   'suppliers.manage',
   'settings.manage',
   'plan.manage',
+  'accounting.view',
+  'accounting.create',
+  'accounting.edit',
+  'accounting.post',
+  'accounting.reverse',
+  'accounting.close_period',
+  'accounting.export',
+  'accounting.integrations.manage',
+  'accounting.sync',
 ] as const;
 
 /** Modules enabled for a new tenant by default (IAM foundation). */

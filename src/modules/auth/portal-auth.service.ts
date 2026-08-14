@@ -3,6 +3,7 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  Logger,
   UnauthorizedException,
   forwardRef,
 } from '@nestjs/common';
@@ -27,6 +28,7 @@ import type {
 } from './dto/auth.dto';
 import { AuthService } from './auth.service';
 import { SecurityService } from '../security/security.service';
+import { rethrowAuthDb, safePasswordMatch } from './auth-db-error';
 
 const BCRYPT_ROUNDS = 12;
 const DUMMY_PASSWORD_HASH =
@@ -42,6 +44,8 @@ type OrgRow = {
 
 @Injectable()
 export class PortalAuthService {
+  private readonly logger = new Logger(PortalAuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
@@ -130,13 +134,13 @@ export class PortalAuthService {
 
     let passwordOk = false;
     if (identity?.passwordHash) {
-      passwordOk = await bcrypt.compare(password, identity.passwordHash);
+      passwordOk = await safePasswordMatch(password, identity.passwordHash);
     }
 
     // Migrate / link from tenant users if identity missing or no hash
     if (!passwordOk) {
       for (const c of candidates) {
-        if (await bcrypt.compare(password, c.passwordHash)) {
+        if (await safePasswordMatch(password, c.passwordHash)) {
           passwordOk = true;
           if (!identity) {
             identity = await this.prisma.identityAccount.create({
@@ -160,7 +164,7 @@ export class PortalAuthService {
     }
 
     if (!passwordOk) {
-      await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
+      await safePasswordMatch(password, DUMMY_PASSWORD_HASH);
       if (identity) {
         await this.bumpIdentityFail(identity.id, identity.failedLoginAttempts);
       }
@@ -179,7 +183,7 @@ export class PortalAuthService {
 
     // Link all same-email users where the shared password works
     for (const c of candidates) {
-      if (await bcrypt.compare(password, c.passwordHash)) {
+      if (await safePasswordMatch(password, c.passwordHash)) {
         await this.linkUser(identity.id, c.tenantId, c.id);
       }
     }
@@ -321,76 +325,85 @@ export class PortalAuthService {
       ...new Set(modes.flatMap((m) => [...moduleStackForMode(m)])),
     ];
 
-    const result = await this.prisma.$transaction(async (tx) => {
-      const provisioned = await provisionTenantWithAdmin(tx, {
-        tenantName: organizationName,
-        slug,
-        taxId,
-        locationName,
-        adminEmail: identity.email,
-        adminFullName: identity.fullName,
-        adminPhone: dto.phone?.trim() || identity.phone || undefined,
-        passwordHash,
-        currencyCode,
-        locale,
+    let result: Awaited<ReturnType<typeof provisionTenantWithAdmin>>;
+    try {
+      result = await this.prisma.$transaction(async (tx) => {
+        const provisioned = await provisionTenantWithAdmin(tx, {
+          tenantName: organizationName,
+          slug,
+          taxId,
+          locationName,
+          adminEmail: identity.email,
+          adminFullName: identity.fullName,
+          adminPhone: dto.phone?.trim() || identity.phone || undefined,
+          passwordHash,
+          currencyCode,
+          locale,
+        });
+
+        // Zoho-style org profile + universal BusinessConfig link
+        const settings = {
+          ...((provisioned.tenant.settings as Record<string, unknown>) ?? {}),
+          businessType: profile.id,
+          businessConfigId: profile.id,
+          businessConfigSetAt: new Date().toISOString(),
+          commerceModes: modes,
+          commerceSetupAt: new Date().toISOString(),
+          pos: { pinSwitchEnabled: true },
+          /** Exclusive tax by default so Due = Subtotal + Tax at counter */
+          tax: {
+            ratePercent: provisioned.tenant.taxMode === 'none' ? 0 : 5,
+            inclusive: false,
+          },
+          organizationProfile: {
+            phone: dto.phone?.trim() || identity.phone || null,
+            addressLine1: dto.addressLine1?.trim() || null,
+            city: dto.city?.trim() || null,
+            state: dto.state?.trim() || null,
+            postalCode: dto.postalCode?.trim() || null,
+            countryCode: (dto.countryCode?.trim() || 'IN').toUpperCase(),
+            fiscalYearStart: dto.fiscalYearStart?.trim() || null,
+            inventoryStartDate: dto.inventoryStartDate || null,
+          },
+        };
+
+        await tx.tenant.update({
+          where: { id: provisioned.tenant.id },
+          data: { settings: settings as Prisma.InputJsonValue },
+        });
+
+        await tx.businessConfig.create({
+          data: {
+            tenantId: provisioned.tenant.id,
+            businessType: configPayload.businessType,
+            itemFields: configPayload.itemFields as Prisma.InputJsonValue,
+            orderFields: configPayload.orderFields as Prisma.InputJsonValue,
+            uiFlow: configPayload.uiFlow as Prisma.InputJsonValue,
+            billing: configPayload.billing as Prisma.InputJsonValue,
+          },
+        });
+
+        if (modeModuleCodes.length) {
+          await enableTenantModules(tx, provisioned.tenant.id, modeModuleCodes);
+        }
+
+        await tx.identityTenantMembership.create({
+          data: {
+            identityId: identity.id,
+            tenantId: provisioned.tenant.id,
+            userId: provisioned.user.id,
+          },
+        });
+
+        return provisioned;
       });
-
-      // Zoho-style org profile + universal BusinessConfig link
-      const settings = {
-        ...((provisioned.tenant.settings as Record<string, unknown>) ?? {}),
-        businessType: profile.id,
-        businessConfigId: profile.id,
-        businessConfigSetAt: new Date().toISOString(),
-        commerceModes: modes,
-        commerceSetupAt: new Date().toISOString(),
-        pos: { pinSwitchEnabled: true },
-        /** Exclusive tax by default so Due = Subtotal + Tax at counter */
-        tax: {
-          ratePercent: provisioned.tenant.taxMode === 'none' ? 0 : 5,
-          inclusive: false,
-        },
-        organizationProfile: {
-          phone: dto.phone?.trim() || identity.phone || null,
-          addressLine1: dto.addressLine1?.trim() || null,
-          city: dto.city?.trim() || null,
-          state: dto.state?.trim() || null,
-          postalCode: dto.postalCode?.trim() || null,
-          countryCode: (dto.countryCode?.trim() || 'IN').toUpperCase(),
-          fiscalYearStart: dto.fiscalYearStart?.trim() || null,
-          inventoryStartDate: dto.inventoryStartDate || null,
-        },
-      };
-
-      await tx.tenant.update({
-        where: { id: provisioned.tenant.id },
-        data: { settings: settings as Prisma.InputJsonValue },
-      });
-
-      await tx.businessConfig.create({
-        data: {
-          tenantId: provisioned.tenant.id,
-          businessType: configPayload.businessType,
-          itemFields: configPayload.itemFields as Prisma.InputJsonValue,
-          orderFields: configPayload.orderFields as Prisma.InputJsonValue,
-          uiFlow: configPayload.uiFlow as Prisma.InputJsonValue,
-          billing: configPayload.billing as Prisma.InputJsonValue,
-        },
-      });
-
-      if (modeModuleCodes.length) {
-        await enableTenantModules(tx, provisioned.tenant.id, modeModuleCodes);
-      }
-
-      await tx.identityTenantMembership.create({
-        data: {
-          identityId: identity.id,
-          tenantId: provisioned.tenant.id,
-          userId: provisioned.user.id,
-        },
-      });
-
-      return provisioned;
-    });
+    } catch (e) {
+      this.logger.error(
+        'Create organization failed',
+        e instanceof Error ? e.stack : String(e),
+      );
+      rethrowAuthDb(e);
+    }
 
     // Auto-enter the new shop (Zoho "Get Started")
     return this.enterOrganization(identityId, result.tenant.id);
@@ -449,7 +462,10 @@ export class PortalAuthService {
     });
 
     const organizations: OrgRow[] = identity.memberships
-      .filter((m) => m.tenant.status === 'active' && m.user.isActive)
+      .filter(
+        (m) =>
+          m.tenant?.status === 'active' && Boolean(m.user?.isActive),
+      )
       .map((m) => ({
         tenantId: m.tenantId,
         name: m.tenant.name,
@@ -579,11 +595,24 @@ export class PortalAuthService {
   }
 
   private async linkUser(identityId: string, tenantId: string, userId: string) {
-    await this.prisma.identityTenantMembership.upsert({
-      where: { userId },
-      create: { identityId, tenantId, userId },
-      update: { identityId, tenantId },
-    });
+    try {
+      await this.prisma.identityTenantMembership.upsert({
+        where: { userId },
+        create: { identityId, tenantId, userId },
+        update: { identityId, tenantId },
+      });
+    } catch (e) {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
+        this.logger.warn(
+          `Identity membership already exists identity=${identityId} tenant=${tenantId}`,
+        );
+        return;
+      }
+      throw e;
+    }
   }
 
   private async bumpIdentityFail(id: string, current: number) {

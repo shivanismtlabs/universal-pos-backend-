@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   UnauthorizedException,
   forwardRef,
 } from '@nestjs/common';
@@ -30,6 +31,10 @@ import { RESERVED_TENANT_SLUGS } from './password.policy';
 import type { AuthUser, JwtPayload, JwtTokenTyp } from './types';
 import { PortalAuthService } from './portal-auth.service';
 import { SecurityService } from '../security/security.service';
+import {
+  isPrismaSchemaMismatch,
+  rethrowAuthDb,
+} from './auth-db-error';
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
@@ -60,6 +65,8 @@ type GoogleTokenInfo = {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
@@ -374,11 +381,28 @@ export class AuthService {
   async login(dto: LoginDto, opts?: { ip?: string }) {
     // Zoho portal path (no slug): identity → organizations
     if (!dto.tenantSlug?.trim()) {
-      const portal = await this.portal.loginPortal({
-        email: dto.email,
-        password: dto.password,
-      });
-      if (portal) return portal;
+      try {
+        const portal = await this.portal.loginPortal({
+          email: dto.email,
+          password: dto.password,
+        });
+        if (portal) return portal;
+      } catch (e) {
+        if (
+          e instanceof UnauthorizedException ||
+          e instanceof ForbiddenException
+        ) {
+          throw e;
+        }
+        this.logger.error(
+          'Portal login failed',
+          e instanceof Error ? e.stack : String(e),
+        );
+        // Identity tables missing (schema not pushed) → fall back to tenant users
+        if (!isPrismaSchemaMismatch(e)) {
+          rethrowAuthDb(e);
+        }
+      }
     }
 
     const email = dto.email.trim().toLowerCase();

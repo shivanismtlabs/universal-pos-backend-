@@ -35,10 +35,20 @@ export class HttpExceptionFilter implements ExceptionFilter {
       }
     } else if (exception instanceof Error) {
       this.logger.error(exception.message, exception.stack);
-      message =
-        process.env.NODE_ENV === 'production'
-          ? 'Internal server error'
-          : exception.message;
+      if (
+        process.env.NODE_ENV === 'production' &&
+        /does not exist|P2021|P2022/.test(exception.message)
+      ) {
+        message =
+          'Database schema is out of date. On the API server run: npx prisma db push && npx prisma generate, then restart.';
+        statusCode = HttpStatus.SERVICE_UNAVAILABLE;
+        error = 'Service Unavailable';
+      } else {
+        message =
+          process.env.NODE_ENV === 'production'
+            ? 'Internal server error'
+            : exception.message;
+      }
     }
 
     const payload: ApiErrorResponse = {

@@ -2334,6 +2334,20 @@ export class PosService {
           }
         }
 
+        if (p.method === PaymentMethod.emi) {
+          const tenure = Number(p.emiTenureMonths);
+          if (!Number.isFinite(tenure) || tenure < 1 || tenure > 36) {
+            throw new BadRequestException(
+              'EMI needs tenure in months (1–36)',
+            );
+          }
+          if (!p.emiProvider?.trim()) {
+            throw new BadRequestException(
+              'EMI needs a provider / bank name',
+            );
+          }
+        }
+
         const payment = await tx.payment.create({
           data: {
             tenantId: user.tenantId,
@@ -2361,6 +2375,16 @@ export class PosService {
                     bankAccountNumber: p.bankAccountNumber?.trim() || null,
                     bankIfsc: p.bankIfsc?.trim() || null,
                     bankName: p.bankName?.trim() || null,
+                  },
+                }
+              : {}),
+            ...(p.method === PaymentMethod.emi
+              ? {
+                  gatewayRef: p.emiReference?.trim() || null,
+                  gatewayPayload: {
+                    emiTenureMonths: Number(p.emiTenureMonths),
+                    emiProvider: p.emiProvider?.trim() || null,
+                    emiReference: p.emiReference?.trim() || null,
                   },
                 }
               : {}),

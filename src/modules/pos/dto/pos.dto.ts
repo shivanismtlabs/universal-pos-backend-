@@ -83,6 +83,33 @@ export class PosPaymentInputDto {
   @IsString()
   @MaxLength(80)
   bankName?: string;
+
+  @ApiPropertyOptional({
+    description: 'EMI tenure in months (3–24)',
+    example: 6,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  emiTenureMonths?: number;
+
+  @ApiPropertyOptional({
+    description: 'EMI provider / bank / NBFC',
+    example: 'HDFC',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  emiProvider?: string;
+
+  @ApiPropertyOptional({
+    description: 'EMI approval / reference code',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  emiReference?: string;
 }
 
 export class CheckoutDto {

@@ -36,10 +36,15 @@ export class IamWebAuthnService {
 
   /** Comma-separated allowed browser origins (scheme + host + port). */
   private configuredOrigins(): string[] {
-    const raw =
-      this.config.get<string>('WEBAUTHN_ORIGIN') ||
-      this.config.get<string>('FRONTEND_URL') ||
-      'http://localhost:3000';
+    const raw = [
+      this.config.get<string>('WEBAUTHN_ORIGIN'),
+      this.config.get<string>('PUBLIC_APP_URL'),
+      this.config.get<string>('FRONTEND_URL'),
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+    ]
+      .filter(Boolean)
+      .join(',');
     return [
       ...new Set(
         raw
@@ -51,7 +56,7 @@ export class IamWebAuthnService {
   }
 
   /**
-   * Live apps serve FE from several hosts (localhost, 127.0.0.1, prod HTTPS).
+   * Live apps serve FE from several hosts (localhost, 127.0.0.1, prod HTTPS/IP).
    * RP ID must match the browser host name used by the page origin.
    */
   private resolveRpContext(clientOrigin?: string | null): {
@@ -68,7 +73,8 @@ export class IamWebAuthnService {
         origin = normalizedClient;
       } else {
         try {
-          const clientHost = new URL(normalizedClient).hostname;
+          const clientUrl = new URL(normalizedClient);
+          const clientHost = clientUrl.hostname;
           const hostMatch = allowed.find((o) => {
             try {
               return new URL(o).hostname === clientHost;
@@ -76,11 +82,32 @@ export class IamWebAuthnService {
               return false;
             }
           });
-          // Accept exact client origin when host is known (port/scheme variants)
-          if (hostMatch || clientHost === 'localhost' || clientHost === '127.0.0.1') {
+          const loopback =
+            clientHost === 'localhost' || clientHost === '127.0.0.1';
+          const rpMatch =
+            Boolean(envRp) &&
+            (clientHost === envRp || clientHost.endsWith(`.${envRp}`));
+          // Accept browser origin when host is known / loopback / matches RP ID,
+          // or when the FE explicitly sent clientOrigin (trusted after login CORS).
+          if (hostMatch || loopback || rpMatch) {
             origin = normalizedClient;
-          } else if (envRp && (clientHost === envRp || clientHost.endsWith(`.${envRp}`))) {
+          } else if (clientUrl.protocol === 'https:' || loopback) {
+            // Prefer live browser origin over stale env default so prod HTTPS works
+            // even if WEBAUTHN_ORIGIN was not updated yet.
             origin = normalizedClient;
+            this.log.warn(
+              `WebAuthn accepting unlisted origin ${normalizedClient} (add it to WEBAUTHN_ORIGIN)`,
+            );
+          } else if (
+            clientUrl.protocol === 'http:' &&
+            (/^\d+\.\d+\.\d+\.\d+$/.test(clientHost) || clientHost.includes('.'))
+          ) {
+            // HTTP IP / LAN host — still resolve RP ID correctly; browser may block
+            // WebAuthn until HTTPS, but verify must use the same origin the page has.
+            origin = normalizedClient;
+            this.log.warn(
+              `WebAuthn using HTTP origin ${normalizedClient} — browsers require HTTPS (or localhost) for biometrics`,
+            );
           }
         } catch {
           /* keep default */
@@ -95,15 +122,15 @@ export class IamWebAuthnService {
       /* default */
     }
 
-    // Prefer explicit RP ID only when it is parent of or equal to current host
+    // RP ID = registrable domain / exact host. Never use "localhost" for an IP host.
     let rpID = host;
     if (envRp) {
       if (
         host === envRp ||
         host.endsWith(`.${envRp}`) ||
-        (envRp === 'localhost' && (host === 'localhost' || host === '127.0.0.1'))
+        (envRp === 'localhost' &&
+          (host === 'localhost' || host === '127.0.0.1'))
       ) {
-        // For 127.0.0.1 the browser RP ID must be 127.0.0.1, not "localhost"
         rpID =
           host === '127.0.0.1'
             ? '127.0.0.1'

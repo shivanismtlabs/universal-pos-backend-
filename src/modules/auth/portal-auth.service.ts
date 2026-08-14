@@ -98,7 +98,27 @@ export class PortalAuthService {
       },
     });
 
-    return this.portalSession(identity.id);
+    // Zoho-style: land in the app immediately. Store details are completed
+    // on Home → Getting Started (not a separate org-setup wall).
+    try {
+      const shopName =
+        fullName.length >= 2 ? fullName.slice(0, 100) : 'My organization';
+      return await this.createOrganization(identity.id, {
+        organizationName: shopName,
+        businessType: 'retail',
+        currencyCode: 'INR',
+        locale: 'en-IN',
+        storeName: 'Main Store',
+        phone,
+      });
+    } catch (e) {
+      this.logger.warn(
+        `Auto-create shop on signup failed: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+      return this.portalSession(identity.id);
+    }
   }
 
   /**

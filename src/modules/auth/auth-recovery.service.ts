@@ -8,6 +8,8 @@ import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import { PrismaService } from '../../database/database.module';
+import { MailService } from '../mail/mail.service';
+import { isPrismaSchemaMismatch } from './auth-db-error';
 import { assertPinAllowed } from './pin.policy';
 
 const BCRYPT_ROUNDS = 12;
@@ -24,6 +26,7 @@ export class AuthRecoveryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly mail: MailService,
   ) {}
 
   /**
@@ -37,10 +40,15 @@ export class AuthRecoveryService {
     }
     await this.throttle(email, 'password_reset');
 
-    const identity = await this.prisma.identityAccount.findUnique({
-      where: { email },
-      select: { id: true, email: true },
-    });
+    let identity: { id: string; email: string } | null = null;
+    try {
+      identity = await this.prisma.identityAccount.findUnique({
+        where: { email },
+        select: { id: true, email: true },
+      });
+    } catch (e) {
+      if (!isPrismaSchemaMismatch(e)) throw e;
+    }
     const anyUser = await this.prisma.user.findFirst({
       where: { email, isActive: true },
       select: { id: true },
@@ -73,20 +81,24 @@ export class AuthRecoveryService {
 
     const passwordHash = await bcrypt.hash(params.newPassword, BCRYPT_ROUNDS);
 
-    const identity = await this.prisma.identityAccount.findUnique({
-      where: { email },
-    });
-    if (identity) {
-      await this.prisma.identityAccount.update({
-        where: { id: identity.id },
-        data: {
-          passwordHash,
-          failedLoginAttempts: 0,
-          lockedUntil: null,
-          refreshTokenHash: null,
-          refreshTokenExpiresAt: null,
-        },
+    try {
+      const identity = await this.prisma.identityAccount.findUnique({
+        where: { email },
       });
+      if (identity) {
+        await this.prisma.identityAccount.update({
+          where: { id: identity.id },
+          data: {
+            passwordHash,
+            failedLoginAttempts: 0,
+            lockedUntil: null,
+            refreshTokenHash: null,
+            refreshTokenExpiresAt: null,
+          },
+        });
+      }
+    } catch (e) {
+      if (!isPrismaSchemaMismatch(e)) throw e;
     }
 
     await this.prisma.user.updateMany({
@@ -191,12 +203,36 @@ export class AuthRecoveryService {
       },
     });
 
-    this.log.log(
-      `OTP ${args.purpose} for ${args.email}: ${code} (expires ${expiresAt.toISOString()})`,
-    );
+    const isProd = this.config.get<string>('NODE_ENV') === 'production';
+    if (isProd) {
+      this.log.log(
+        `OTP ${args.purpose} issued for ${this.maskEmail(args.email)}`,
+      );
+    } else {
+      this.log.log(
+        `OTP ${args.purpose} for ${args.email}: ${code} (expires ${expiresAt.toISOString()})`,
+      );
+    }
 
-    // Optional: wire real email via SMTP later
-    const smtpHook = this.config.get<string>('AUTH_OTP_WEBHOOK_URL');
+    try {
+      const mailed = await this.mail.sendOtp({
+        to: args.email,
+        purpose: args.purpose,
+        code,
+        expiresMinutes: Math.round(OTP_TTL_MS / 60_000),
+      });
+      if (mailed) {
+        this.log.log(`OTP email sent to ${this.maskEmail(args.email)}`);
+      } else if (isProd) {
+        this.log.error(
+          'SMTP is not configured — OTP email was not sent. Set SMTP_HOST, SMTP_USER, SMTP_PASS.',
+        );
+      }
+    } catch (e) {
+      this.log.error(`OTP email failed: ${String(e)}`);
+    }
+
+    const smtpHook = this.config.get<string>('AUTH_OTP_WEBHOOK_URL')?.trim();
     if (smtpHook) {
       try {
         await fetch(smtpHook, {

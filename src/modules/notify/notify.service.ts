@@ -15,6 +15,7 @@ import {
   SendNotificationDto,
 } from './dto/notify.dto';
 import { GupshupWhatsAppProvider } from './gupshup.provider';
+import { MailService } from '../mail/mail.service';
 
 const TEMPLATES: Record<
   string,
@@ -45,26 +46,31 @@ export class NotifyService {
     private readonly prisma: PrismaService,
     private readonly gupshup: GupshupWhatsAppProvider,
     private readonly config: ConfigService,
+    private readonly mail: MailService,
   ) {}
 
   getConfig() {
     const emailWebhook = Boolean(
       this.config.get<string>('EMAIL_WEBHOOK_URL')?.trim(),
     );
+    const smtp = this.mail.isConfigured();
     const smsWebhook = Boolean(
       this.config.get<string>('SMS_WEBHOOK_URL')?.trim(),
     );
+    const emailMode = smtp ? 'smtp' : emailWebhook ? 'webhook' : 'mock';
     return {
       ...this.gupshup.getStatus(),
       channels: {
         whatsapp: true,
         sms: true,
         email: true,
-        emailMode: emailWebhook ? 'webhook' : 'mock',
+        emailMode,
         smsMode: smsWebhook ? 'webhook' : 'mock',
-        note: emailWebhook
-          ? 'Email via EMAIL_WEBHOOK_URL'
-          : 'Email mock until EMAIL_WEBHOOK_URL is set; SMS mock until SMS_WEBHOOK_URL',
+        note: smtp
+          ? 'Email via SMTP'
+          : emailWebhook
+            ? 'Email via EMAIL_WEBHOOK_URL'
+            : 'Email mock until SMTP_HOST/SMTP_USER/SMTP_PASS (or EMAIL_WEBHOOK_URL) is set; SMS mock until SMS_WEBHOOK_URL',
       },
       birthdayReminders: {
         optional: true,
@@ -458,15 +464,20 @@ export class NotifyService {
     to: string,
     text: string,
     vars: Record<string, unknown>,
-  ): Promise<{ mode: 'mock' | 'webhook'; raw?: unknown }> {
+  ): Promise<{ mode: 'mock' | 'webhook' | 'smtp'; raw?: unknown }> {
+    const subject =
+      `Invoice ${String(vars.orderNumber ?? '')}`.trim() ||
+      'Message from Universal POS';
+    if (this.mail.isConfigured()) {
+      await this.mail.send({ to, subject, text });
+      return { mode: 'smtp' };
+    }
     const url = this.config.get<string>('EMAIL_WEBHOOK_URL')?.trim();
     if (!url) {
       this.log.log(`[email] mock send → ${to}: ${text.slice(0, 120)}`);
       return { mode: 'mock' };
     }
-    const from =
-      this.config.get<string>('EMAIL_FROM')?.trim() || 'noreply@universal-pos.local';
-    const subject = `Invoice ${String(vars.orderNumber ?? '')}`.trim() || 'Message from Universal POS';
+    const from = this.mail.fromAddress();
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

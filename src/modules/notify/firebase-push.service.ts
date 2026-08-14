@@ -8,11 +8,19 @@ import {
   type App,
 } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
 import { PrismaService } from '../../database/database.module';
+
+type ServiceAccountJson = {
+  project_id?: string;
+  client_email?: string;
+  private_key?: string;
+};
 
 /**
  * Firebase Cloud Messaging (FCM) push via firebase-admin.
- * No-ops when FIREBASE_SERVICE_ACCOUNT_JSON / FIREBASE_PROJECT_ID not configured.
+ * No-ops when FIREBASE_SERVICE_ACCOUNT_JSON / PATH / ADC not configured.
  */
 @Injectable()
 export class FirebasePushService implements OnModuleInit {
@@ -33,12 +41,60 @@ export class FirebasePushService implements OnModuleInit {
     return this.enabled;
   }
 
+  private loadServiceAccount(): ServiceAccountJson | null {
+    const pathCfg = this.config
+      .get<string>('FIREBASE_SERVICE_ACCOUNT_PATH')
+      ?.trim();
+    const candidates = [
+      pathCfg,
+      this.config.get<string>('GOOGLE_APPLICATION_CREDENTIALS')?.trim(),
+      join(process.cwd(), 'firebase-adminsdk.json'),
+    ].filter(Boolean) as string[];
+
+    for (const p of candidates) {
+      if (!existsSync(p)) continue;
+      try {
+        return JSON.parse(readFileSync(p, 'utf8')) as ServiceAccountJson;
+      } catch (e) {
+        this.log.error(`Invalid Firebase JSON at ${p}: ${String(e)}`);
+      }
+    }
+
+    const raw = this.config.get<string>('FIREBASE_SERVICE_ACCOUNT_JSON')?.trim();
+    if (raw?.startsWith('{')) {
+      try {
+        return JSON.parse(raw) as ServiceAccountJson;
+      } catch {
+        /* dotenv often truncates multiline JSON — recover from .env file */
+      }
+    }
+
+    const envFile = join(process.cwd(), '.env');
+    if (existsSync(envFile)) {
+      try {
+        const text = readFileSync(envFile, 'utf8');
+        const m = text.match(
+          /FIREBASE_SERVICE_ACCOUNT_JSON\s*=\s*(\{[\s\S]*?\n\})/,
+        );
+        if (m?.[1]) {
+          return JSON.parse(m[1]) as ServiceAccountJson;
+        }
+      } catch (e) {
+        this.log.error(
+          `Could not parse FIREBASE_SERVICE_ACCOUNT_JSON from .env: ${String(e)}`,
+        );
+      }
+    }
+    return null;
+  }
+
   private initFirebase() {
-    const jsonRaw = this.config.get<string>('FIREBASE_SERVICE_ACCOUNT_JSON');
-    const projectId = this.config.get<string>('FIREBASE_PROJECT_ID');
-    if (!jsonRaw?.trim() && !projectId) {
+    const projectId = this.config.get<string>('FIREBASE_PROJECT_ID')?.trim();
+    const account = this.loadServiceAccount();
+
+    if (!account && !projectId) {
       this.log.warn(
-        'Firebase push disabled — set FIREBASE_SERVICE_ACCOUNT_JSON (or GOOGLE_APPLICATION_CREDENTIALS)',
+        'Firebase push disabled — set FIREBASE_SERVICE_ACCOUNT_PATH (JSON file) or FIREBASE_SERVICE_ACCOUNT_JSON',
       );
       return;
     }
@@ -51,16 +107,11 @@ export class FirebasePushService implements OnModuleInit {
       }
 
       let credential;
-      if (jsonRaw?.trim()) {
-        const parsed = JSON.parse(jsonRaw) as {
-          project_id?: string;
-          client_email?: string;
-          private_key?: string;
-        };
+      if (account?.client_email && account.private_key) {
         credential = cert({
-          projectId: parsed.project_id ?? projectId,
-          clientEmail: parsed.client_email!,
-          privateKey: parsed.private_key!.replace(/\\n/g, '\n'),
+          projectId: account.project_id ?? projectId,
+          clientEmail: account.client_email,
+          privateKey: account.private_key.replace(/\\n/g, '\n'),
         });
       } else {
         credential = applicationDefault();
@@ -68,7 +119,7 @@ export class FirebasePushService implements OnModuleInit {
 
       this.app = initializeApp({
         credential,
-        projectId: projectId || undefined,
+        projectId: projectId || account?.project_id || undefined,
       });
       this.enabled = true;
       this.log.log('Firebase Admin initialized for FCM push');
@@ -152,7 +203,10 @@ export class FirebasePushService implements OnModuleInit {
       return { sent: 0, skipped: true as const, reason: 'no_tokens' };
     }
 
-    const feOrigin = this.config.get<string>('PUBLIC_APP_URL') ?? '';
+    const feOrigin =
+      this.config.get<string>('PUBLIC_APP_URL')?.trim() ||
+      this.config.get<string>('FRONTEND_URL')?.trim() ||
+      '';
     const clickLink =
       opts.href && opts.href.startsWith('http')
         ? opts.href

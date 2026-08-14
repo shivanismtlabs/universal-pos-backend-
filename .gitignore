@@ -12,6 +12,8 @@ coverage/
 *.key
 credentials.json
 service-account*.json
+firebase-adminsdk.json
+*-firebase-adminsdk*.json
 
 # Logs / OS
 *.log

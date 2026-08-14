@@ -55,3 +55,18 @@ export class ResolveSyncEventDto {
   @IsEnum(SyncStatus)
   syncStatus!: SyncStatus;
 }
+
+export class OfflineSnapshotQueryDto {
+  @ApiProperty({ description: 'Branch / location to seed stock for' })
+  @IsUUID()
+  locationId!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'ISO timestamp — only return entities updated after this (incremental)',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  since?: string;
+}

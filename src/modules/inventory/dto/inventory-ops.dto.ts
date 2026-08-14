@@ -116,6 +116,15 @@ export class SetReorderDto {
   @IsNumber()
   @Min(0)
   reorderQty?: number;
+
+  @ApiPropertyOptional({
+    description: 'Store-wise sell price override (StockLevel.sellPrice)',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  sellPrice?: number;
 }
 
 export class ListLedgerQueryDto {

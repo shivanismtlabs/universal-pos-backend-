@@ -197,6 +197,7 @@ enum NotificationChannel {
   sms
   email
   push
+  in_app
 }
 
 enum SyncStatus {
@@ -329,6 +330,9 @@ model Tenant {
   refundReasons           RefundReason[]
   documents               Document[]
   notificationLogs        NotificationLog[]
+  appNotifications        AppNotification[]
+  userNotificationPrefs   UserNotificationPreference[]
+  devicePushTokens        DevicePushToken[]
   webhookEndpoints        WebhookEndpoint[]
   apiKeys                 ApiKey[]
   offlineSyncEvents       OfflineSyncEvent[]
@@ -483,6 +487,7 @@ model Location {
   userRoles         UserRole[]
   shiftAssignments  ShiftAssignment[]
   attendanceEntries AttendanceEntry[]
+  appNotifications  AppNotification[]
 
   @@unique([tenantId, code])
   @@map("locations")
@@ -628,6 +633,12 @@ model User {
   refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at") @db.Timestamptz(6)
   passwordChangedAt     DateTime? @map("password_changed_at") @db.Timestamptz(6)
   lastLoginAt           DateTime? @map("last_login_at") @db.Timestamptz(6)
+  /// AES-GCM ciphertext of TOTP shared secret (never store plaintext)
+  totpSecretEnc         String?   @map("totp_secret_enc")
+  totpEnabled           Boolean   @default(false) @map("totp_enabled")
+  totpEnabledAt         DateTime? @map("totp_enabled_at") @db.Timestamptz(6)
+  /// bcrypt hashes of one-time backup codes
+  totpBackupHashes      Json      @default("[]") @map("totp_backup_hashes")
   createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -654,6 +665,9 @@ model User {
   webAuthnCredentials WebAuthnCredential[]
   storeCreditLedger   StoreCreditLedgerEntry[]
   customerNotes       CustomerNote[]
+  appNotifications    AppNotification[]
+  notificationPrefs   UserNotificationPreference[]
+  devicePushTokens    DevicePushToken[]
 
   @@unique([tenantId, email])
   @@map("users")
@@ -1865,6 +1879,81 @@ model NotificationLog {
 
   @@index([tenantId, createdAt])
   @@map("notification_logs")
+}
+
+/// In-app notification center (staff inbox) — shared engine delivery target
+model AppNotification {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  locationId String?   @map("location_id") @db.Uuid
+  /// low_stock | daily_sales_summary | shift_close | purchase_reminder | payment_due | inventory_alert …
+  type       String    @db.VarChar(64)
+  /// info | low | critical
+  severity   String    @default("info") @db.VarChar(16)
+  /// unread | read | archived | resolved
+  status     String    @default("unread") @db.VarChar(16)
+  title      String
+  body       String
+  href       String?   @db.VarChar(500)
+  dedupeKey  String?   @map("dedupe_key") @db.VarChar(191)
+  groupKey   String?   @map("group_key") @db.VarChar(191)
+  payload    Json      @default("{}")
+  readAt     DateTime? @map("read_at") @db.Timestamptz(6)
+  resolvedAt DateTime? @map("resolved_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  location Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, userId, status, createdAt])
+  @@index([tenantId, type, locationId])
+  @@map("app_notifications")
+}
+
+/// Per-user channel toggles for each notification type
+model UserNotificationPreference {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  type      String   @db.VarChar(64)
+  enabled   Boolean  @default(true)
+  inApp     Boolean  @default(true) @map("in_app")
+  email     Boolean  @default(false)
+  push      Boolean  @default(true)
+  sms       Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId, type])
+  @@map("user_notification_preferences")
+}
+
+/// FCM / device tokens for Firebase push
+model DevicePushToken {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  token      String
+  /// web | android | ios
+  platform   String   @default("web") @db.VarChar(16)
+  userAgent  String?  @map("user_agent") @db.VarChar(500)
+  isActive   Boolean  @default(true) @map("is_active")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, token])
+  @@index([tenantId, userId, isActive])
+  @@map("device_push_tokens")
 }
 
 model WebhookEndpoint {

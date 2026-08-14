@@ -223,6 +223,49 @@ export class CreateLocationDto {
   @IsOptional()
   @IsBoolean()
   isMain?: boolean;
+
+  @ApiPropertyOptional({ example: '+91 98765 43210' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  phone?: string;
+
+  @ApiPropertyOptional({ example: 'indore@shop.com' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  email?: string;
+
+  @ApiPropertyOptional({ description: 'Branch manager user id' })
+  @IsOptional()
+  @IsUUID()
+  managerUserId?: string;
+
+  @ApiPropertyOptional({ example: 'Mon–Sat 10:00–21:00' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  businessHours?: string;
+
+  @ApiPropertyOptional({ example: 'Asia/Kolkata' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  timezone?: string;
+
+  @ApiPropertyOptional({ example: 'INR' })
+  @IsOptional()
+  @IsString()
+  @MinLength(3)
+  @MaxLength(3)
+  currencyCode?: string;
+
+  @ApiPropertyOptional({
+    description: 'Default warehouse location id for this store',
+  })
+  @IsOptional()
+  @IsUUID()
+  defaultWarehouseId?: string;
 }
 
 /** @deprecated Use CreateLocationDto */
@@ -259,6 +302,47 @@ export class UpdateLocationDto {
   @IsOptional()
   @IsIn(['store', 'branch', 'warehouse', 'clinic', 'kitchen', 'office', 'other'])
   type?: 'store' | 'branch' | 'warehouse' | 'clinic' | 'kitchen' | 'office' | 'other';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  phone?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  email?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  managerUserId?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  businessHours?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  timezone?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MinLength(3)
+  @MaxLength(3)
+  currencyCode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  defaultWarehouseId?: string | null;
 }
 
 /** @deprecated Use UpdateLocationDto */

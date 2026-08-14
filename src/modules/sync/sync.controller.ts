@@ -16,6 +16,7 @@ import type { AuthUser } from '../auth/types';
 import {
   CreateSyncEventDto,
   ListSyncEventsQueryDto,
+  OfflineSnapshotQueryDto,
   ResolveSyncEventDto,
 } from './dto/sync.dto';
 import { SyncService } from './sync.service';
@@ -27,13 +28,34 @@ import { SyncService } from './sync.service';
 export class SyncController {
   constructor(private readonly syncService: SyncService) {}
 
+  @Get('ping')
+  @Roles(...RoleGroup.all)
+  @ApiOperation({
+    summary: 'Reachability probe — used by offline connectivity detector',
+  })
+  ping() {
+    return this.syncService.ping();
+  }
+
+  @Get('snapshot')
+  @ApiOperation({
+    summary:
+      'Offline seed / incremental download (catalog, stock, customers, coupons, staff PIN hashes)',
+  })
+  snapshot(
+    @CurrentUser() user: AuthUser,
+    @Query() query: OfflineSnapshotQueryDto,
+  ) {
+    return this.syncService.snapshot(user, query);
+  }
+
   @Post('events')
   @ApiOperation({
     summary: 'Push an offline event (idempotent on clientEventId per tenant)',
   })
   createEvent(@CurrentUser() user: AuthUser, @Body() dto: CreateSyncEventDto) {
     return this.syncService.createEvent(user, dto);
-  } 
+  }
 
   @Get('events')
   @ApiOperation({ summary: 'List synced offline events' })

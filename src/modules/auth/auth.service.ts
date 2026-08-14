@@ -2,8 +2,10 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   UnauthorizedException,
+  forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -27,6 +29,7 @@ import { assertPinAllowed, isPinSwitchEnabled } from './pin.policy';
 import { RESERVED_TENANT_SLUGS } from './password.policy';
 import type { AuthUser, JwtPayload, JwtTokenTyp } from './types';
 import { PortalAuthService } from './portal-auth.service';
+import { SecurityService } from '../security/security.service';
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
@@ -61,7 +64,9 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    @Inject(forwardRef(() => PortalAuthService))
     private readonly portal: PortalAuthService,
+    private readonly security: SecurityService,
   ) {}
 
   async registerTenant(dto: RegisterTenantDto) {
@@ -366,7 +371,7 @@ export class AuthService {
     return payload;
   }
 
-  async login(dto: LoginDto) {
+  async login(dto: LoginDto, opts?: { ip?: string }) {
     // Zoho portal path (no slug): identity → organizations
     if (!dto.tenantSlug?.trim()) {
       const portal = await this.portal.loginPortal({
@@ -496,6 +501,19 @@ export class AuthService {
       })
       .catch(() => null);
 
+    if (opts?.ip) {
+      await this.security.assertTenantIp(user.tenantId, opts.ip);
+    }
+
+    if (user.totpEnabled) {
+      return this.issueTotpChallenge({
+        userId: user.id,
+        tenantId: user.tenantId,
+        email: user.email,
+        fullName: user.fullName,
+      });
+    }
+
     const roles = user.userRoles.map((ur) => ur.role.code);
     const permissions = await this.loadPermissionsForUser(user.id, roles);
     const locationId = user.primaryLocationId;
@@ -528,9 +546,130 @@ export class AuthService {
         entityType: 'user',
         entityId: user.id,
         action: 'auth.login',
+        ip: opts?.ip ?? null,
       },
     });
 
+    return {
+      stage: 'app' as const,
+      requiresOrganizationSelection: false,
+      user: {
+        id: user.id,
+        email: user.email,
+        fullName: user.fullName,
+        roles,
+        permissions,
+        locationId,
+        storeId: locationId,
+        tenantId: user.tenantId,
+        pinSet: Boolean(user.pinHash),
+      },
+      tenant: {
+        id: user.tenant.id,
+        slug: user.tenant.slug,
+        name: user.tenant.name,
+      },
+      ...tokens,
+    };
+  }
+
+  async issueTotpChallenge(opts: {
+    userId: string;
+    tenantId: string;
+    email: string;
+    fullName: string;
+    identityId?: string;
+  }) {
+    const totpToken = await this.jwt.signAsync(
+      {
+        sub: opts.userId,
+        tenantId: opts.tenantId,
+        email: opts.email,
+        roles: [],
+        typ: 'totp_pending' as JwtTokenTyp,
+        identityId: opts.identityId,
+      },
+      {
+        secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+        expiresIn: '5m',
+      },
+    );
+    return {
+      requires2fa: true as const,
+      totpToken,
+      user: {
+        id: opts.userId,
+        email: opts.email,
+        fullName: opts.fullName,
+        tenantId: opts.tenantId,
+      },
+    };
+  }
+
+  async loginWith2fa(totpToken: string, code: string, ip?: string) {
+    let payload: JwtPayload & { identityId?: string };
+    try {
+      payload = await this.jwt.verifyAsync(totpToken, {
+        secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+      });
+    } catch {
+      throw new UnauthorizedException('2FA session expired. Sign in again.');
+    }
+    if (payload.typ !== 'totp_pending' || !payload.sub || !payload.tenantId) {
+      throw new UnauthorizedException('Invalid 2FA session');
+    }
+
+    await this.security.consumeTotpOrBackup(
+      payload.sub,
+      payload.tenantId,
+      code,
+    );
+    if (ip) {
+      await this.security.assertTenantIp(payload.tenantId, ip);
+    }
+
+    const user = await this.prisma.user.findFirst({
+      where: {
+        id: payload.sub,
+        tenantId: payload.tenantId,
+        isActive: true,
+        tenant: { status: 'active' },
+      },
+      include: {
+        userRoles: { include: { role: true } },
+        tenant: true,
+      },
+    });
+    if (!user) throw new UnauthorizedException('User not found');
+
+    const roles = user.userRoles.map((ur) => ur.role.code);
+    const permissions = await this.loadPermissionsForUser(user.id, roles);
+    const locationId = user.primaryLocationId;
+    const authUser: AuthUser = {
+      userId: user.id,
+      tenantId: user.tenantId,
+      email: user.email,
+      fullName: user.fullName,
+      locationId,
+      storeId: locationId,
+      roles,
+      permissions,
+    };
+    const tokens = await this.issueTokens(authUser);
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date(), failedLoginAttempts: 0, lockedUntil: null },
+    });
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: user.tenantId,
+        actorUserId: user.id,
+        entityType: 'user',
+        entityId: user.id,
+        action: 'auth.2fa_verified',
+        ip: ip ?? null,
+      },
+    });
     return {
       stage: 'app' as const,
       requiresOrganizationSelection: false,

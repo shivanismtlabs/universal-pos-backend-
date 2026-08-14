@@ -1,8 +1,10 @@
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
   UnauthorizedException,
+  forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -23,6 +25,8 @@ import type {
   CreateOrganizationDto,
   SignupIdentityDto,
 } from './dto/auth.dto';
+import { AuthService } from './auth.service';
+import { SecurityService } from '../security/security.service';
 
 const BCRYPT_ROUNDS = 12;
 const DUMMY_PASSWORD_HASH =
@@ -42,6 +46,9 @@ export class PortalAuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    @Inject(forwardRef(() => AuthService))
+    private readonly auth: AuthService,
+    private readonly security: SecurityService,
   ) {}
 
   // ── Public portal entrypoints ───────────────────────────────────────
@@ -389,8 +396,12 @@ export class PortalAuthService {
     return this.enterOrganization(identityId, result.tenant.id);
   }
 
-  async selectOrganization(identityId: string, tenantId: string) {
-    return this.enterOrganization(identityId, tenantId);
+  async selectOrganization(
+    identityId: string,
+    tenantId: string,
+    ip?: string,
+  ) {
+    return this.enterOrganization(identityId, tenantId, ip);
   }
 
   async requireIdentityFromAuthHeader(authHeader?: string) {
@@ -468,7 +479,11 @@ export class PortalAuthService {
     };
   }
 
-  private async enterOrganization(identityId: string, tenantId: string) {
+  private async enterOrganization(
+    identityId: string,
+    tenantId: string,
+    ip?: string,
+  ) {
     const membership = await this.prisma.identityTenantMembership.findFirst({
       where: { identityId, tenantId },
       include: {
@@ -489,6 +504,19 @@ export class PortalAuthService {
     }
 
     const user = membership.user;
+    if (ip) {
+      await this.security.assertTenantIp(user.tenantId, ip);
+    }
+    if (user.totpEnabled) {
+      return this.auth.issueTotpChallenge({
+        userId: user.id,
+        tenantId: user.tenantId,
+        email: user.email,
+        fullName: user.fullName,
+        identityId,
+      });
+    }
+
     const roles = user.userRoles.map((ur) => ur.role.code);
     const roleIds = user.userRoles.map((ur) => ur.roleId);
     const permRows =

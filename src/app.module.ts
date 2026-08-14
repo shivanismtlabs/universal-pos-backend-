@@ -16,6 +16,7 @@ import { IamModule } from './modules/iam/iam.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { LoyaltyModule } from './modules/loyalty/loyalty.module';
 import { NotifyModule } from './modules/notify/notify.module';
+import { SecurityModule } from './modules/security/security.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { PlatformBillingModule } from './modules/platform-billing/platform-billing.module';
@@ -57,6 +58,7 @@ const enableQueues = process.env.ENABLE_QUEUES === 'true';
     ReturnsModule,
     ReportsModule,
     NotifyModule,
+    SecurityModule,
     ExpensesModule,
     LoyaltyModule,
     IamModule,

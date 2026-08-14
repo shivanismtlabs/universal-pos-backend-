@@ -50,7 +50,7 @@ export async function ensurePlatformCatalog(tx: Tx) {
       name: 'Starter',
       priceAmount: 999,
       currencyCode: 'INR',
-      limits: { locations: 2, users: 10 },
+      limits: { locations: null, users: 10 },
       features: {
         modules: [
           'core',
@@ -68,6 +68,7 @@ export async function ensurePlatformCatalog(tx: Tx) {
       },
     },
     update: {
+      limits: { locations: null, users: 10 },
       features: {
         modules: [
           'core',
@@ -93,7 +94,7 @@ export async function ensurePlatformCatalog(tx: Tx) {
       name: 'Professional',
       priceAmount: 2999,
       currencyCode: 'INR',
-      limits: { locations: 10, users: 50 },
+      limits: { locations: null, users: 50 },
       features: {
         modules: [
           'core',
@@ -110,7 +111,9 @@ export async function ensurePlatformCatalog(tx: Tx) {
         ],
       },
     },
-    update: {},
+    update: {
+      limits: { locations: null, users: 50 },
+    },
   });
 }
 

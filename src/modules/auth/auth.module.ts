@@ -4,6 +4,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { SecurityModule } from '../security/security.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { PortalAuthService } from './portal-auth.service';
@@ -28,6 +29,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
         limit: 100,
       },
     ]),
+    SecurityModule,
   ],
   controllers: [AuthController],
   providers: [

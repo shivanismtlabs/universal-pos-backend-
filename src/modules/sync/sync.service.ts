@@ -13,6 +13,7 @@ import { PaymentMethod, PaymentType } from '@prisma/client';
 import {
   CreateSyncEventDto,
   ListSyncEventsQueryDto,
+  OfflineSnapshotQueryDto,
   ResolveSyncEventDto,
 } from './dto/sync.dto';
 
@@ -26,6 +27,283 @@ export class SyncService {
     private readonly prisma: PrismaService,
     private readonly paymentsService: PaymentsService,
   ) {}
+
+  /** Lightweight reachability probe for offline connectivity detection */
+  ping() {
+    return { ok: true as const, ts: new Date().toISOString() };
+  }
+
+  /**
+   * Download snapshot for local-first POS: catalog, stock, customers,
+   * promotions, staff PIN hashes (never plaintext passwords).
+   */
+  async snapshot(user: AuthUser, query: OfflineSnapshotQueryDto) {
+    const location = await this.prisma.location.findFirst({
+      where: { id: query.locationId, tenantId: user.tenantId },
+      select: { id: true, name: true, code: true, settings: true },
+    });
+    if (!location) throw new NotFoundException('Location not found');
+
+    let since: Date | null = null;
+    if (query.since?.trim()) {
+      const d = new Date(query.since);
+      if (Number.isNaN(d.getTime())) {
+        throw new BadRequestException('Invalid since timestamp');
+      }
+      since = d;
+    }
+
+    const locSettings =
+      location.settings && typeof location.settings === 'object'
+        ? (location.settings as Record<string, unknown>)
+        : {};
+
+    const productWhere: Prisma.ProductWhereInput = {
+      tenantId: user.tenantId,
+      availableInPos: true,
+      status: { in: ['active', 'inactive'] },
+      ...(since ? { updatedAt: { gt: since } } : {}),
+    };
+
+    const stockWhere: Prisma.StockLevelWhereInput = {
+      tenantId: user.tenantId,
+      locationId: query.locationId,
+      ...(since ? { updatedAt: { gt: since } } : {}),
+    };
+
+    const customerWhere: Prisma.CustomerWhereInput = {
+      tenantId: user.tenantId,
+      deletedAt: null,
+      ...(since ? { updatedAt: { gt: since } } : {}),
+    };
+
+    const couponWhere: Prisma.CouponWhereInput = {
+      tenantId: user.tenantId,
+      isActive: true,
+      ...(since ? { updatedAt: { gt: since } } : {}),
+    };
+
+    const [
+      products,
+      stockLevels,
+      customers,
+      coupons,
+      categories,
+      staff,
+      tenant,
+    ] = await Promise.all([
+      this.prisma.product.findMany({
+        where: productWhere,
+        orderBy: { name: 'asc' },
+        take: since ? 2000 : 3000,
+        select: {
+          id: true,
+          name: true,
+          shortName: true,
+          skuCode: true,
+          barcode: true,
+          categoryId: true,
+          kind: true,
+          status: true,
+          basePrice: true,
+          mrp: true,
+          taxCode: true,
+          unitOfMeasure: true,
+          trackQty: true,
+          canSell: true,
+          availableInPos: true,
+          photoUrl: true,
+          updatedAt: true,
+        },
+      }),
+      this.prisma.stockLevel.findMany({
+        where: stockWhere,
+        take: since ? 5000 : 8000,
+        select: {
+          id: true,
+          productId: true,
+          locationId: true,
+          sku: true,
+          qtyOnHand: true,
+          qtyDamaged: true,
+          reorderPoint: true,
+          sellPrice: true,
+          updatedAt: true,
+        },
+      }),
+      this.prisma.customer.findMany({
+        where: customerWhere,
+        orderBy: { updatedAt: 'desc' },
+        take: since ? 2000 : 5000,
+        select: {
+          id: true,
+          fullName: true,
+          phone: true,
+          email: true,
+          creditLimit: true,
+          storeCreditBalance: true,
+          loyaltyPoints: true,
+          updatedAt: true,
+        },
+      }),
+      this.prisma.coupon.findMany({
+        where: couponWhere,
+        take: 500,
+        select: {
+          id: true,
+          code: true,
+          description: true,
+          discountType: true,
+          discountValue: true,
+          minOrderAmount: true,
+          maxRedemptions: true,
+          redemptionCount: true,
+          startsAt: true,
+          endsAt: true,
+          isActive: true,
+          updatedAt: true,
+        },
+      }),
+      this.prisma.category.findMany({
+        where: {
+          tenantId: user.tenantId,
+          ...(since ? { updatedAt: { gt: since } } : {}),
+        },
+        select: {
+          id: true,
+          name: true,
+          parentId: true,
+          updatedAt: true,
+        },
+        take: 1000,
+      }),
+      this.prisma.user.findMany({
+        where: {
+          tenantId: user.tenantId,
+          isActive: true,
+          pinHash: { not: null },
+          ...(since ? { updatedAt: { gt: since } } : {}),
+        },
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          pinHash: true,
+          primaryLocationId: true,
+          updatedAt: true,
+          userRoles: {
+            select: { role: { select: { code: true } } },
+          },
+        },
+        take: 200,
+      }),
+      this.prisma.tenant.findUnique({
+        where: { id: user.tenantId },
+        select: { settings: true, currencyCode: true, taxMode: true },
+      }),
+    ]);
+
+    const settings =
+      tenant?.settings && typeof tenant.settings === 'object'
+        ? (tenant.settings as Record<string, unknown>)
+        : {};
+    const offline =
+      settings.offline && typeof settings.offline === 'object'
+        ? (settings.offline as Record<string, unknown>)
+        : {};
+
+    const serverTime = new Date().toISOString();
+
+    return {
+      serverTime,
+      location: {
+        id: location.id,
+        name: location.name,
+        code: location.code,
+        timezone:
+          typeof locSettings.timezone === 'string'
+            ? locSettings.timezone
+            : null,
+      },
+      incremental: Boolean(since),
+      since: since?.toISOString() ?? null,
+      offlinePolicy: {
+        maxSaleAmount:
+          typeof offline.maxSaleAmount === 'number'
+            ? offline.maxSaleAmount
+            : null,
+        blockStoreCredit: offline.blockStoreCredit === true,
+        managerPinAbove:
+          typeof offline.managerPinAbove === 'number'
+            ? offline.managerPinAbove
+            : null,
+        saleHistoryMonths:
+          typeof offline.saleHistoryMonths === 'number'
+            ? offline.saleHistoryMonths
+            : 3,
+      },
+      tax: {
+        mode: tenant?.taxMode ?? 'in_gst',
+        currency: tenant?.currencyCode ?? 'INR',
+      },
+      counts: {
+        products: products.length,
+        stockLevels: stockLevels.length,
+        customers: customers.length,
+        coupons: coupons.length,
+        categories: categories.length,
+        staff: staff.length,
+      },
+      products: products.map((p) => ({
+        ...p,
+        basePrice: Number(p.basePrice),
+        mrp: p.mrp != null ? Number(p.mrp) : null,
+        updatedAt: p.updatedAt.toISOString(),
+      })),
+      stockLevels: stockLevels.map((s) => ({
+        ...s,
+        qtyOnHand: Number(s.qtyOnHand),
+        qtyDamaged: Number(s.qtyDamaged),
+        reorderPoint:
+          s.reorderPoint != null ? Number(s.reorderPoint) : null,
+        sellPrice: Number(s.sellPrice),
+        updatedAt: s.updatedAt.toISOString(),
+      })),
+      customers: customers.map((c) => ({
+        id: c.id,
+        name: c.fullName,
+        phone: c.phone,
+        email: c.email,
+        creditLimit:
+          c.creditLimit != null ? Number(c.creditLimit) : null,
+        storeCreditBalance: Number(c.storeCreditBalance ?? 0),
+        loyaltyPoints: Number(c.loyaltyPoints ?? 0),
+        updatedAt: c.updatedAt.toISOString(),
+      })),
+      coupons: coupons.map((c) => ({
+        ...c,
+        discountValue: Number(c.discountValue),
+        minOrderAmount:
+          c.minOrderAmount != null ? Number(c.minOrderAmount) : null,
+        startsAt: c.startsAt?.toISOString() ?? null,
+        endsAt: c.endsAt?.toISOString() ?? null,
+        updatedAt: c.updatedAt.toISOString(),
+      })),
+      categories: categories.map((c) => ({
+        ...c,
+        updatedAt: c.updatedAt.toISOString(),
+      })),
+      staff: staff.map((u) => ({
+        id: u.id,
+        fullName: u.fullName,
+        email: u.email,
+        pinHash: u.pinHash,
+        primaryLocationId: u.primaryLocationId,
+        roles: u.userRoles.map((r) => r.role.code),
+        updatedAt: u.updatedAt.toISOString(),
+      })),
+    };
+  }
 
   async createEvent(user: AuthUser, dto: CreateSyncEventDto) {
     const locationId = dto.storeId;

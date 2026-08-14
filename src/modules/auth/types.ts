@@ -1,4 +1,9 @@
-export type JwtTokenTyp = 'access' | 'refresh' | 'station' | 'pin_access';
+export type JwtTokenTyp =
+  | 'access'
+  | 'refresh'
+  | 'station'
+  | 'pin_access'
+  | 'totp_pending';
 
 export type JwtPayload = {
   sub: string;

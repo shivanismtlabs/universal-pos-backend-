@@ -14,6 +14,13 @@ import {
   UpdateTenantDto,
 } from './dto/tenants.dto';
 import { ensureTenantTaxSettings } from '../../common/tax-engine';
+import {
+  assertLocationAccess,
+  mergeLocationSettings,
+  parseLocationSettings,
+  resolveAllowedLocationIds,
+} from '../../common/location-access';
+import { Role } from '../../common/roles';
 
 const TENANT_SELECT = {
   id: true,
@@ -238,11 +245,18 @@ export class TenantsService {
   }
 
   /** Locations (stores / warehouses / …). Also exposed as /stores for compat. */
-  listLocations(user: AuthUser) {
-    return this.prisma.location.findMany({
-      where: { tenantId: user.tenantId },
+  async listLocations(user: AuthUser) {
+    const allowed = await resolveAllowedLocationIds(this.prisma, user, {
+      includeInactive: true,
+    });
+    const rows = await this.prisma.location.findMany({
+      where: {
+        tenantId: user.tenantId,
+        ...(allowed === 'all' ? {} : { id: { in: allowed } }),
+      },
       orderBy: { createdAt: 'asc' },
     });
+    return rows.map((r) => this.mapLocation(r));
   }
 
   listStores(user: AuthUser) {
@@ -263,9 +277,10 @@ export class TenantsService {
       orderBy: { createdAt: 'desc' },
     });
     if (sub) {
-      const limits = (sub.plan.limits ?? {}) as { locations?: number };
+      const limits = (sub.plan.limits ?? {}) as { locations?: number | null };
       const maxLoc = limits.locations;
-      if (typeof maxLoc === 'number') {
+      // null / undefined / <= 0 ⇒ unlimited branches
+      if (typeof maxLoc === 'number' && maxLoc > 0) {
         const used = await this.prisma.location.count({
           where: { tenantId: user.tenantId },
         });
@@ -286,6 +301,26 @@ export class TenantsService {
       organizationId = def?.id;
     }
 
+    if (dto.managerUserId) {
+      await this.assertManagerUser(user.tenantId, dto.managerUserId);
+    }
+    if (dto.defaultWarehouseId) {
+      await this.assertWarehouse(user.tenantId, dto.defaultWarehouseId);
+    }
+
+    const settings = mergeLocationSettings(
+      {},
+      {
+        phone: dto.phone,
+        email: dto.email,
+        managerUserId: dto.managerUserId,
+        businessHours: dto.businessHours,
+        timezone: dto.timezone,
+        currencyCode: dto.currencyCode,
+        defaultWarehouseId: dto.defaultWarehouseId,
+      },
+    );
+
     try {
       const location = await this.prisma.location.create({
         data: {
@@ -297,6 +332,7 @@ export class TenantsService {
           address: dto.address?.trim(),
           regionCode: dto.regionCode?.trim(),
           isActive: true,
+          settings: settings as Prisma.InputJsonValue,
         },
       });
       if (sub) {
@@ -305,7 +341,23 @@ export class TenantsService {
           data: { locationsUsed: { increment: 1 } },
         });
       }
-      return location;
+      await this.prisma.auditLog.create({
+        data: {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          entityType: 'location',
+          entityId: location.id,
+          action: 'branch.created',
+          beforeAfter: {
+            after: {
+              name: location.name,
+              code: location.code,
+              type: location.type,
+            },
+          },
+        },
+      });
+      return this.mapLocation(location);
     } catch (e) {
       throwIfUnique(e, 'Location code already exists for this tenant');
     }
@@ -316,11 +368,14 @@ export class TenantsService {
   }
 
   async getLocation(user: AuthUser, id: string) {
+    await assertLocationAccess(this.prisma, user, id, {
+      requireActive: false,
+    });
     const location = await this.prisma.location.findFirst({
       where: { id, tenantId: user.tenantId },
     });
     if (!location) throw new NotFoundException('Location not found');
-    return location;
+    return this.mapLocation(location);
   }
 
   getStore(user: AuthUser, id: string) {
@@ -328,7 +383,35 @@ export class TenantsService {
   }
 
   async updateLocation(user: AuthUser, id: string, dto: UpdateLocationDto) {
-    await this.getLocation(user, id);
+    await assertLocationAccess(this.prisma, user, id, {
+      requireActive: false,
+    });
+    const existing = await this.prisma.location.findFirst({
+      where: { id, tenantId: user.tenantId },
+    });
+    if (!existing) throw new NotFoundException('Location not found');
+
+    if (dto.isActive === false && existing.isActive) {
+      // Soft-deactivate only — never hard-delete branches with history
+      // (delete endpoint intentionally omitted)
+    }
+
+    if (dto.managerUserId) {
+      await this.assertManagerUser(user.tenantId, dto.managerUserId);
+    }
+    if (dto.defaultWarehouseId) {
+      await this.assertWarehouse(user.tenantId, dto.defaultWarehouseId);
+    }
+
+    const settingsPatch: Record<string, unknown> = {};
+    const hasSettingsPatch =
+      dto.phone !== undefined ||
+      dto.email !== undefined ||
+      dto.managerUserId !== undefined ||
+      dto.businessHours !== undefined ||
+      dto.timezone !== undefined ||
+      dto.currencyCode !== undefined ||
+      dto.defaultWarehouseId !== undefined;
 
     const data: Prisma.LocationUpdateInput = {};
     if (dto.name !== undefined) data.name = dto.name.trim();
@@ -336,12 +419,287 @@ export class TenantsService {
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
     if (dto.regionCode !== undefined) data.regionCode = dto.regionCode;
     if (dto.type !== undefined) data.type = dto.type;
+    if (hasSettingsPatch) {
+      data.settings = mergeLocationSettings(existing.settings, {
+        phone: dto.phone,
+        email: dto.email,
+        managerUserId: dto.managerUserId,
+        businessHours: dto.businessHours,
+        timezone: dto.timezone,
+        currencyCode: dto.currencyCode,
+        defaultWarehouseId: dto.defaultWarehouseId,
+      }) as Prisma.InputJsonValue;
+      Object.assign(settingsPatch, data.settings as object);
+    }
 
-    return this.prisma.location.update({ where: { id }, data });
+    const updated = await this.prisma.location.update({ where: { id }, data });
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        entityType: 'location',
+        entityId: id,
+        action:
+          dto.isActive === false && existing.isActive
+            ? 'branch.deactivated'
+            : dto.isActive === true && !existing.isActive
+              ? 'branch.activated'
+              : 'branch.updated',
+        beforeAfter: {
+          before: {
+            name: existing.name,
+            isActive: existing.isActive,
+            settings: parseLocationSettings(existing.settings),
+          },
+          after: {
+            name: updated.name,
+            isActive: updated.isActive,
+            settings: parseLocationSettings(updated.settings),
+          },
+        },
+      },
+    });
+    return this.mapLocation(updated);
   }
 
   updateStore(user: AuthUser, id: string, dto: UpdateLocationDto) {
     return this.updateLocation(user, id, dto);
+  }
+
+  /** Branch KPIs for dashboard — scoped + ACL */
+  async branchDashboard(user: AuthUser, locationId: string) {
+    await assertLocationAccess(this.prisma, user, locationId, {
+      requireActive: false,
+    });
+    const loc = await this.prisma.location.findFirst({
+      where: { id: locationId, tenantId: user.tenantId },
+    });
+    if (!loc) throw new NotFoundException('Location not found');
+
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date();
+    end.setHours(23, 59, 59, 999);
+
+    const [
+      todayOrders,
+      todaySalesAgg,
+      todayRefunds,
+      todayExpensesAgg,
+      outOfStock,
+      openRegister,
+      levels,
+    ] = await Promise.all([
+      this.prisma.order.count({
+        where: {
+          tenantId: user.tenantId,
+          locationId,
+          createdAt: { gte: start, lte: end },
+          status: { in: ['closed', 'fulfilled', 'ready'] },
+        },
+      }),
+      this.prisma.order.aggregate({
+        where: {
+          tenantId: user.tenantId,
+          locationId,
+          createdAt: { gte: start, lte: end },
+          status: { not: 'cancelled' },
+        },
+        _sum: { subtotal: true, taxTotal: true },
+        _count: true,
+      }),
+      this.prisma.returnEvent.count({
+        where: {
+          tenantId: user.tenantId,
+          createdAt: { gte: start, lte: end },
+          order: { locationId },
+        },
+      }),
+      this.prisma.expense.aggregate({
+        where: {
+          tenantId: user.tenantId,
+          locationId,
+          spentAt: { gte: start, lte: end },
+          status: 'approved',
+        },
+        _sum: { amount: true },
+        _count: true,
+      }),
+      this.prisma.stockLevel.count({
+        where: {
+          tenantId: user.tenantId,
+          locationId,
+          qtyOnHand: { lte: 0 },
+        },
+      }),
+      this.prisma.registerSession.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          locationId,
+          closedAt: null,
+        },
+        select: { id: true, openedAt: true, openingFloat: true },
+      }),
+      this.prisma.stockLevel.findMany({
+        where: { tenantId: user.tenantId, locationId },
+        select: {
+          qtyOnHand: true,
+          sellPrice: true,
+          reorderPoint: true,
+        },
+        take: 5000,
+      }),
+    ]);
+
+    const lowStockCount = levels.filter((l) => {
+      const q = Number(l.qtyOnHand);
+      const rp = l.reorderPoint != null ? Number(l.reorderPoint) : 5;
+      return q > 0 && q <= rp;
+    }).length;
+
+    const invValue = levels.reduce(
+      (sum, r) => sum + Number(r.qtyOnHand) * Number(r.sellPrice),
+      0,
+    );
+
+    const salesTotal =
+      Number(todaySalesAgg._sum.subtotal ?? 0) +
+      Number(todaySalesAgg._sum.taxTotal ?? 0);
+
+    return {
+      branch: this.mapLocation(loc),
+      today: {
+        salesTotal,
+        orders: todaySalesAgg._count || todayOrders,
+        refunds: todayRefunds,
+        expensesTotal: Number(todayExpensesAgg._sum.amount ?? 0),
+        expensesCount: todayExpensesAgg._count,
+      },
+      inventory: {
+        value: Math.round(invValue * 100) / 100,
+        lowStock: lowStockCount,
+        outOfStock,
+      },
+      registerOpen: Boolean(openRegister),
+      register: openRegister,
+    };
+  }
+
+  /** HQ rollup across allowed branches */
+  async multiStoreDashboard(user: AuthUser) {
+    const allowed = await resolveAllowedLocationIds(this.prisma, user);
+    const locations = await this.prisma.location.findMany({
+      where: {
+        tenantId: user.tenantId,
+        isActive: true,
+        ...(allowed === 'all' ? {} : { id: { in: allowed } }),
+      },
+      orderBy: { name: 'asc' },
+      select: { id: true, name: true, code: true, type: true },
+    });
+
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date();
+    end.setHours(23, 59, 59, 999);
+
+    const byBranch = await Promise.all(
+      locations.map(async (loc) => {
+        const sales = await this.prisma.order.aggregate({
+          where: {
+            tenantId: user.tenantId,
+            locationId: loc.id,
+            createdAt: { gte: start, lte: end },
+            status: { not: 'cancelled' },
+          },
+          _sum: { subtotal: true, taxTotal: true },
+          _count: true,
+        });
+        const todaySales =
+          Number(sales._sum.subtotal ?? 0) + Number(sales._sum.taxTotal ?? 0);
+        return {
+          locationId: loc.id,
+          name: loc.name,
+          code: loc.code,
+          type: loc.type,
+          todaySales,
+          todayOrders: sales._count,
+        };
+      }),
+    );
+
+    const totalSales = byBranch.reduce((s, b) => s + b.todaySales, 0);
+    const totalOrders = byBranch.reduce((s, b) => s + b.todayOrders, 0);
+
+    return {
+      totalStores: locations.length,
+      activeStores: locations.length,
+      today: { salesTotal: totalSales, orders: totalOrders },
+      byBranch,
+      canViewAll: allowed === 'all' || user.roles?.includes(Role.admin),
+    };
+  }
+
+  private mapLocation(row: {
+    id: string;
+    tenantId: string;
+    organizationId: string | null;
+    name: string;
+    code: string;
+    type: string;
+    address: string | null;
+    regionCode: string | null;
+    isActive: boolean;
+    settings: unknown;
+    createdAt: Date;
+    updatedAt: Date;
+  }) {
+    const s = parseLocationSettings(row.settings);
+    return {
+      id: row.id,
+      tenantId: row.tenantId,
+      organizationId: row.organizationId,
+      name: row.name,
+      code: row.code,
+      type: row.type,
+      address: row.address,
+      regionCode: row.regionCode,
+      isActive: row.isActive,
+      phone: s.phone ?? null,
+      email: s.email ?? null,
+      managerUserId: s.managerUserId ?? null,
+      businessHours: s.businessHours ?? null,
+      timezone: s.timezone ?? null,
+      currencyCode: s.currencyCode ?? null,
+      defaultWarehouseId: s.defaultWarehouseId ?? null,
+      settings: row.settings,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      /** API alias — branchId === locationId */
+      branchId: row.id,
+    };
+  }
+
+  private async assertManagerUser(tenantId: string, userId: string) {
+    const u = await this.prisma.user.findFirst({
+      where: { id: userId, tenantId },
+      select: { id: true },
+    });
+    if (!u) throw new BadRequestException('Manager user not found');
+  }
+
+  private async assertWarehouse(tenantId: string, locationId: string) {
+    const w = await this.prisma.location.findFirst({
+      where: {
+        id: locationId,
+        tenantId,
+        type: { in: ['warehouse', 'store', 'branch'] },
+      },
+      select: { id: true },
+    });
+    if (!w) {
+      throw new BadRequestException('Default warehouse / location not found');
+    }
   }
 
   async bootstrap(user: AuthUser) {

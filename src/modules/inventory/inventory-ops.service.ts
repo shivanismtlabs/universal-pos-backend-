@@ -15,10 +15,15 @@ import {
   StockMoveLineDto,
   StockMoveDto,
 } from './dto/inventory-ops.dto';
+import { assertLocationAccess } from '../../common/location-access';
+import { LowStockAlertService } from '../notify/low-stock-alert.service';
 
 @Injectable()
 export class InventoryOpsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly lowStock: LowStockAlertService,
+  ) {}
 
   /** Stock In — increases sellable qty */
   stockIn(user: AuthUser, dto: StockMoveDto) {
@@ -47,12 +52,18 @@ export class InventoryOpsService {
       body.stockLevelId,
       body.productId,
     );
-    return this.applyQtyChange(user, level, {
+    const updated = await this.applyQtyChange(user, level, {
       type: StockLedgerType.adjustment,
       qtyDelta: Number(body.delta),
       reason: body.reason,
       referenceType: 'adjustment',
     });
+    void this.lowStock.evaluate({
+      tenantId: user.tenantId,
+      locationId: body.locationId,
+      productId: level.productId,
+    });
+    return updated;
   }
 
   /** Move qty from sellable → damaged quarantine */
@@ -93,6 +104,13 @@ export class InventoryOpsService {
         referenceType: 'damage',
       });
       return this.mapLevel(updated);
+    }).then((mapped) => {
+      void this.lowStock.evaluate({
+        tenantId: user.tenantId,
+        locationId: level.locationId,
+        productId: level.productId,
+      });
+      return mapped;
     });
   }
 
@@ -152,6 +170,9 @@ export class InventoryOpsService {
           : {}),
         ...(dto.reorderQty !== undefined
           ? { reorderQty: dto.reorderQty }
+          : {}),
+        ...(dto.sellPrice !== undefined
+          ? { sellPrice: dto.sellPrice }
           : {}),
       },
       include: {
@@ -279,7 +300,7 @@ export class InventoryOpsService {
   // ── Physical stock audit ───────────────────────────────────────────────
 
   async createCount(user: AuthUser, dto: CreateStockCountDto) {
-    await this.assertLocation(user.tenantId, dto.locationId);
+    await this.assertLocation(user.tenantId, dto.locationId, user);
     const levels = await this.prisma.stockLevel.findMany({
       where: {
         tenantId: user.tenantId,
@@ -455,7 +476,7 @@ export class InventoryOpsService {
     dto: StockMoveDto,
     direction: 'in' | 'out',
   ) {
-    await this.assertLocation(user.tenantId, dto.locationId);
+    await this.assertLocation(user.tenantId, dto.locationId, user);
     const results = [];
     for (const line of dto.lines) {
       const qty = Number(line.qty);
@@ -486,6 +507,11 @@ export class InventoryOpsService {
         referenceId: dto.referenceId,
       });
       results.push(updated);
+      void this.lowStock.evaluate({
+        tenantId: user.tenantId,
+        locationId: dto.locationId,
+        productId: level.productId,
+      });
     }
     return { locationId: dto.locationId, lines: results };
   }
@@ -670,7 +696,21 @@ export class InventoryOpsService {
     return level;
   }
 
-  private async assertLocation(tenantId: string, locationId: string) {
+  private async assertLocation(
+    tenantId: string,
+    locationId: string,
+    user?: AuthUser,
+  ) {
+    if (user) {
+      await assertLocationAccess(this.prisma, user, locationId, {
+        requireActive: true,
+      });
+      const loc = await this.prisma.location.findFirst({
+        where: { id: locationId, tenantId },
+      });
+      if (!loc) throw new NotFoundException('Location not found');
+      return loc;
+    }
     const loc = await this.prisma.location.findFirst({
       where: { id: locationId, tenantId, isActive: true },
     });

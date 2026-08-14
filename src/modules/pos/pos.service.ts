@@ -29,6 +29,8 @@ import {
 import { saveProductImage } from '../../common/product-image';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import { nextInternalCode128Candidate } from '../../common/barcode';
+import { resolveDefaultLocationId } from '../../common/location-access';
+import { LowStockAlertService } from '../notify/low-stock-alert.service';
 
 const MAX_PRODUCT_IMAGES = 8;
 
@@ -112,6 +114,7 @@ export class PosService {
     private readonly ordersService: OrdersService,
     private readonly loyalty: LoyaltyService,
     private readonly notify: NotifyService,
+    private readonly lowStock: LowStockAlertService,
   ) {}
 
   /**
@@ -147,7 +150,7 @@ export class PosService {
   /** Sale floor bootstrap: schema + categories + stock counts */
   async saleFloor(user: AuthUser, locationId?: string) {
     await this.assertSaleShop(user.tenantId);
-    const locId = locationId ?? (await this.defaultLocationId(user.tenantId));
+    const locId = locationId ?? (await this.defaultLocationId(user.tenantId, user));
     if (!locId) throw new BadRequestException('No location configured');
 
     const [categories, stockRows, products, catalog] = await Promise.all([
@@ -248,7 +251,7 @@ export class PosService {
 
     let locationId = dto.locationId;
     if (!locationId) {
-      locationId = (await this.defaultLocationId(user.tenantId)) ?? undefined;
+      locationId = (await this.defaultLocationId(user.tenantId, user)) ?? undefined;
     }
     if (!locationId) throw new BadRequestException('No location configured');
 
@@ -501,7 +504,7 @@ export class PosService {
 
     let locationId = dto.locationId;
     if (!locationId) {
-      locationId = (await this.defaultLocationId(user.tenantId)) ?? undefined;
+      locationId = (await this.defaultLocationId(user.tenantId, user)) ?? undefined;
     }
     if (!locationId) throw new BadRequestException('No location configured');
 
@@ -637,7 +640,7 @@ export class PosService {
   ) {
     await this.assertSaleShop(user.tenantId);
     const locationId =
-      opts.locationId ?? (await this.defaultLocationId(user.tenantId));
+      opts.locationId ?? (await this.defaultLocationId(user.tenantId, user));
     if (!locationId) throw new BadRequestException('No location configured');
 
     const q = opts.q?.trim();
@@ -1190,7 +1193,7 @@ export class PosService {
     },
   ) {
     const locationId =
-      opts.locationId ?? (await this.defaultLocationId(user.tenantId));
+      opts.locationId ?? (await this.defaultLocationId(user.tenantId, user));
     if (!locationId) throw new BadRequestException('No location configured');
 
     const loc = await this.prisma.location.findFirst({
@@ -1346,7 +1349,7 @@ export class PosService {
     const sku = raw.toUpperCase();
 
     const locationId =
-      opts.locationId ?? (await this.defaultLocationId(user.tenantId));
+      opts.locationId ?? (await this.defaultLocationId(user.tenantId, user));
     if (!locationId) throw new BadRequestException('No location configured');
 
     const productSale = {
@@ -2517,6 +2520,22 @@ export class PosService {
       });
     }
 
+    // Low-stock alerts after successful sale stock decrement
+    for (const line of dto.items ?? []) {
+      if (!line.stockLevelId) continue;
+      const lvl = await this.prisma.stockLevel.findFirst({
+        where: { id: line.stockLevelId, tenantId: user.tenantId },
+        select: { productId: true, locationId: true },
+      });
+      if (lvl) {
+        void this.lowStock.evaluate({
+          tenantId: user.tenantId,
+          locationId: lvl.locationId,
+          productId: lvl.productId,
+        });
+      }
+    }
+
     return {
       order,
       payments: result.payments,
@@ -2959,7 +2978,7 @@ export class PosService {
 
   async currentRegister(user: AuthUser, locationId?: string) {
     await this.assertSaleShop(user.tenantId);
-    const locId = locationId ?? (await this.defaultLocationId(user.tenantId));
+    const locId = locationId ?? (await this.defaultLocationId(user.tenantId, user));
     if (!locId) throw new BadRequestException('No location configured');
     const session = await this.prisma.registerSession.findFirst({
       where: {
@@ -3097,7 +3116,10 @@ export class PosService {
     };
   }
 
-  private async defaultLocationId(tenantId: string) {
+  private async defaultLocationId(tenantId: string, user?: AuthUser) {
+    if (user) {
+      return resolveDefaultLocationId(this.prisma, user);
+    }
     const main = await this.prisma.location.findFirst({
       where: { tenantId, isActive: true, code: 'MAIN' },
       select: { id: true },

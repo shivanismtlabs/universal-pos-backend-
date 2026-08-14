@@ -83,6 +83,23 @@ export class TenantsController {
     return this.tenantsService.getLocation(user, id);
   }
 
+  @Get('locations/:id/dashboard')
+  @Roles(...RoleGroup.all)
+  @ApiOperation({ summary: 'Branch dashboard KPIs for one location' })
+  branchDashboard(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.tenantsService.branchDashboard(user, id);
+  }
+
+  @Get('multi-store/dashboard')
+  @Roles(...RoleGroup.lead, Role.accountant)
+  @ApiOperation({ summary: 'HQ multi-store dashboard rollup' })
+  multiStoreDashboard(@CurrentUser() user: AuthUser) {
+    return this.tenantsService.multiStoreDashboard(user);
+  }
+
   @Patch('locations/:id')
   @Roles(...RoleGroup.lead)
   updateLocation(

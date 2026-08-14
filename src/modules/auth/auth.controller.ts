@@ -8,6 +8,7 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -36,6 +37,9 @@ import { RolesGuard } from './guards/roles.guard';
 import type { AuthUser } from './types';
 import { PortalAuthService } from './portal-auth.service';
 import { AuthRecoveryService } from './auth-recovery.service';
+import { clientIpFromRequest } from '../security/client-ip';
+import { Login2faDto } from '../security/dto/security.dto';
+import type { FastifyRequest } from 'fastify';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -97,10 +101,17 @@ export class AuthController {
   selectOrganization(
     @Headers('authorization') authorization: string | undefined,
     @Body() dto: SelectOrganizationDto,
+    @Req() req: FastifyRequest,
   ) {
     return this.portal
       .requireIdentityFromAuthHeader(authorization)
-      .then((id) => this.portal.selectOrganization(id.id, dto.tenantId));
+      .then((id) =>
+        this.portal.selectOrganization(
+          id.id,
+          dto.tenantId,
+          clientIpFromRequest(req),
+        ),
+      );
   }
 
   @Public()
@@ -142,8 +153,26 @@ export class AuthController {
     },
   })
   @ApiOperation({ summary: 'Login with tenant slug + email + password' })
-  login(@Body() dto: LoginDto) {
-    return this.authService.login(dto);
+  login(@Body() dto: LoginDto, @Req() req: FastifyRequest) {
+    return this.authService.login(dto, { ip: clientIpFromRequest(req) });
+  }
+
+  @Public()
+  @Post('login/2fa')
+  @HttpCode(200)
+  @Throttle({
+    default: {
+      limit: process.env.NODE_ENV === 'production' ? 10 : 40,
+      ttl: 60_000,
+    },
+  })
+  @ApiOperation({ summary: 'Complete login with TOTP / backup code' })
+  login2fa(@Body() dto: Login2faDto, @Req() req: FastifyRequest) {
+    return this.authService.loginWith2fa(
+      dto.totpToken,
+      dto.code,
+      clientIpFromRequest(req),
+    );
   }
 
   @Public()

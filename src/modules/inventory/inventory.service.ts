@@ -28,6 +28,8 @@ import {
   TransferStockDto,
   UpdateUnitStatusDto,
 } from './dto/inventory.dto';
+import { assertLocationAccess } from '../../common/location-access';
+import { LowStockAlertService } from '../notify/low-stock-alert.service';
 
 const BLOCKED_FOR_RESERVE: StockUnitStatus[] = [
   StockUnitStatus.checked_out,
@@ -53,7 +55,10 @@ const LEGACY_STATUS: Record<string, StockUnitStatus> = {
 
 @Injectable()
 export class InventoryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly lowStock: LowStockAlertService,
+  ) {}
 
   async createCategory(user: AuthUser, dto: CreateCategoryDto) {
     try {
@@ -146,7 +151,7 @@ export class InventoryService {
     const status = (dto.status ?? dto.availabilityStatus)
       ? this.toStockStatus(dto.status ?? dto.availabilityStatus!)
       : StockUnitStatus.available;
-    await this.assertLocation(user.tenantId, locationId);
+    await this.assertLocation(user.tenantId, locationId, user);
     await this.assertProduct(user.tenantId, productId);
     if (dto.supplierId) await this.assertSupplier(user.tenantId, dto.supplierId);
 
@@ -388,7 +393,7 @@ export class InventoryService {
   async createRetailSku(user: AuthUser, dto: CreateRetailSkuDto) {
     const locationId = this.requiredAlias(dto.locationId, dto.storeId, 'locationId or storeId');
     const productId = this.requiredAlias(dto.productId, dto.productStyleId, 'productId or productStyleId');
-    await this.assertLocation(user.tenantId, locationId);
+    await this.assertLocation(user.tenantId, locationId, user);
     await this.assertProduct(user.tenantId, productId);
     try {
       return await this.prisma.stockLevel.create({
@@ -433,8 +438,8 @@ export class InventoryService {
       throw new BadRequestException('Add at least one transfer line');
     }
 
-    await this.assertLocation(user.tenantId, dto.fromLocationId);
-    await this.assertLocation(user.tenantId, dto.toLocationId);
+    await this.assertLocation(user.tenantId, dto.fromLocationId, user);
+    await this.assertLocation(user.tenantId, dto.toLocationId, user);
 
     const result = await this.prisma.$transaction(async (tx) => {
       const moved: Array<{
@@ -600,6 +605,19 @@ export class InventoryService {
       return { transferId, moved };
     });
 
+    for (const m of result.moved) {
+      void this.lowStock.evaluate({
+        tenantId: user.tenantId,
+        locationId: dto.fromLocationId,
+        productId: m.productId,
+      });
+      void this.lowStock.evaluate({
+        tenantId: user.tenantId,
+        locationId: dto.toLocationId,
+        productId: m.productId,
+      });
+    }
+
     return {
       id: result.transferId,
       fromLocationId: dto.fromLocationId,
@@ -680,7 +698,7 @@ export class InventoryService {
   }
 
   async listStockAtLocation(user: AuthUser, locationId: string, q?: string) {
-    await this.assertLocation(user.tenantId, locationId);
+    await this.assertLocation(user.tenantId, locationId, user);
     const term = q?.trim();
     const rows = await this.prisma.stockLevel.findMany({
       where: {
@@ -772,8 +790,17 @@ export class InventoryService {
     if (!row) throw new NotFoundException('Product style not found');
   }
 
-  private async assertLocation(tenantId: string, id: string) {
-    const row = await this.prisma.location.findFirst({ where: { id, tenantId, isActive: true }, select: { id: true } });
+  private async assertLocation(tenantId: string, id: string, user?: AuthUser) {
+    if (user) {
+      await assertLocationAccess(this.prisma, user, id, {
+        requireActive: true,
+      });
+      return;
+    }
+    const row = await this.prisma.location.findFirst({
+      where: { id, tenantId, isActive: true },
+      select: { id: true },
+    });
     if (!row) throw new NotFoundException('Location not found or inactive');
   }
 

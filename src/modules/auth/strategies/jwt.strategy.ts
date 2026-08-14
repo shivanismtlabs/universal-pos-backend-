@@ -2,9 +2,12 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
+import type { FastifyRequest } from 'fastify';
 import { expandPermissions } from '../../../common/rbac';
 import { PrismaService } from '../../../database/database.module';
 import type { AuthUser, JwtPayload } from '../types';
+import { SecurityService } from '../../security/security.service';
+import { clientIpFromRequest } from '../../security/client-ip';
 
 const ACTING_TYPES = new Set(['access', 'pin_access', 'station']);
 
@@ -13,15 +16,17 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor(
     config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly security: SecurityService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
       secretOrKey: config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+      passReqToCallback: true,
     });
   }
 
-  async validate(payload: JwtPayload): Promise<AuthUser> {
+  async validate(req: FastifyRequest, payload: JwtPayload): Promise<AuthUser> {
     if (!payload.typ || !ACTING_TYPES.has(payload.typ)) {
       throw new UnauthorizedException('Invalid token type');
     }
@@ -41,6 +46,11 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     if (!user) {
       throw new UnauthorizedException('User not found');
     }
+
+    await this.security.assertTenantIp(
+      payload.tenantId,
+      clientIpFromRequest(req),
+    );
 
     const roles = user.userRoles.map((ur) => ur.role.code);
     const roleIds = user.userRoles.map((ur) => ur.roleId);

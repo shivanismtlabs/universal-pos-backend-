@@ -311,6 +311,34 @@ export async function provisionTenantWithAdmin(
     },
   });
 
+  // Default return/refund reason catalog (required by sale returns)
+  const refundDefaults = [
+    { code: 'defective', label: 'Defective product', sortOrder: 1, appliesTo: 'customer' },
+    { code: 'damaged', label: 'Damaged product', sortOrder: 2, appliesTo: 'both' },
+    { code: 'wrong_item', label: 'Wrong product', sortOrder: 3, appliesTo: 'customer' },
+    { code: 'wrong_size', label: 'Wrong size / size issue', sortOrder: 4, appliesTo: 'customer' },
+    { code: 'size_issue', label: 'Size issue', sortOrder: 4, appliesTo: 'customer' },
+    { code: 'wrong_color', label: 'Wrong color', sortOrder: 5, appliesTo: 'customer' },
+    { code: 'not_as_expected', label: 'Product not as expected', sortOrder: 6, appliesTo: 'customer' },
+    { code: 'customer_changed_mind', label: 'Customer changed mind', sortOrder: 7, appliesTo: 'customer' },
+    { code: 'duplicate', label: 'Duplicate purchase', sortOrder: 8, appliesTo: 'customer' },
+    { code: 'quality', label: 'Quality issue', sortOrder: 9, appliesTo: 'both' },
+    { code: 'exchange', label: 'Exchange', sortOrder: 10, appliesTo: 'customer' },
+    { code: 'other', label: 'Other', sortOrder: 99, appliesTo: 'both' },
+  ];
+  for (const d of refundDefaults) {
+    await tx.refundReason.upsert({
+      where: { tenantId_code: { tenantId: tenant.id, code: d.code } },
+      create: { tenantId: tenant.id, ...d },
+      update: {
+        label: d.label,
+        isActive: true,
+        sortOrder: d.sortOrder,
+        appliesTo: d.appliesTo,
+      },
+    });
+  }
+
   return {
     tenant,
     organization,

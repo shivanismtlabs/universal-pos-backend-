@@ -348,7 +348,14 @@ export const COMMERCE_SCHEMAS: Record<string, CommerceSchemaEntry> = {
     description:
       'Serialized inventory with deposits, checkout, and returns',
     fields: RENTAL_PRODUCT_FIELDS,
-    categoryExamples: UNIVERSAL_CATEGORY_EXAMPLES,
+    categoryExamples: [
+      'Clothes',
+      'Bikes',
+      'Cars',
+      'Home',
+      'Equipment',
+      'Accessories',
+    ],
     lifecycle: RENTAL_LIFECYCLE_STATES,
     moduleStack: RENTAL_MODULE_STACK,
   },

@@ -14,10 +14,10 @@ import { createHash, randomBytes, randomUUID } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { provisionTenantWithAdmin, enableTenantModules } from '../../common/provision-tenant';
 import {
-  getBusinessConfig,
-  isBusinessTypeId,
   registryToDbPayload,
+  resolveSetupBusinessProfile,
 } from '../../common/business-config';
+import { recommendCapabilities } from '../../common/capabilities';
 import { isCommerceMode, moduleStackForMode } from '../../common/commerce-schema';
 import { expandPermissions } from '../../common/rbac';
 import { PrismaService } from '../../database/database.module';
@@ -285,12 +285,12 @@ export class PortalAuthService {
     const currencyCode = (dto.currencyCode?.trim() || 'INR').toUpperCase();
     const locale = dto.locale?.trim() || 'en-IN';
 
-    if (!isBusinessTypeId(dto.businessType)) {
-      throw new BadRequestException(
-        'Unknown business type. Choose retail, grocery, restaurant, salon, service, other, or general.',
-      );
-    }
-    const profile = getBusinessConfig(dto.businessType);
+    const { profile, unknown, requested } = resolveSetupBusinessProfile(
+      dto.businessType,
+    );
+    const businessLabel =
+      dto.businessLabel?.trim() ||
+      (unknown ? requested.replace(/_/g, ' ') : profile.label);
     const configPayload = registryToDbPayload(profile);
 
     // Other / general: optional merchant-defined item fields
@@ -343,12 +343,21 @@ export class PortalAuthService {
         });
 
         // Zoho-style org profile + universal BusinessConfig link
+        const capabilities = recommendCapabilities({
+          businessType: profile.id,
+          commerceModes: modes,
+          extras: profile.defaultCapabilities,
+        });
         const settings = {
           ...((provisioned.tenant.settings as Record<string, unknown>) ?? {}),
           businessType: profile.id,
           businessConfigId: profile.id,
+          businessLabel,
+          ...(unknown ? { businessRequestedType: requested } : {}),
           businessConfigSetAt: new Date().toISOString(),
           commerceModes: modes,
+          capabilities,
+          capabilitiesSetAt: new Date().toISOString(),
           commerceSetupAt: new Date().toISOString(),
           pos: { pinSwitchEnabled: true },
           /** Exclusive tax by default so Due = Subtotal + Tax at counter */

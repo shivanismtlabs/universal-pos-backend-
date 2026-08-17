@@ -11,6 +11,10 @@
  */
 
 import { isCommerceMode } from './commerce-schema';
+import {
+  BUSINESS_TYPE_CAPABILITY_DEFAULTS,
+  type CapabilityCode,
+} from './capabilities';
 
 /** Profile label for setup — not a separate monorepo per industry */
 export type BusinessTypeId =
@@ -20,7 +24,20 @@ export type BusinessTypeId =
   | 'salon'
   | 'service'
   | 'general'
-  | 'other';
+  | 'other'
+  | 'gym'
+  | 'rental'
+  | 'repair'
+  | 'pharmacy'
+  | 'furniture'
+  | 'coaching'
+  | 'spa'
+  | 'event'
+  | 'laundry'
+  | 'pet_grooming'
+  | 'photography'
+  | 'car_wash'
+  | 'coworking';
 
 export type BillingStyle =
   | 'counter' // sell → pay at till
@@ -36,6 +53,11 @@ export type ScreenId =
   | 'customers'
   | 'inventory'
   | 'appointments'
+  | 'resources'
+  | 'memberships'
+  | 'jobs'
+  | 'kitchen'
+  | 'check_in'
   | 'reports'
   | 'settings';
 
@@ -78,6 +100,11 @@ export type BusinessConfig = {
   metaFields: MetaFieldDef[];
   /** Soft UX copy for Getting Started */
   gettingStartedHints?: string[];
+  /**
+   * Setup recommendation only — runtime uses tenant.settings.capabilities.
+   * Never branch core engines on businessType; use hasCapability().
+   */
+  defaultCapabilities?: CapabilityCode[];
 };
 
 /**
@@ -111,6 +138,7 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
       'Add categories and items',
       'Open the counter and take your first sale',
     ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.general,
   },
   /** Same engine as general — preferred UI id for "Other" */
   other: {
@@ -140,6 +168,7 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
       'Add custom item fields if your catalog needs them',
       'Open the counter and take your first sale',
     ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.other,
   },
   retail: {
     id: 'retail',
@@ -190,6 +219,7 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
       'Import items or add SKUs with optional size/colour',
       'Sell at the counter with stock on hand',
     ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.retail,
   },
   grocery: {
     id: 'grocery',
@@ -232,6 +262,7 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
       'Prefer kg/g/L/ml sell units where needed',
       'Use low-stock filters on Items',
     ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.grocery,
   },
   restaurant: {
     id: 'restaurant',
@@ -295,6 +326,7 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
       'Build menu Items (same catalog engine)',
       'Use table number on orders via meta — no separate restaurant codebase',
     ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.restaurant,
   },
   salon: {
     id: 'salon',
@@ -352,6 +384,7 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
       'Add services as Items under service mode',
       'Require customer on billing when appointment style is active',
     ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.salon,
   },
   service: {
     id: 'service',
@@ -394,6 +427,481 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
       'Define services in catalog',
       'Capture customer before bill when required',
     ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.service,
+  },
+  gym: {
+    id: 'gym',
+    label: 'Gym / fitness',
+    description: 'Memberships + optional personal training (subscription mode)',
+    defaultCommerceModes: ['subscription', 'service'],
+    billing: {
+      style: 'appointment',
+      allowSplitTender: true,
+      allowParkCart: false,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'memberships',
+      'check_in',
+      'appointments',
+      'reports',
+      'settings',
+    ],
+    metaFields: [
+      {
+        entity: 'customer',
+        key: 'membershipId',
+        label: 'Membership ID',
+        type: 'string',
+        required: false,
+      },
+      {
+        entity: 'customer',
+        key: 'fitnessGoal',
+        label: 'Fitness goal',
+        type: 'string',
+        required: false,
+      },
+    ],
+    gettingStartedHints: [
+      'Create membership plans as subscription products',
+      'Enable check-in for active members',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.gym,
+  },
+  rental: {
+    id: 'rental',
+    label: 'Rental business',
+    description: 'Issue / return assets with deposits — not permanent sale',
+    defaultCommerceModes: ['rental', 'sale'],
+    billing: {
+      style: 'rental_checkout',
+      allowSplitTender: true,
+      allowParkCart: true,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'inventory',
+      'resources',
+      'reports',
+      'settings',
+    ],
+    metaFields: [
+      {
+        entity: 'customer',
+        key: 'idProof',
+        label: 'ID proof ref',
+        type: 'string',
+        required: false,
+      },
+      {
+        entity: 'order',
+        key: 'rentalEndsAt',
+        label: 'Rental end',
+        type: 'datetime',
+        required: false,
+      },
+    ],
+    gettingStartedHints: [
+      'Enable rental mode and track units as available / rented / damaged',
+      'Collect deposits separately from rental charges',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.rental,
+  },
+  repair: {
+    id: 'repair',
+    label: 'Repair / service shop',
+    description: 'Customer assets + work jobs + parts/labor',
+    defaultCommerceModes: ['service', 'sale'],
+    billing: {
+      style: 'appointment',
+      allowSplitTender: true,
+      allowParkCart: true,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'jobs',
+      'inventory',
+      'appointments',
+      'reports',
+      'settings',
+    ],
+    metaFields: [
+      {
+        entity: 'customer',
+        key: 'preferredContact',
+        label: 'Preferred contact',
+        type: 'string',
+        required: false,
+      },
+    ],
+    gettingStartedHints: [
+      'Register customer assets (IMEI / serial)',
+      'Open a repair job, add parts + labor, then collect payment',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.repair,
+  },
+  pharmacy: {
+    id: 'pharmacy',
+    label: 'Pharmacy / medical retail',
+    description: 'Retail with batch and expiry capabilities',
+    defaultCommerceModes: ['sale'],
+    billing: {
+      style: 'counter',
+      allowSplitTender: true,
+      allowParkCart: true,
+      requireCustomer: false,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'inventory',
+      'reports',
+      'settings',
+    ],
+    metaFields: [
+      {
+        entity: 'item',
+        key: 'rxRequired',
+        label: 'Rx required',
+        type: 'boolean',
+        required: false,
+      },
+    ],
+    gettingStartedHints: [
+      'Enable batch and expiry on tracked medicines',
+      'Use stock alerts for near-expiry items',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.pharmacy,
+  },
+  furniture: {
+    id: 'furniture',
+    label: 'Furniture / large goods',
+    description: 'Catalog + advance / balance payments',
+    defaultCommerceModes: ['sale'],
+    billing: {
+      style: 'counter',
+      allowSplitTender: true,
+      allowParkCart: true,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'inventory',
+      'reports',
+      'settings',
+    ],
+    metaFields: [
+      {
+        entity: 'item',
+        key: 'dimensions',
+        label: 'Dimensions',
+        type: 'string',
+        required: false,
+      },
+      {
+        entity: 'order',
+        key: 'deliveryNote',
+        label: 'Delivery note',
+        type: 'text',
+        required: false,
+      },
+    ],
+    gettingStartedHints: [
+      'Take advance at booking and collect balance on delivery',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.furniture,
+  },
+  coaching: {
+    id: 'coaching',
+    label: 'Coaching / training center',
+    description: 'Courses, batches, and fee plans via subscription/service',
+    defaultCommerceModes: ['subscription', 'service'],
+    billing: {
+      style: 'appointment',
+      allowSplitTender: true,
+      allowParkCart: false,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'memberships',
+      'appointments',
+      'reports',
+      'settings',
+    ],
+    metaFields: [],
+    gettingStartedHints: [
+      'Sell course fees as subscription or service items',
+      'Track students as customers with enrollment notes',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.coaching,
+  },
+  spa: {
+    id: 'spa',
+    label: 'Spa / wellness',
+    description: 'Rooms + therapists + packages (service mode)',
+    defaultCommerceModes: ['service', 'sale'],
+    billing: {
+      style: 'appointment',
+      allowSplitTender: true,
+      allowParkCart: false,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'appointments',
+      'resources',
+      'inventory',
+      'reports',
+      'settings',
+    ],
+    metaFields: [
+      {
+        entity: 'item',
+        key: 'durationMinutes',
+        label: 'Duration (minutes)',
+        type: 'number',
+        required: false,
+      },
+    ],
+    gettingStartedHints: [
+      'Create treatment rooms as Resources',
+      'Book services against staff and rooms',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.spa,
+  },
+  event: {
+    id: 'event',
+    label: 'Event / venue',
+    description: 'Bookable halls and packages with deposits',
+    defaultCommerceModes: ['service', 'rental'],
+    billing: {
+      style: 'appointment',
+      allowSplitTender: true,
+      allowParkCart: true,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'appointments',
+      'resources',
+      'reports',
+      'settings',
+    ],
+    metaFields: [
+      {
+        entity: 'order',
+        key: 'guestCount',
+        label: 'Guest count',
+        type: 'number',
+        required: false,
+      },
+    ],
+    gettingStartedHints: [
+      'Define venues as Resources with capacity',
+      'Collect booking deposit then final balance',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.event,
+  },
+  laundry: {
+    id: 'laundry',
+    label: 'Laundry / dry clean',
+    description: 'Intake tickets as jobs + service pricing',
+    defaultCommerceModes: ['service', 'sale'],
+    billing: {
+      style: 'counter',
+      allowSplitTender: true,
+      allowParkCart: true,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'jobs',
+      'reports',
+      'settings',
+    ],
+    metaFields: [],
+    gettingStartedHints: [
+      'Open a job per bag/ticket, add services, collect on pickup',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.laundry,
+  },
+  pet_grooming: {
+    id: 'pet_grooming',
+    label: 'Pet grooming',
+    description: 'Appointments + optional retail products',
+    defaultCommerceModes: ['service', 'sale'],
+    billing: {
+      style: 'appointment',
+      allowSplitTender: true,
+      allowParkCart: false,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'appointments',
+      'resources',
+      'reports',
+      'settings',
+    ],
+    metaFields: [
+      {
+        entity: 'customer',
+        key: 'petName',
+        label: 'Pet name',
+        type: 'string',
+        required: false,
+      },
+      {
+        entity: 'customer',
+        key: 'petBreed',
+        label: 'Breed',
+        type: 'string',
+        required: false,
+      },
+    ],
+    gettingStartedHints: [
+      'Book grooming slots and sell pet products from the same catalog',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.pet_grooming,
+  },
+  photography: {
+    id: 'photography',
+    label: 'Photography studio',
+    description: 'Sessions + optional gear rental',
+    defaultCommerceModes: ['service', 'rental'],
+    billing: {
+      style: 'appointment',
+      allowSplitTender: true,
+      allowParkCart: true,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'appointments',
+      'resources',
+      'inventory',
+      'reports',
+      'settings',
+    ],
+    metaFields: [],
+    gettingStartedHints: [
+      'Sell session packages as services; rent gear via rental mode',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.photography,
+  },
+  car_wash: {
+    id: 'car_wash',
+    label: 'Car wash / detailing',
+    description: 'Vehicle services with optional packages',
+    defaultCommerceModes: ['service', 'sale'],
+    billing: {
+      style: 'appointment',
+      allowSplitTender: true,
+      allowParkCart: true,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'appointments',
+      'jobs',
+      'reports',
+      'settings',
+    ],
+    metaFields: [
+      {
+        entity: 'customer',
+        key: 'vehiclePlate',
+        label: 'Vehicle plate',
+        type: 'string',
+        required: false,
+      },
+    ],
+    gettingStartedHints: [
+      'Register vehicles as customer assets when needed; book wash slots',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.car_wash,
+  },
+  coworking: {
+    id: 'coworking',
+    label: 'Coworking space',
+    description: 'Desk/room memberships and resource bookings',
+    defaultCommerceModes: ['subscription', 'service'],
+    billing: {
+      style: 'appointment',
+      allowSplitTender: true,
+      allowParkCart: false,
+      requireCustomer: true,
+    },
+    screens: [
+      'home',
+      'items',
+      'counter',
+      'orders',
+      'customers',
+      'memberships',
+      'resources',
+      'check_in',
+      'appointments',
+      'reports',
+      'settings',
+    ],
+    metaFields: [],
+    gettingStartedHints: [
+      'Sell desk memberships; book meeting rooms as resources',
+    ],
+    defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.coworking,
   },
 };
 
@@ -410,6 +918,27 @@ export function getBusinessConfig(id: string | null | undefined): BusinessConfig
 
 export function isBusinessTypeId(value: unknown): value is string {
   return typeof value === 'string' && value in BUSINESS_CONFIG_REGISTRY;
+}
+
+/**
+ * Org setup: listed ids are templates. Unknown / blank → Other (universal core).
+ * Never reject a shop because swimming / bakery / coaching isn’t in the picker.
+ */
+export function resolveSetupBusinessProfile(raw: string | null | undefined): {
+  profile: BusinessConfig;
+  unknown: boolean;
+  requested: string;
+} {
+  const requested = (raw ?? '').trim();
+  const key = requested.toLowerCase().replace(/[\s-]+/g, '_');
+  if (isBusinessTypeId(key)) {
+    return { profile: getBusinessConfig(key), unknown: false, requested };
+  }
+  return {
+    profile: getBusinessConfig('other'),
+    unknown: requested.length > 0 && requested.toLowerCase() !== 'other',
+    requested,
+  };
 }
 
 /** Read tenant.settings.businessType / businessConfigId */
@@ -549,6 +1078,7 @@ export function businessConfigCatalog() {
     label: c.label,
     description: c.description,
     defaultCommerceModes: c.defaultCommerceModes,
+    defaultCapabilities: c.defaultCapabilities ?? [],
     billingStyle: c.billing.style,
     screens: c.screens,
   }));

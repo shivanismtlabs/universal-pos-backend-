@@ -118,8 +118,9 @@ export class AuthController {
   @Post('register-tenant')
   @Throttle({
     default: {
-      // Dev: many retries while testing; prod stays strict
-      limit: process.env.NODE_ENV === 'production' ? 2 : 30,
+      // Dev: many retries while testing; prod stays strict but QA-usable
+      // (2/min was too aggressive behind shared NAT / demo IP)
+      limit: process.env.NODE_ENV === 'production' ? 6 : 40,
       ttl: 60_000,
     },
   })
@@ -148,7 +149,8 @@ export class AuthController {
   @HttpCode(200)
   @Throttle({
     default: {
-      limit: process.env.NODE_ENV === 'production' ? 5 : 40,
+      // Shared shop IP: cashiers must login often; 5/min was too strict in prod
+      limit: process.env.NODE_ENV === 'production' ? 30 : 60,
       ttl: 60_000,
     },
   })

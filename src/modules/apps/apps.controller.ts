@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RoleGroup } from '../../common/roles';
-import { Roles } from '../auth/decorators/auth.decorators';
+import { Roles, Public } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
 import { AppsService } from './apps.service';
@@ -9,6 +9,8 @@ import { SearchService } from './search.service';
 import {
   CreateCatalogItemDto,
   EnableModuleDto,
+  RecommendBusinessSetupDto,
+  SetBusinessCapabilitiesDto,
   SetBusinessConfigDto,
   SetCommerceModesDto,
   SetFeatureFlagDto,
@@ -99,13 +101,32 @@ export class AppsController {
   }
 
   @Get('commerce/business-configs')
-  @Roles(...RoleGroup.all)
+  @Public()
   @ApiOperation({
     summary:
       'BusinessConfig registry — vertical profiles (add type = new JSON only)',
   })
   listBusinessConfigs() {
     return this.apps.listBusinessConfigs();
+  }
+
+  @Get('commerce/capabilities')
+  @Public()
+  @ApiOperation({
+    summary: 'Capability registry — runtime gates (not businessType ifs)',
+  })
+  listCapabilities() {
+    return this.apps.listCapabilityCatalog();
+  }
+
+  @Post('commerce/recommend-setup')
+  @Public()
+  @ApiOperation({
+    summary:
+      'Recommend commerce modes + capabilities from business type / sells / needs',
+  })
+  recommendSetup(@Body() dto: RecommendBusinessSetupDto) {
+    return this.apps.recommendBusinessSetup(dto);
   }
 
   @Post('tenants/me/business-config')
@@ -119,6 +140,18 @@ export class AppsController {
     @Body() dto: SetBusinessConfigDto,
   ) {
     return this.apps.setBusinessConfig(user, dto);
+  }
+
+  @Post('tenants/me/capabilities')
+  @Roles(...RoleGroup.ownerOnly)
+  @ApiOperation({
+    summary: 'Set tenant capabilities (source of truth for screens/workflows)',
+  })
+  setCapabilities(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: SetBusinessCapabilitiesDto,
+  ) {
+    return this.apps.setBusinessCapabilities(user, dto);
   }
 
   @Get('tenants/me/business-form-schema')

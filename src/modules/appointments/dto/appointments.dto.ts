@@ -17,6 +17,7 @@ const APPOINTMENT_TYPES = [
   'pickup',
   'return',
   'consultation',
+  'service',
   'other',
 ] as const;
 
@@ -75,6 +76,13 @@ export class CreateAppointmentDto {
   @IsUUID()
   assigneeId?: string;
 
+  @ApiPropertyOptional({
+    description: 'Bookable resource (table, room, vehicle, hall, …)',
+  })
+  @IsOptional()
+  @IsUUID()
+  resourceId?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -93,6 +101,13 @@ export class CreateAppointmentDto {
   @IsString()
   @MaxLength(2000)
   alterationNeeds?: string;
+
+  /** Salon / service UI alias — appended into notes when provided */
+  @ApiPropertyOptional({ example: 'Haircut' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  serviceName?: string;
 }
 
 export class ListAppointmentsQueryDto extends PaginationQueryDto {

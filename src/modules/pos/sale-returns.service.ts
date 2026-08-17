@@ -144,18 +144,45 @@ export class SaleReturnsService {
       };
     }
 
-    const reason = await this.prisma.refundReason.findFirst({
+    const reasonCode = String(dto.reasonCode ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, '_');
+    if (!reasonCode) {
+      throw new BadRequestException('reasonCode is required');
+    }
+
+    let reason = await this.prisma.refundReason.findFirst({
       where: {
         tenantId: user.tenantId,
-        code: dto.reasonCode,
+        code: reasonCode,
         isActive: true,
       },
     });
     if (!reason) {
+      // Fresh tenants may not have catalog yet — seed defaults then retry
+      await this.seedRefundReasons(user);
+      reason = await this.prisma.refundReason.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          code: reasonCode,
+          isActive: true,
+        },
+      });
+    }
+    if (!reason) {
+      const available = await this.prisma.refundReason.findMany({
+        where: { tenantId: user.tenantId, isActive: true },
+        select: { code: true },
+        orderBy: { sortOrder: 'asc' },
+        take: 20,
+      });
       throw new BadRequestException(
-        `Unknown refund reason: ${dto.reasonCode}`,
+        `Unknown refund reason: ${reasonCode}. Allowed: ${available.map((r) => r.code).join(', ') || '(none — call POST /pos/refund-reasons/seed)'}`,
       );
     }
+    // Keep dto.reasonCode normalized for downstream writes
+    dto.reasonCode = reasonCode;
 
     if (dto.parentPaymentId) {
       const parent = order.payments.find((p) => p.id === dto.parentPaymentId);
@@ -558,7 +585,8 @@ export class SaleReturnsService {
       { code: 'defective', label: 'Defective product', sortOrder: 1, appliesTo: 'customer' },
       { code: 'damaged', label: 'Damaged product', sortOrder: 2, appliesTo: 'both' },
       { code: 'wrong_item', label: 'Wrong product', sortOrder: 3, appliesTo: 'customer' },
-      { code: 'wrong_size', label: 'Wrong size', sortOrder: 4, appliesTo: 'customer' },
+      { code: 'wrong_size', label: 'Wrong size / size issue', sortOrder: 4, appliesTo: 'customer' },
+      { code: 'size_issue', label: 'Size issue', sortOrder: 4, appliesTo: 'customer' },
       { code: 'wrong_color', label: 'Wrong color', sortOrder: 5, appliesTo: 'customer' },
       { code: 'not_as_expected', label: 'Product not as expected', sortOrder: 6, appliesTo: 'customer' },
       { code: 'customer_changed_mind', label: 'Customer changed mind', sortOrder: 7, appliesTo: 'customer' },

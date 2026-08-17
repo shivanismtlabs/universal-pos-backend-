@@ -102,6 +102,28 @@ export const PLATFORM_MODULES: Array<{
     navSchema: [],
   },
   {
+    code: 'resources',
+    name: 'Resources',
+    description: 'Generic bookable resources (tables, rooms, vehicles, halls)',
+    dependsOn: ['core'],
+    permissions: ['resources.manage'],
+    isCore: false,
+    navSchema: [
+      { label: 'Resources', path: '/resources', icon: 'grid' },
+    ],
+  },
+  {
+    code: 'jobs',
+    name: 'Jobs / Repair',
+    description: 'Customer assets and work/repair jobs',
+    dependsOn: ['core', 'catalog'],
+    permissions: ['jobs.manage'],
+    isCore: false,
+    navSchema: [
+      { label: 'Jobs', path: '/jobs', icon: 'wrench' },
+    ],
+  },
+  {
     code: 'notify',
     name: 'Notifications',
     description: 'WhatsApp / SMS / email',

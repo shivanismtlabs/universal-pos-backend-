@@ -171,6 +171,7 @@ async function main() {
       orderId: sale.order.id,
       items: [{ stockLevelId, quantity: 1 }],
       refundMethod: 'cash',
+      reasonCode: 'customer_changed_mind',
       reason: 'Customer changed mind',
       idempotencyKey: `ret-${SUFFIX}`,
     },

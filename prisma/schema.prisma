@@ -183,6 +183,32 @@ enum AppointmentStatus {
   cancelled
 }
 
+/// Bookable / assignable resource (table, room, vehicle, hall, desk, …)
+enum ResourceStatus {
+  available
+  occupied
+  maintenance
+  inactive
+}
+
+/// Customer-owned or tracked asset for jobs (phone, vehicle, appliance, …)
+enum WorkJobStatus {
+  received
+  diagnosis
+  approved
+  in_progress
+  ready
+  completed
+  cancelled
+  picked_up
+}
+
+enum WorkJobLineKind {
+  part
+  labor
+  other
+}
+
 enum DocumentType {
   invoice
   receipt
@@ -222,6 +248,10 @@ enum CustomFieldEntity {
   appointment
   employee
   location
+  resource
+  work_asset
+  work_job
+  membership
 }
 
 enum OutboxStatus {
@@ -323,6 +353,9 @@ model Tenant {
   orders             Order[]
   orderItems         OrderItem[]
   appointments            Appointment[]
+  resources               Resource[]
+  workAssets              WorkAsset[]
+  workJobs                WorkJob[]
   payments                Payment[]
   orderFees               OrderFee[]
   invoices                Invoice[]
@@ -490,6 +523,8 @@ model Location {
   stockCountSessions StockCountSession[]
   orders            Order[]
   appointments      Appointment[]
+  resources         Resource[]
+  workJobs          WorkJob[]
   offlineSyncEvents OfflineSyncEvent[]
   registerSessions  RegisterSession[]
   expenses          Expense[]
@@ -666,6 +701,7 @@ model User {
   stockLedgerEntries StockLedgerEntry[]
   ordersCreated      Order[]             @relation("OrderCreatedBy")
   appointmentsAssigned Appointment[]     @relation("AppointmentAssignee")
+  workJobsAssigned     WorkJob[]         @relation("WorkJobAssignee")
   paymentsTaken      Payment[]
   returnsReceived    ReturnEvent[]       @relation("ReturnReceivedBy")
   returnsApproved    ReturnEvent[]       @relation("ReturnApprovedBy")
@@ -965,6 +1001,8 @@ model Customer {
   tenant           Tenant                 @relation(fields: [tenantId], references: [id])
   orders           Order[]
   appointments     Appointment[]
+  workAssets       WorkAsset[]
+  workJobs         WorkJob[]
   documents        Document[]
   notificationLogs NotificationLog[]
   orderItemsWorn   OrderItem[]            @relation("ItemWearer")
@@ -1130,6 +1168,7 @@ model Product {
   customerSubscriptions CustomerSubscription[]
   stockLedgerEntries    StockLedgerEntry[]
   stockCountLines       StockCountLine[]
+  workJobLines          WorkJobLine[]
 
   @@unique([tenantId, skuCode])
   @@index([tenantId, status])
@@ -1644,6 +1683,7 @@ model Order {
   createdBy    User?             @relation("OrderCreatedBy", fields: [createdById], references: [id])
   items        OrderItem[]
   appointments Appointment[]
+  workJobs     WorkJob[]
   payments     Payment[]
   fees         OrderFee[]
   invoices     Invoice[]
@@ -1849,6 +1889,8 @@ model Appointment {
   customerId   String?           @map("customer_id") @db.Uuid
   orderId      String?           @map("order_id") @db.Uuid
   assigneeId   String?           @map("assignee_id") @db.Uuid
+  /// Optional bookable resource (table, room, vehicle, hall, …)
+  resourceId   String?           @map("resource_id") @db.Uuid
   /// Free-form type: fitting | haircut | consultation | pickup …
   type         String
   status       AppointmentStatus @default(scheduled)
@@ -1864,9 +1906,115 @@ model Appointment {
   customer Customer? @relation(fields: [customerId], references: [id])
   order    Order?    @relation(fields: [orderId], references: [id])
   assignee User?     @relation("AppointmentAssignee", fields: [assigneeId], references: [id])
+  resource Resource? @relation(fields: [resourceId], references: [id])
 
   @@index([tenantId, startsAt])
+  @@index([tenantId, resourceId, startsAt])
   @@map("appointments")
+}
+
+/// Generic bookable resource — NOT restaurantTable / salonRoom tables
+model Resource {
+  id         String         @id @default(uuid()) @db.Uuid
+  tenantId   String         @map("tenant_id") @db.Uuid
+  locationId String?        @map("location_id") @db.Uuid
+  name       String
+  /// Configurable type code: table | room | vehicle | equipment | desk | court | hall | …
+  type       String         @db.VarChar(40)
+  capacity   Int            @default(1)
+  status     ResourceStatus @default(available)
+  sortOrder  Int            @default(0) @map("sort_order")
+  meta       Json           @default("{}")
+  createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  location     Location?     @relation(fields: [locationId], references: [id])
+  appointments Appointment[]
+  workJobs     WorkJob[]
+
+  @@index([tenantId, type, status])
+  @@index([tenantId, locationId])
+  @@map("resources")
+}
+
+/// Customer asset (device / vehicle / appliance) — used by optional jobs module
+model WorkAsset {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  customerId String   @map("customer_id") @db.Uuid
+  name       String
+  /// phone | laptop | vehicle | appliance | camera | other
+  assetType  String   @map("asset_type") @db.VarChar(40)
+  /// IMEI, VIN, serial, plate, …
+  identifier String?  @db.VarChar(120)
+  meta       Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  customer Customer  @relation(fields: [customerId], references: [id])
+  jobs     WorkJob[]
+
+  @@index([tenantId, customerId])
+  @@index([tenantId, identifier])
+  @@map("work_assets")
+}
+
+/// Generic work / repair job — optional vertical module, not retail core
+model WorkJob {
+  id            String        @id @default(uuid()) @db.Uuid
+  tenantId      String        @map("tenant_id") @db.Uuid
+  locationId    String?       @map("location_id") @db.Uuid
+  customerId    String        @map("customer_id") @db.Uuid
+  assetId       String?       @map("asset_id") @db.Uuid
+  assigneeId    String?       @map("assignee_id") @db.Uuid
+  resourceId    String?       @map("resource_id") @db.Uuid
+  orderId       String?       @map("order_id") @db.Uuid
+  title         String
+  status        WorkJobStatus @default(received)
+  problem       String?
+  diagnosis     String?
+  estimatedCost Decimal?      @map("estimated_cost") @db.Decimal(12, 2)
+  finalCost     Decimal?      @map("final_cost") @db.Decimal(12, 2)
+  dueAt         DateTime?     @map("due_at") @db.Timestamptz(6)
+  completedAt   DateTime?     @map("completed_at") @db.Timestamptz(6)
+  meta          Json          @default("{}")
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant         @relation(fields: [tenantId], references: [id])
+  location Location?      @relation(fields: [locationId], references: [id])
+  customer Customer       @relation(fields: [customerId], references: [id])
+  asset    WorkAsset?     @relation(fields: [assetId], references: [id])
+  assignee User?          @relation("WorkJobAssignee", fields: [assigneeId], references: [id])
+  resource Resource?      @relation(fields: [resourceId], references: [id])
+  order    Order?         @relation(fields: [orderId], references: [id])
+  lines    WorkJobLine[]
+
+  @@index([tenantId, status, createdAt])
+  @@index([tenantId, customerId])
+  @@map("work_jobs")
+}
+
+model WorkJobLine {
+  id          String          @id @default(uuid()) @db.Uuid
+  tenantId    String          @map("tenant_id") @db.Uuid
+  jobId       String          @map("job_id") @db.Uuid
+  productId   String?         @map("product_id") @db.Uuid
+  kind        WorkJobLineKind @default(other)
+  description String
+  qty         Decimal         @default(1) @db.Decimal(12, 3)
+  unitPrice   Decimal         @default(0) @map("unit_price") @db.Decimal(12, 2)
+  meta        Json            @default("{}")
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  job     WorkJob  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id])
+
+  @@index([tenantId, jobId])
+  @@map("work_job_lines")
 }
 
 // ─── Documents / notify / integrations / sync ───────────────────────────────

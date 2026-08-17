@@ -30,6 +30,9 @@ import { SyncModule } from './modules/sync/sync.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { UsersModule } from './modules/users/users.module';
 import { AccountingModule } from './modules/accounting/accounting.module';
+import { ResourcesModule } from './modules/resources/resources.module';
+import { JobsModule } from './modules/jobs/jobs.module';
+import { CustomFieldsModule } from './modules/custom-fields/custom-fields.module';
 
 const enableQueues = process.env.ENABLE_QUEUES === 'true';
 
@@ -54,6 +57,9 @@ const enableQueues = process.env.ENABLE_QUEUES === 'true';
     PlatformBillingModule,
     DocumentsModule,
     AppointmentsModule,
+    ResourcesModule,
+    JobsModule,
+    CustomFieldsModule,
     SuppliersModule,
     SyncModule,
     PosModule,

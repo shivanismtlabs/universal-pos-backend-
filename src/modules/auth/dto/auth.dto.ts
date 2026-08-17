@@ -286,19 +286,22 @@ export class CreateOrganizationDto {
   @ApiProperty({
     example: 'retail',
     description:
-      'Business type: retail | grocery | restaurant | salon | service | other | general',
+      'Setup template id, or any free-text industry. Unknown values map to Other — POS still runs.',
   })
   @IsString()
-  @IsIn([
-    'retail',
-    'grocery',
-    'restaurant',
-    'salon',
-    'service',
-    'other',
-    'general',
-  ])
+  @MinLength(2)
+  @MaxLength(40)
   businessType!: string;
+
+  @ApiPropertyOptional({
+    example: 'Swimming academy',
+    description:
+      'When type is Other / unlisted — what the merchant calls their business',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  businessLabel?: string;
 
   /**
    * When businessType is other/general — extra item form fields (→ business_configs.item_fields).

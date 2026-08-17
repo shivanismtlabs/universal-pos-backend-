@@ -89,12 +89,21 @@ export class SetBusinessConfigDto {
   @ApiProperty({
     example: 'retail',
     description:
-      'business type id from GET /commerce/business-configs (retail, grocery, restaurant, salon, service, general)',
+      'business type id from GET /commerce/business-configs (setup template only)',
   })
   @IsString()
   @MinLength(2)
   @MaxLength(40)
   businessType!: string;
+
+  @ApiPropertyOptional({
+    example: 'Swimming academy',
+    description: 'Display label when the industry is not in the template list',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  businessLabel?: string;
 
   @ApiPropertyOptional({
     description:
@@ -104,6 +113,53 @@ export class SetBusinessConfigDto {
   @IsOptional()
   @IsBoolean()
   applyDefaultModes?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'When true (default), apply recommended capabilities for the profile',
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  applyDefaultCapabilities?: boolean;
+}
+
+export class SetBusinessCapabilitiesDto {
+  @ApiProperty({
+    example: ['INVENTORY', 'BARCODE', 'BOOKING'],
+    isArray: true,
+    description: 'Tenant capability codes — runtime gates use these, not businessType',
+  })
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsString({ each: true })
+  capabilities!: string[];
+}
+
+export class RecommendBusinessSetupDto {
+  @ApiPropertyOptional({ example: 'pet_grooming' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  businessType?: string;
+
+  @ApiPropertyOptional({
+    example: ['services', 'products'],
+    isArray: true,
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  sells?: string[];
+
+  @ApiPropertyOptional({
+    example: ['appointments', 'resources'],
+    isArray: true,
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  needs?: string[];
 }
 
 /** Generic catalog create — mode must be a registered commerce mode */

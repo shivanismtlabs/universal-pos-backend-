@@ -251,6 +251,20 @@ export class SaleCheckoutDto {
   @IsOptional()
   @IsIn(['email', 'sms', 'whatsapp'], { each: true })
   sendReceiptChannels?: Array<'email' | 'sms' | 'whatsapp'>;
+
+  /**
+   * Capability-based order metadata (not industry columns).
+   * Examples: tableId, orderType (dine_in|takeaway), covers, source, externalReference.
+   * Merged into orders.meta alongside taxSnapshot / note.
+   */
+  @ApiPropertyOptional({
+    description:
+      'Structured order extras (BusinessConfig / commerce meta). Free-form JSON object.',
+    example: { tableId: 'T12', orderType: 'dine_in', covers: 2 },
+  })
+  @IsOptional()
+  @IsObject()
+  meta?: Record<string, unknown>;
 }
 
 /** Create unpaid sale ticket for Stripe (card/UPI) — stock held on verify */

@@ -1984,6 +1984,17 @@ export class PosService {
           createdById: user.userId,
           currencyCode: tenant.currencyCode,
           meta: {
+            ...(dto.meta && typeof dto.meta === 'object' && !Array.isArray(dto.meta)
+              ? Object.fromEntries(
+                  Object.entries(dto.meta).filter(
+                    ([k, v]) =>
+                      k !== 'taxSnapshot' &&
+                      typeof k === 'string' &&
+                      k.length <= 64 &&
+                      v !== undefined,
+                  ),
+                )
+              : {}),
             ...(dto.note ? { note: dto.note } : {}),
             taxSnapshot: {
               rate: taxProfile.rate,
@@ -2335,17 +2346,29 @@ export class PosService {
         }
 
         if (p.method === PaymentMethod.emi) {
-          const tenure = Number(p.emiTenureMonths);
+          const tenure = Number(
+            p.emiTenureMonths ??
+              (typeof p.bankReference === 'string' &&
+              /^EMI(\d+)m/i.test(p.bankReference)
+                ? p.bankReference.replace(/^EMI(\d+)m.*/i, '$1')
+                : NaN),
+          );
+          const provider = (p.emiProvider ?? p.bankName)?.trim();
+          const emiRef = (p.emiReference ?? p.bankReference)?.trim() || null;
           if (!Number.isFinite(tenure) || tenure < 1 || tenure > 36) {
             throw new BadRequestException(
               'EMI needs tenure in months (1–36)',
             );
           }
-          if (!p.emiProvider?.trim()) {
+          if (!provider) {
             throw new BadRequestException(
               'EMI needs a provider / bank name',
             );
           }
+          // Normalize onto payment DTO fields for payload write below
+          p.emiTenureMonths = tenure;
+          p.emiProvider = provider;
+          if (emiRef && !p.emiReference) p.emiReference = emiRef;
         }
 
         const payment = await tx.payment.create({

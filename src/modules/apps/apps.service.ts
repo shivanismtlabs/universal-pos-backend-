@@ -20,11 +20,24 @@ import {
   configFromDbRow,
   formSchemaFromConfig,
   getBusinessConfig,
-  isBusinessTypeId,
   metaFieldsFor,
   registryToDbPayload,
   resolveBusinessConfig,
+  resolveSetupBusinessProfile,
 } from '../../common/business-config';
+import {
+  CAPABILITY_CODES,
+  capabilityCatalog,
+  hasCapability,
+  isCapabilityCode,
+  recommendCapabilities,
+  recommendCommerceModes,
+  resolveTenantCapabilities,
+  screensForCapabilities,
+  type CapabilityCode,
+  type OnboardingNeed,
+  type SellKind,
+} from '../../common/capabilities';
 import { PLATFORM_MODULES } from '../../common/platform-catalog';
 import { ensurePlatformCatalog } from '../../common/provision-tenant';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
@@ -32,6 +45,8 @@ import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import {
   CreateCatalogItemDto,
+  RecommendBusinessSetupDto,
+  SetBusinessCapabilitiesDto,
   SetBusinessConfigDto,
   SetCommerceModesDto,
   SetFeatureFlagDto,
@@ -281,17 +296,46 @@ export class AppsService {
       });
     });
 
-    // Lightweight mode catalog for onboarding UI (not full field schemas)
+    // Lightweight mode catalog for onboarding UI
     const modeCatalog = Object.values(COMMERCE_SCHEMAS).map((s) => ({
       mode: s.mode,
       label: s.label,
       description: s.description,
     }));
 
+    // Full commerce schemas for enabled modes (FE + smokes need fields/examples)
+    const schemas: Record<string, Record<string, unknown>> = {};
+    for (const m of commerceModes) {
+      const s = COMMERCE_SCHEMAS[m];
+      if (!s) continue;
+      schemas[m] = {
+        mode: s.mode,
+        label: s.label,
+        description: s.description,
+        fields: s.fields,
+        categoryExamples: [...s.categoryExamples],
+        ...(s.lifecycle ? { lifecycle: [...s.lifecycle] } : {}),
+      };
+    }
+    // Always expose rental schema shape for onboarding previews / smokes
+    if (!schemas.rental && COMMERCE_SCHEMAS.rental) {
+      const s = COMMERCE_SCHEMAS.rental;
+      schemas.rental = {
+        mode: s.mode,
+        label: s.label,
+        description: s.description,
+        fields: s.fields,
+        categoryExamples: [...s.categoryExamples],
+        lifecycle: [...(s.lifecycle ?? [])],
+      };
+    }
+
     const businessConfig = await this.resolveTenantBusinessConfig(
       user.tenantId,
       tenant.settings,
     );
+    const tenantCapabilities = resolveTenantCapabilities(tenant.settings);
+    const capabilityScreens = screensForCapabilities(tenantCapabilities);
 
     return {
       tenant: { ...tenant, gstin: tenant.taxId },
@@ -310,25 +354,41 @@ export class AppsService {
       modules,
       featureFlags: flags,
       nav: navAfter,
+      /** SaaS feature flags (legacy shape) + capability-driven platform keys */
       capabilities: {
         offlinePos: flags.find((f) => f.key === 'offline_pos')?.enabled ?? false,
         whatsapp: flags.find((f) => f.key === 'whatsapp')?.enabled ?? false,
         loyalty: flags.find((f) => f.key === 'loyalty')?.enabled ?? false,
+        enabled: tenantCapabilities,
+        screens: capabilityScreens,
+        catalog: capabilityCatalog(),
       },
       commerce: {
         setupComplete: commerceParsed.setupComplete,
         modes: commerceModes,
         registeredModes: Object.keys(COMMERCE_SCHEMAS),
         modeCatalog,
+        schemas,
         rentalLifecycle: [...RENTAL_LIFECYCLE_STATES],
       },
       /**
        * Vertical profile — drives meta fields / billing style / screens.
        * New vertical = registry entry only (see business-config.ts).
+       * Runtime gates: capabilities.enabled — not business.type.
        */
       business: {
         type: businessConfig.id,
-        config: businessConfig,
+        config: {
+          ...businessConfig,
+          screens: businessConfig.screens?.length
+            ? [
+                ...new Set([
+                  ...businessConfig.screens,
+                  ...capabilityScreens,
+                ]),
+              ]
+            : capabilityScreens,
+        },
         formSchema: formSchemaFromConfig(businessConfig),
         catalog: businessConfigCatalog(),
         coreEntities: [
@@ -341,11 +401,7 @@ export class AppsService {
         itemMetaFields: metaFieldsFor(businessConfig, 'item'),
         orderMetaFields: metaFieldsFor(businessConfig, 'order'),
         customerMetaFields: metaFieldsFor(businessConfig, 'customer'),
-        /**
-         * ERD map (Universal POS tables):
-         * BUSINESS = tenants · BUSINESS_CONFIG = business_configs
-         * ITEM = products · ORDERS = orders · ITEM/ORDER extra_fields = *.meta
-         */
+        capabilities: tenantCapabilities,
         erd: {
           business: 'tenants',
           businessConfig: 'business_configs',
@@ -356,6 +412,8 @@ export class AppsService {
           orderItem: 'order_items',
           payment: 'payments',
           customer: 'customers',
+          resource: 'resources',
+          workJob: 'work_jobs',
         },
       },
     };
@@ -410,12 +468,9 @@ export class AppsService {
    * Upserts business_configs (ERD BUSINESS_CONFIG) with item/order field JSON.
    */
   async setBusinessConfig(user: AuthUser, dto: SetBusinessConfigDto) {
-    if (!isBusinessTypeId(dto.businessType)) {
-      throw new BadRequestException(
-        'Unknown business type. Use GET /commerce/business-configs for catalog.',
-      );
-    }
-    const profile = getBusinessConfig(dto.businessType);
+    const { profile, unknown, requested } = resolveSetupBusinessProfile(
+      dto.businessType,
+    );
     const payload = registryToDbPayload(profile);
     const tenant = await this.prisma.tenant.findUniqueOrThrow({
       where: { id: user.tenantId },
@@ -429,13 +484,31 @@ export class AppsService {
       if (!modes.length) modes = ['sale'];
     }
 
+    const applyCaps = dto.applyDefaultCapabilities !== false;
+    let capabilities = resolveTenantCapabilities(prev);
+    if (applyCaps || !Array.isArray(prev.capabilities)) {
+      capabilities = recommendCapabilities({
+        businessType: profile.id,
+        commerceModes: modes,
+        extras: profile.defaultCapabilities,
+      });
+    }
+
+    const businessLabel =
+      dto.businessLabel?.trim() ||
+      (unknown ? requested.replace(/_/g, ' ') : profile.label);
+
     const settings = {
       ...prev,
       businessType: profile.id,
       businessConfigId: profile.id,
+      businessLabel,
+      ...(unknown ? { businessRequestedType: requested } : {}),
       commerceModes: modes,
+      capabilities,
       commerceSetupAt: new Date().toISOString(),
       businessConfigSetAt: new Date().toISOString(),
+      capabilitiesSetAt: new Date().toISOString(),
     };
 
     await this.prisma.$transaction(async (tx) => {
@@ -450,14 +523,20 @@ export class AppsService {
           businessType: payload.businessType,
           itemFields: payload.itemFields as Prisma.InputJsonValue,
           orderFields: payload.orderFields as Prisma.InputJsonValue,
-          uiFlow: payload.uiFlow as Prisma.InputJsonValue,
+          uiFlow: {
+            ...payload.uiFlow,
+            capabilities,
+          } as Prisma.InputJsonValue,
           billing: payload.billing as Prisma.InputJsonValue,
         },
         update: {
           businessType: payload.businessType,
           itemFields: payload.itemFields as Prisma.InputJsonValue,
           orderFields: payload.orderFields as Prisma.InputJsonValue,
-          uiFlow: payload.uiFlow as Prisma.InputJsonValue,
+          uiFlow: {
+            ...payload.uiFlow,
+            capabilities,
+          } as Prisma.InputJsonValue,
           billing: payload.billing as Prisma.InputJsonValue,
         },
       });
@@ -466,6 +545,7 @@ export class AppsService {
     for (const mode of modes) {
       await this.syncCommerceModules(user, mode);
     }
+    await this.syncCapabilityModules(user, capabilities);
 
     const resolved = await this.resolveTenantBusinessConfig(
       user.tenantId,
@@ -476,6 +556,7 @@ export class AppsService {
       config: resolved,
       formSchema: formSchemaFromConfig(resolved),
       commerceModes: modes,
+      capabilities,
       modules: await this.listTenantModules(user),
     };
   }
@@ -535,10 +616,21 @@ export class AppsService {
           }
         : undefined;
 
+    const capabilities = recommendCapabilities({
+      businessType:
+        typeof prev.businessType === 'string' ? prev.businessType : undefined,
+      commerceModes: modes,
+      extras: Array.isArray(prev.capabilities)
+        ? (prev.capabilities.filter(isCapabilityCode) as CapabilityCode[])
+        : undefined,
+    });
+
     const settings = {
       ...prev,
       commerceModes: modes,
+      capabilities,
       commerceSetupAt: new Date().toISOString(),
+      capabilitiesSetAt: new Date().toISOString(),
     };
 
     await this.prisma.tenant.update({
@@ -555,17 +647,97 @@ export class AppsService {
     for (const mode of modes) {
       await this.syncCommerceModules(user, mode);
     }
+    await this.syncCapabilityModules(user, capabilities);
 
     return {
       setupComplete: true,
       modes,
       primary: modes[0],
+      capabilities,
       schemas: Object.fromEntries(
         modes.map((m) => [m, COMMERCE_SCHEMAS[m]]),
       ),
       registeredModes: Object.keys(COMMERCE_SCHEMAS),
       rentalLifecycle: [...RENTAL_LIFECYCLE_STATES],
       modules: await this.listTenantModules(user),
+    };
+  }
+
+  /** Explicit capability toggle — source of truth for runtime gates */
+  async setBusinessCapabilities(user: AuthUser, dto: SetBusinessCapabilitiesDto) {
+    const capabilities = [
+      ...new Set(
+        (dto.capabilities ?? []).filter(isCapabilityCode) as CapabilityCode[],
+      ),
+    ];
+    if (!capabilities.length) {
+      throw new BadRequestException(
+        `Select at least one capability. Known: ${CAPABILITY_CODES.join(', ')}`,
+      );
+    }
+    const tenant = await this.prisma.tenant.findUniqueOrThrow({
+      where: { id: user.tenantId },
+    });
+    const prev = (tenant.settings ?? {}) as Record<string, unknown>;
+    const settings = {
+      ...prev,
+      capabilities,
+      capabilitiesSetAt: new Date().toISOString(),
+    };
+    await this.prisma.tenant.update({
+      where: { id: user.tenantId },
+      data: { settings: settings as Prisma.InputJsonValue },
+    });
+    await this.syncCapabilityModules(user, capabilities);
+    return {
+      capabilities,
+      screens: screensForCapabilities(capabilities),
+      catalog: capabilityCatalog(),
+      modules: await this.listTenantModules(user),
+    };
+  }
+
+  listCapabilityCatalog() {
+    return {
+      capabilities: capabilityCatalog(),
+      codes: [...CAPABILITY_CODES],
+      note: 'Runtime gates use hasCapability(code). businessType is setup template only.',
+    };
+  }
+
+  /** Zoho-style onboarding recommendation — no code changes for new businesses */
+  recommendBusinessSetup(dto: RecommendBusinessSetupDto) {
+    const sells = (dto.sells ?? []) as SellKind[];
+    const needs = (dto.needs ?? []) as OnboardingNeed[];
+    const modes = recommendCommerceModes({
+      businessType: dto.businessType,
+      sells,
+      fallback: dto.businessType
+        ? getBusinessConfig(dto.businessType).defaultCommerceModes
+        : ['sale'],
+    });
+    const capabilities = recommendCapabilities({
+      businessType: dto.businessType,
+      commerceModes: modes,
+      sells,
+      needs,
+    });
+    const profile = dto.businessType
+      ? getBusinessConfig(dto.businessType)
+      : getBusinessConfig('general');
+    return {
+      businessType: profile.id,
+      label: profile.label,
+      commerceModes: modes,
+      capabilities,
+      screens: screensForCapabilities(capabilities),
+      billingStyle: profile.billing.style,
+      gettingStartedHints: profile.gettingStartedHints ?? [],
+      modulesSuggested: [
+        ...new Set(
+          modes.flatMap((m) => [...moduleStackForMode(m)]),
+        ),
+      ],
     };
   }
 
@@ -907,6 +1079,45 @@ export class AppsService {
       select: { id: true },
     });
     if (!row) throw new NotFoundException('Category not found');
+  }
+
+  /**
+   * Enable modules implied by capabilities (resources, jobs, appointments, …).
+   * Core never imports vertical packs; modules depend on core.
+   */
+  private async syncCapabilityModules(
+    user: AuthUser,
+    capabilities: CapabilityCode[],
+  ) {
+    const wanted = new Set<string>();
+    if (hasCapability(capabilities, 'BOOKING')) wanted.add('appointments');
+    if (
+      hasCapability(capabilities, 'RESOURCE') ||
+      hasCapability(capabilities, 'TABLE')
+    ) {
+      wanted.add('resources');
+    }
+    if (
+      hasCapability(capabilities, 'REPAIR_JOB') ||
+      hasCapability(capabilities, 'ASSET')
+    ) {
+      wanted.add('jobs');
+    }
+    if (hasCapability(capabilities, 'INVENTORY')) wanted.add('inventory');
+    if (
+      hasCapability(capabilities, 'MEMBERSHIP') ||
+      hasCapability(capabilities, 'SUBSCRIPTION')
+    ) {
+      // subscriptions API is always mounted; keep appointments for PT sessions
+      wanted.add('appointments');
+    }
+    for (const code of wanted) {
+      try {
+        await this.enable(user, code, undefined);
+      } catch {
+        // Plan gate / missing catalog — non-fatal during setup
+      }
+    }
   }
 
   /**

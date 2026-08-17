@@ -19,6 +19,10 @@ import {
   shiftMonth,
   ymdInZone,
 } from './reports.util';
+import {
+  isServiceRevenueContext,
+  reportContextFromSettings,
+} from '../../common/report-capabilities';
 
 type CostingMethod = 'standard' | 'weighted_average' | 'fifo';
 
@@ -71,6 +75,7 @@ export class ReportsPnlService {
       tenant?.businessConfig?.businessType ||
       (tenant?.settings as { businessType?: string } | null)?.businessType ||
       'general';
+    const reportCtx = reportContextFromSettings(tenant?.settings);
     const costingMethod = this.resolveCostingMethod(
       query.costingMethod,
       tenant?.settings,
@@ -84,7 +89,7 @@ export class ReportsPnlService {
       range,
       locationIds,
       costingMethod,
-      businessType,
+      reportCtx,
       tenant?.taxMode ?? null,
     );
 
@@ -96,7 +101,7 @@ export class ReportsPnlService {
         prevRange,
         locationIds,
         costingMethod,
-        businessType,
+        reportCtx,
         tenant?.taxMode ?? null,
       );
       previous = {
@@ -106,7 +111,7 @@ export class ReportsPnlService {
       };
     }
 
-    const statement = this.toStatementLines(current, businessType);
+    const statement = this.toStatementLines(current, reportCtx);
     const waterfall = [
       { key: 'revenue', label: 'Net Sales', value: current.netSales },
       { key: 'cogs', label: 'Direct costs', value: -current.totalDirectCost },
@@ -129,6 +134,7 @@ export class ReportsPnlService {
       timezone,
       currencyCode,
       businessType,
+      capabilities: reportCtx.capabilities,
       taxMode: tenant?.taxMode ?? null,
       costingMethod,
       costingNote:
@@ -169,7 +175,7 @@ export class ReportsPnlService {
     range: { start: Date; end: Date; fromYmd: string; toYmd: string },
     locationIds: string[],
     costingMethod: CostingMethod,
-    businessType: string,
+    reportCtx: ReturnType<typeof reportContextFromSettings>,
     taxMode: string | null,
   ): Promise<PnLBlock> {
     const orderWhere: Prisma.OrderWhereInput = {
@@ -291,11 +297,7 @@ export class ReportsPnlService {
 
     let cogs = 0;
     let costOfService = 0;
-    const isServiceHeavy =
-      businessType === 'service' ||
-      businessType === 'salon' ||
-      businessType === 'hybrid';
-
+    const isServiceHeavy = isServiceRevenueContext(reportCtx);
     for (const it of items) {
       const pid = it.productId ?? it.product?.id;
       const qty = Number(it.quantity);
@@ -457,11 +459,13 @@ export class ReportsPnlService {
     return map;
   }
 
-  private toStatementLines(b: PnLBlock, businessType: string) {
-    const serviceLabel =
-      businessType === 'service' || businessType === 'salon'
-        ? 'Cost of Service Delivery'
-        : 'Cost of Service Delivery';
+  private toStatementLines(
+    b: PnLBlock,
+    reportCtx: ReturnType<typeof reportContextFromSettings>,
+  ) {
+    const serviceLabel = isServiceRevenueContext(reportCtx)
+      ? 'Cost of Service Delivery'
+      : 'Cost of Goods / Service';
     const lines: Array<{
       key: string;
       label: string;

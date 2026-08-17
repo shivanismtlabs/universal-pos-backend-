@@ -19,6 +19,7 @@ type AppointmentRow = Prisma.AppointmentGetPayload<{
     location: { select: { id: true; name: true; code: true } };
     assignee: { select: { id: true; fullName: true } };
     order: { select: { id: true; orderNumber: true; status: true } };
+    resource: { select: { id: true; name: true; type: true; capacity: true } };
   };
 }>;
 
@@ -27,11 +28,17 @@ export class AppointmentsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async create(user: AuthUser, dto: CreateAppointmentDto) {
-    const locationId = dto.locationId ?? dto.storeId;
+    const locationId =
+      dto.locationId ?? dto.storeId ?? user.locationId ?? user.storeId ?? null;
     if (!locationId) {
       throw new BadRequestException('locationId (or storeId) is required');
     }
-    const type = (dto.type ?? dto.aptType)?.trim();
+    // Default type for service businesses when FE only sends serviceName
+    const type = (
+      dto.type ??
+      dto.aptType ??
+      (dto.serviceName ? 'service' : undefined)
+    )?.trim();
     if (!type) {
       throw new BadRequestException('type (or aptType) is required');
     }
@@ -46,13 +53,25 @@ export class AppointmentsService {
     if (assigneeId) {
       await this.assertUser(user.tenantId, assigneeId);
     }
+    if (dto.resourceId) {
+      await this.assertResource(user.tenantId, dto.resourceId);
+      await this.assertNoResourceConflict(
+        user.tenantId,
+        dto.resourceId,
+        new Date(dto.startsAt),
+        dto.endsAt ? new Date(dto.endsAt) : null,
+      );
+    }
 
-    const notes =
-      dto.notes ??
-      dto.fittingNotes ??
-      (dto.alterationNeeds
-        ? `Alterations: ${dto.alterationNeeds}`
-        : undefined);
+    const noteParts = [
+      dto.notes?.trim(),
+      dto.fittingNotes?.trim(),
+      dto.serviceName?.trim() ? `Service: ${dto.serviceName.trim()}` : undefined,
+      dto.alterationNeeds?.trim()
+        ? `Alterations: ${dto.alterationNeeds.trim()}`
+        : undefined,
+    ].filter(Boolean) as string[];
+    const notes = noteParts.length ? noteParts.join('\n') : undefined;
 
     const row = await this.prisma.appointment.create({
       data: {
@@ -64,11 +83,15 @@ export class AppointmentsService {
         startsAt: new Date(dto.startsAt),
         endsAt: dto.endsAt ? new Date(dto.endsAt) : undefined,
         assigneeId,
+        resourceId: dto.resourceId,
         notes,
         status: AppointmentStatus.scheduled,
-        meta: dto.alterationNeeds
-          ? { alterationNeeds: dto.alterationNeeds }
-          : undefined,
+        meta: {
+          ...(dto.alterationNeeds
+            ? { alterationNeeds: dto.alterationNeeds }
+            : {}),
+          ...(dto.serviceName ? { serviceName: dto.serviceName } : {}),
+        },
       },
       include: this.defaultInclude(),
     });
@@ -162,6 +185,7 @@ export class AppointmentsService {
       location: { select: { id: true, name: true, code: true } },
       assignee: { select: { id: true, fullName: true } },
       order: { select: { id: true, orderNumber: true, status: true } },
+      resource: { select: { id: true, name: true, type: true, capacity: true } },
     } satisfies Prisma.AppointmentInclude;
   }
 
@@ -207,5 +231,46 @@ export class AppointmentsService {
       select: { id: true },
     });
     if (!row) throw new NotFoundException('Assignee user not found');
+  }
+
+  private async assertResource(tenantId: string, id: string) {
+    const row = await this.prisma.resource.findFirst({
+      where: { id, tenantId },
+      select: { id: true },
+    });
+    if (!row) throw new NotFoundException('Resource not found');
+  }
+
+  /** Prevent double-booking the same resource when an endsAt is known */
+  private async assertNoResourceConflict(
+    tenantId: string,
+    resourceId: string,
+    startsAt: Date,
+    endsAt: Date | null,
+    excludeId?: string,
+  ) {
+    const end = endsAt ?? new Date(startsAt.getTime() + 60 * 60 * 1000);
+    const conflict = await this.prisma.appointment.findFirst({
+      where: {
+        tenantId,
+        resourceId,
+        id: excludeId ? { not: excludeId } : undefined,
+        status: {
+          notIn: [
+            AppointmentStatus.cancelled,
+            AppointmentStatus.no_show,
+            AppointmentStatus.completed,
+          ],
+        },
+        startsAt: { lt: end },
+        OR: [{ endsAt: null }, { endsAt: { gt: startsAt } }],
+      },
+      select: { id: true, startsAt: true },
+    });
+    if (conflict) {
+      throw new BadRequestException(
+        'Resource is already booked for overlapping time',
+      );
+    }
   }
 }

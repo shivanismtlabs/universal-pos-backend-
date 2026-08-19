@@ -10,6 +10,7 @@
  *   salon-demo      — Haircut (duration minutes)
  *   restaurant-demo — Paneer dish (modifiers)
  *   rental-demo     — Formal rental catalog (units)
+ *   pool-store      — The Pool Store (sale + service, Valdosta sample)
  */
 import { PrismaClient, type Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
@@ -24,6 +25,8 @@ import {
 import {
   POOL_STORE_CATEGORIES,
   POOL_STORE_PRODUCTS,
+  POOL_STORE_SHOP,
+  poolProductFlags,
 } from './pool-store-catalog';
 import { saveProductImage } from '../src/common/product-image';
 import { foodProductImageDataUrl } from './food-product-images';
@@ -578,52 +581,77 @@ async function seedPoolStoreLight(passwordHash: string) {
     }),
   );
 
-  await applyBusinessType(result.tenant.id, 'retail', ['sale']);
+  await applyBusinessType(result.tenant.id, 'retail', ['sale', 'service']);
 
+  const poolTenant = await prisma.tenant.findUniqueOrThrow({
+    where: { id: result.tenant.id },
+  });
   await prisma.tenant.update({
     where: { id: result.tenant.id },
     data: {
       branding: {
-        productName: 'The Pool Store',
-        tagline: 'Universal POS retail sample catalog',
+        productName: POOL_STORE_SHOP.name,
+        tagline: POOL_STORE_SHOP.tagline,
+      },
+      settings: {
+        ...((poolTenant.settings ?? {}) as Record<string, unknown>),
+        phone: POOL_STORE_SHOP.phone,
+        city: POOL_STORE_SHOP.city,
+        state: POOL_STORE_SHOP.state,
+        country: POOL_STORE_SHOP.country,
+        hours: POOL_STORE_SHOP.hours,
       },
     },
   });
 
+  await prisma.location.update({
+    where: { id: result.location.id },
+    data: {
+      address: POOL_STORE_SHOP.address,
+      regionCode: POOL_STORE_SHOP.state,
+    },
+  });
+
   const categoryIds = new Map<string, string>();
-  for (const name of POOL_STORE_CATEGORIES.slice(0, 4)) {
+  for (const name of POOL_STORE_CATEGORIES) {
     const cat = await prisma.category.create({
       data: { tenantId: result.tenant.id, name },
     });
     categoryIds.set(name, cat.id);
   }
 
-  const products = POOL_STORE_PRODUCTS.slice(0, 8);
+  const products = POOL_STORE_PRODUCTS;
   for (const p of products) {
+    const flags = poolProductFlags(p);
     const product = await prisma.product.create({
       data: {
         tenantId: result.tenant.id,
         categoryId: categoryIds.get(p.category)!,
         name: p.name,
         skuCode: p.sku,
-        kind: 'physical',
-        fulfillmentMode: 'sale',
+        kind: flags.kind,
+        fulfillmentMode: flags.fulfillmentMode,
         basePrice: p.price,
-        trackQty: true,
+        trackQty: flags.trackQty,
         photoUrl: poolProductImageDataUrl(p.category, p.name),
-        meta: { sellUnit: 'pcs', brand: 'PoolPro' },
+        meta: {
+          sellUnit: flags.trackQty ? 'pcs' : 'job',
+          sourceNav: p.category,
+        },
       },
     });
-    await prisma.stockLevel.create({
-      data: {
-        tenantId: result.tenant.id,
-        locationId: result.location.id,
-        productId: product.id,
-        sku: p.sku,
-        qtyOnHand: p.qty,
-        sellPrice: p.price,
-      },
-    });
+    if (flags.trackQty) {
+      await prisma.stockLevel.create({
+        data: {
+          tenantId: result.tenant.id,
+          locationId: result.location.id,
+          productId: product.id,
+          sku: p.sku,
+          qtyOnHand: p.qty,
+          sellPrice: p.price,
+        },
+      });
+    }
   }
 
   await addStaff(result.tenant.id, result.location.id, passwordHash, [

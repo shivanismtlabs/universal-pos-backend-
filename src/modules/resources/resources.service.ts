@@ -61,7 +61,7 @@ export class ResourcesService {
       }),
       this.prisma.resource.count({ where }),
     ]);
-    return { data: rows.map((r) => this.present(r)), meta: pageMeta(page, limit, total) };
+    return { data: rows.map((r) => this.present(r)), meta: pageMeta(total, page, limit) };
   }
 
   async get(user: AuthUser, id: string) {

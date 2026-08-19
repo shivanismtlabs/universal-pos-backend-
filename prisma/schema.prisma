@@ -73,6 +73,14 @@ enum ProductStatus {
   archived
 }
 
+enum SupplierStatus {
+  active
+  inactive
+  blocked
+  on_hold
+  archived
+}
+
 enum FulfillmentMode {
   sale
   rental
@@ -355,6 +363,10 @@ model Tenant {
   productBundleLines ProductBundleLine[]
   productBatches     ProductBatch[]
   suppliers          Supplier[]
+  supplierContacts   SupplierContact[]
+  supplierAddresses  SupplierAddress[]
+  supplierDocuments  SupplierDocument[]
+  supplierNotes      SupplierNote[]
   stockUnits         StockUnit[]
   stockLevels        StockLevel[]
   stockLedgerEntries StockLedgerEntry[]
@@ -1359,15 +1371,48 @@ model CustomerSubscription {
 }
 
 model Supplier {
-  id        String   @id @default(uuid()) @db.Uuid
-  tenantId  String   @map("tenant_id") @db.Uuid
+  id        String         @id @default(uuid()) @db.Uuid
+  tenantId  String         @map("tenant_id") @db.Uuid
+  /// Tenant-unique code, e.g. SUP-000001
+  code      String         @db.VarChar(32)
   name      String
+  legalName String?        @map("legal_name")
+  /// goods | services | both | manufacturer | wholesaler | other
+  supplierType String?     @map("supplier_type") @db.VarChar(40)
+  category  String?        @db.VarChar(80)
+  status    SupplierStatus @default(active)
+  /// Primary contact display (denormalized)
   contact   String?
+  designation String?
   phone     String?
+  phoneAlt  String?        @map("phone_alt")
+  email     String?
+  website   String?
+  notes     String?
+  /// Generic tax identity (GSTIN / VAT / EIN / local) — not India-only
+  taxId     String?        @map("tax_id") @db.VarChar(32)
+  taxCategory String?      @map("tax_category") @db.VarChar(40)
+  taxExempt Boolean        @default(false) @map("tax_exempt")
+  registrationNo String?   @map("registration_no") @db.VarChar(64)
+  /// immediate | net_7 | net_15 | net_30 | net_45 | net_60 | custom
+  paymentTerm String?      @map("payment_term") @db.VarChar(32)
+  dueDays   Int?           @map("due_days")
+  creditLimit Decimal?     @map("credit_limit") @db.Decimal(14, 2)
+  currencyCode String?     @map("currency_code") @db.Char(3)
+  preferredPayMethod String? @map("preferred_pay_method") @db.VarChar(32)
+  bankName        String?  @map("bank_name")
+  bankAccountName String?  @map("bank_account_name")
+  bankAccountNo   String?  @map("bank_account_no")
+  bankIdentifier  String?  @map("bank_identifier")
+  payHandle       String?  @map("pay_handle")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  contacts       SupplierContact[]
+  addresses      SupplierAddress[]
+  documents      SupplierDocument[]
+  activityNotes  SupplierNote[]
   stockUnits     StockUnit[]
   purchaseOrders PurchaseOrder[]
   goodsReceipts  GoodsReceipt[]
@@ -1375,7 +1420,87 @@ model Supplier {
   payments       SupplierPayment[]
   journalEntryLines JournalEntryLine[]
 
+  @@unique([tenantId, code])
+  @@index([tenantId, status])
+  @@index([tenantId, name])
   @@map("suppliers")
+}
+
+model SupplierContact {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  supplierId String   @map("supplier_id") @db.Uuid
+  name       String
+  email      String?
+  phone      String?
+  role       String?  @db.VarChar(80)
+  notes      String?
+  isPrimary  Boolean  @default(false) @map("is_primary")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, supplierId])
+  @@map("supplier_contacts")
+}
+
+model SupplierAddress {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  supplierId String   @map("supplier_id") @db.Uuid
+  /// billing | shipping | other
+  kind       String   @default("billing") @db.VarChar(24)
+  line1      String
+  line2      String?
+  city       String?
+  state      String?
+  postalCode String?  @map("postal_code")
+  country    String?
+  isDefault  Boolean  @default(false) @map("is_default")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, supplierId])
+  @@map("supplier_addresses")
+}
+
+model SupplierDocument {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  supplierId String    @map("supplier_id") @db.Uuid
+  docType    String    @map("doc_type") @db.VarChar(64)
+  fileUrl    String    @map("file_url")
+  fileName   String?   @map("file_name")
+  notes      String?
+  uploadedBy String?   @map("uploaded_by") @db.Uuid
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, supplierId])
+  @@map("supplier_documents")
+}
+
+model SupplierNote {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  supplierId String   @map("supplier_id") @db.Uuid
+  body       String
+  actorUserId String? @map("actor_user_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, supplierId, createdAt])
+  @@map("supplier_notes")
 }
 
 /// Serialized / unique physical asset (camera body, tuxedo piece, bike)

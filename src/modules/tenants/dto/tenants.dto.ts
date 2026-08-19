@@ -152,6 +152,16 @@ export class UpdateTenantDto {
   settings?: Record<string, unknown>;
 }
 
+export class UploadTenantLogoDto {
+  @ApiProperty({
+    description: 'data:image/jpeg;base64,… or raw base64',
+    example: 'data:image/png;base64,iVBOR',
+  })
+  @IsString()
+  @MinLength(32)
+  imageBase64!: string;
+}
+
 export class CreateOrganizationDto {
   @ApiProperty({ example: 'Acme Retail Pvt Ltd' })
   @IsString()
@@ -359,3 +369,46 @@ export class UpdateLocationDto {
 
 /** @deprecated Use UpdateLocationDto */
 export class UpdateStoreDto extends UpdateLocationDto {}
+
+export class CreateMeasureUnitDto {
+  @ApiProperty({ example: 'bag' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(16)
+  @Matches(/^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/, {
+    message: 'Unit code: letters, numbers, . _ - (max 16)',
+  })
+  code!: string;
+
+  @ApiProperty({ example: 'Bag' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  name!: string;
+
+  @ApiPropertyOptional({
+    description: 'When true, POS allows fractional qty (kg, hour, litre)',
+  })
+  @IsOptional()
+  @IsBoolean()
+  decimalQty?: boolean;
+}
+
+export class UpdateMeasureUnitDto {
+  @ApiPropertyOptional({ example: 'Bag (retail)' })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  name?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  decimalQty?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  active?: boolean;
+}

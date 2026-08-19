@@ -31,6 +31,7 @@ import {
   validateSellQty,
   validateSku,
 } from '../../common/sell-units';
+import { parseMeasureUnits } from '../../common/measure-units';
 import { saveProductImage } from '../../common/product-image';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import { nextInternalCode128Candidate } from '../../common/barcode';
@@ -277,14 +278,15 @@ export class PosService {
     if (skuErr) throw new BadRequestException(skuErr);
 
     const sellUnit = normalizeSellUnit(dto.sellUnit);
+    const units = await this.tenantUnits(user.tenantId);
     const price = Number(dto.price);
     const priceErr = validateSellPrice(price);
     if (priceErr) throw new BadRequestException(priceErr);
 
     const rawQty = Number(dto.qty);
-    const qtyErr = validateSellQty(rawQty, sellUnit);
+    const qtyErr = validateSellQty(rawQty, sellUnit, units);
     if (qtyErr) throw new BadRequestException(qtyErr);
-    const qty = normalizeQty(rawQty, sellUnit);
+    const qty = normalizeQty(rawQty, sellUnit, units);
 
     const isServiceEarly = dto.itemType === 'service';
     const willTrack =
@@ -829,15 +831,16 @@ export class PosService {
     }
 
     const sellUnit = normalizeSellUnit(dto.sellUnit ?? level.sellUnit);
+    const units = await this.tenantUnits(user.tenantId);
     if (dto.price !== undefined) {
       const priceErr = validateSellPrice(Number(dto.price));
       if (priceErr) throw new BadRequestException(priceErr);
     }
     let nextQty: number | undefined;
     if (dto.qty !== undefined) {
-      const qtyErr = validateSellQty(Number(dto.qty), sellUnit);
+      const qtyErr = validateSellQty(Number(dto.qty), sellUnit, units);
       if (qtyErr) throw new BadRequestException(qtyErr);
-      nextQty = normalizeQty(Number(dto.qty), sellUnit);
+      nextQty = normalizeQty(Number(dto.qty), sellUnit, units);
     }
 
     if (dto.categoryId) {
@@ -902,16 +905,17 @@ export class PosService {
     if (!level) throw new NotFoundException('Product not found');
 
     const unit = normalizeSellUnit(level.sellUnit);
+    const units = await this.tenantUnits(user.tenantId);
     const beforeQty = Number(level.qtyOnHand);
     const next = beforeQty + Number(dto.delta);
-    const qtyErr = validateSellQty(next, unit);
+    const qtyErr = validateSellQty(next, unit, units);
     if (qtyErr) throw new BadRequestException(qtyErr);
     if (next < 0) {
       throw new BadRequestException(
         `Cannot reduce below 0 (have ${level.qtyOnHand} ${unit})`,
       );
     }
-    const normalized = normalizeQty(next, unit);
+    const normalized = normalizeQty(next, unit, units);
     const delta = normalized - beforeQty;
     if (Math.abs(delta) < 1e-9) {
       return {
@@ -1243,6 +1247,14 @@ export class PosService {
         'Sale POS is not enabled for this shop',
       );
     }
+  }
+
+  private async tenantUnits(tenantId: string) {
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { settings: true },
+    });
+    return parseMeasureUnits(tenant?.settings);
   }
 
   private async assertCounterShop(tenantId: string) {
@@ -1874,8 +1886,9 @@ export class PosService {
       throw new NotFoundException(`Stock level not found: ${line.stockLevelId}`);
     }
     const unit = normalizeSellUnit(level.sellUnit);
+    const units = await this.tenantUnits(user.tenantId);
     const qty = Number(line.quantity);
-    const qtyErr = validateSellQty(qty, unit);
+    const qtyErr = validateSellQty(qty, unit, units);
     if (qtyErr) {
       throw new BadRequestException(`${level.sku}: ${qtyErr}`);
     }

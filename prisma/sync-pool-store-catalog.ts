@@ -6,6 +6,8 @@ import { PrismaClient } from '@prisma/client';
 import {
   POOL_STORE_CATEGORIES,
   POOL_STORE_PRODUCTS,
+  POOL_STORE_SHOP,
+  poolProductFlags,
 } from './pool-store-catalog';
 import { poolProductImageDataUrl } from './pool-store-images';
 
@@ -24,8 +26,8 @@ async function main() {
     data: {
       name: 'The Pool Store',
       branding: {
-        productName: 'The Pool Store',
-        tagline: 'Pool, Spa & Outdoor Living · Valdosta, GA',
+        productName: POOL_STORE_SHOP.name,
+        tagline: POOL_STORE_SHOP.tagline,
         primaryColor: '#0c4a6e',
       },
       settings: {
@@ -33,11 +35,12 @@ async function main() {
           ? (tenant.settings as object)
           : {}),
         industry: 'retail',
-        country: 'US',
-        state: 'GA',
-        city: 'Valdosta',
-        phone: '229-247-6440',
-        commerceModes: ['sale'],
+        country: POOL_STORE_SHOP.country,
+        state: POOL_STORE_SHOP.state,
+        city: POOL_STORE_SHOP.city,
+        phone: POOL_STORE_SHOP.phone,
+        hours: POOL_STORE_SHOP.hours,
+        commerceModes: ['sale', 'service'],
       },
     },
   });
@@ -49,9 +52,9 @@ async function main() {
     await prisma.location.update({
       where: { id: location.id },
       data: {
-        name: 'Valdosta Flagship',
-        address: '3363 North Valdosta Road, Valdosta, GA 31602',
-        regionCode: 'GA',
+        name: POOL_STORE_SHOP.locationName,
+        address: POOL_STORE_SHOP.address,
+        regionCode: POOL_STORE_SHOP.state,
       },
     });
   }
@@ -76,6 +79,7 @@ async function main() {
   for (const p of POOL_STORE_PRODUCTS) {
     const catId = categoryIds.get(p.category)!;
     const photoUrl = poolProductImageDataUrl(p.category, p.name);
+    const flags = poolProductFlags(p);
     const existing = await prisma.product.findFirst({
       where: { tenantId: tenant.id, skuCode: p.sku },
     });
@@ -87,11 +91,12 @@ async function main() {
           categoryId: catId,
           basePrice: p.price,
           photoUrl,
-          fulfillmentMode: 'sale',
-          trackQty: true,
+          kind: flags.kind,
+          fulfillmentMode: flags.fulfillmentMode,
+          trackQty: flags.trackQty,
         },
       });
-      if (location) {
+      if (location && flags.trackQty) {
         await prisma.stockLevel.upsert({
           where: {
             tenantId_locationId_productId_variantKey: {
@@ -126,15 +131,15 @@ async function main() {
         categoryId: catId,
         name: p.name,
         skuCode: p.sku,
-        kind: 'physical',
-        fulfillmentMode: 'sale',
+        kind: flags.kind,
+        fulfillmentMode: flags.fulfillmentMode,
         basePrice: p.price,
-        trackQty: true,
+        trackQty: flags.trackQty,
         trackSerial: false,
         photoUrl,
       },
     });
-    if (location) {
+    if (location && flags.trackQty) {
       await prisma.stockLevel.create({
         data: {
           tenantId: tenant.id,

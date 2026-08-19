@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { PoType, Prisma, StockLedgerType } from '@prisma/client';
+import { PoType, Prisma, StockLedgerType, SupplierStatus } from '@prisma/client';
 import {
   buildTaxProfile,
   computeInvoiceTax,
@@ -11,16 +11,49 @@ import {
 import { PrismaService } from '../../database/database.module';
 import { AccountingPostingService } from '../accounting/posting.service';
 import { StockMutationEngine } from '../inventory/stock-mutation.engine';
+import { saveProductImage } from '../../common/product-image';
+import { RoleGroup } from '../../common/roles';
 import type { AuthUser } from '../auth/types';
 import {
+  AddSupplierNoteDto,
   CreatePurchaseOrderDto,
   CreateSupplierDto,
   CreateSupplierInvoiceDto,
   CreateSupplierPaymentDto,
   PaySupplierInvoiceDto,
   ReceivePurchaseOrderDto,
+  SupplierAddressDto,
+  SupplierContactDto,
   UpdatePurchaseOrderDto,
+  UploadSupplierDocumentDto,
 } from './dto/suppliers.dto';
+
+const PO_BLOCKED: SupplierStatus[] = [
+  SupplierStatus.blocked,
+  SupplierStatus.archived,
+  SupplierStatus.inactive,
+  SupplierStatus.on_hold,
+];
+
+function canSeeBank(user: AuthUser) {
+  const roles = user.roles ?? [];
+  return RoleGroup.finance.some((r) => roles.includes(r));
+}
+
+function maskAccount(v?: string | null) {
+  const s = (v ?? '').trim();
+  if (s.length <= 4) return s ? '••••' : null;
+  return `••••${s.slice(-4)}`;
+}
+
+function asStatus(v?: string): SupplierStatus | undefined {
+  if (!v) return undefined;
+  const allowed = Object.values(SupplierStatus) as string[];
+  if (!allowed.includes(v)) {
+    throw new BadRequestException('Invalid supplier status');
+  }
+  return v as SupplierStatus;
+}
 
 @Injectable()
 export class SuppliersService {
@@ -31,43 +64,346 @@ export class SuppliersService {
   ) {}
 
   createSupplier(user: AuthUser, dto: CreateSupplierDto) {
-    return this.prisma.supplier.create({
-      data: {
-        tenantId: user.tenantId,
-        name: dto.name.trim(),
-        contact: dto.contact?.trim(),
-        phone: dto.phone?.trim(),
-      },
-    });
+    if (!dto.name?.trim()) {
+      throw new BadRequestException('Supplier name is required');
+    }
+    return this.insertSupplier(user, dto);
   }
 
-  listSuppliers(user: AuthUser) {
-    return this.prisma.supplier.findMany({
-      where: { tenantId: user.tenantId },
-      orderBy: { name: 'asc' },
+  private async nextSupplierCode(tenantId: string) {
+    const rows = await this.prisma.supplier.findMany({
+      where: { tenantId, code: { startsWith: 'SUP-' } },
+      select: { code: true },
     });
+    let max = 0;
+    for (const r of rows) {
+      const m = r.code.match(/^SUP-(\d+)$/i);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+    return `SUP-${String(max + 1).padStart(6, '0')}`;
+  }
+
+  private supplierData(
+    tenantId: string,
+    dto: CreateSupplierDto,
+    code: string,
+    finance: boolean,
+  ) {
+    return {
+      tenantId,
+      code,
+      name: dto.name!.trim(),
+      legalName: dto.legalName?.trim() || null,
+      supplierType: dto.supplierType?.trim() || null,
+      category: dto.category?.trim() || null,
+      status: asStatus(dto.status) ?? SupplierStatus.active,
+      contact: dto.contact?.trim() || null,
+      designation: dto.designation?.trim() || null,
+      phone: dto.phone?.trim() || null,
+      phoneAlt: dto.phoneAlt?.trim() || null,
+      email: dto.email?.trim() || null,
+      website: dto.website?.trim() || null,
+      notes: dto.notes?.trim() || null,
+      taxId: dto.taxId?.trim() || null,
+      taxCategory: dto.taxCategory?.trim() || null,
+      taxExempt: dto.taxExempt === true,
+      registrationNo: dto.registrationNo?.trim() || null,
+      paymentTerm: dto.paymentTerm?.trim() || null,
+      dueDays: dto.dueDays ?? null,
+      creditLimit:
+        dto.creditLimit != null && Number.isFinite(dto.creditLimit)
+          ? dto.creditLimit
+          : null,
+      currencyCode: dto.currencyCode?.trim().toUpperCase() || null,
+      preferredPayMethod: dto.preferredPayMethod?.trim() || null,
+      bankName: finance ? dto.bankName?.trim() || null : null,
+      bankAccountName: finance ? dto.bankAccountName?.trim() || null : null,
+      bankAccountNo: finance ? dto.bankAccountNo?.trim() || null : null,
+      bankIdentifier: finance ? dto.bankIdentifier?.trim() || null : null,
+      payHandle: finance ? dto.payHandle?.trim() || null : null,
+    } satisfies Prisma.SupplierUncheckedCreateInput;
+  }
+
+  private presentSupplier(row: any, user: AuthUser, nested = false) {
+    const bank = canSeeBank(user);
+    const base = {
+      id: row.id,
+      code: row.code,
+      name: row.name,
+      legalName: row.legalName,
+      supplierType: row.supplierType,
+      category: row.category,
+      status: row.status,
+      contact: row.contact,
+      designation: row.designation,
+      phone: row.phone,
+      phoneAlt: row.phoneAlt,
+      email: row.email,
+      website: row.website,
+      notes: row.notes,
+      taxId: row.taxId,
+      taxCategory: row.taxCategory,
+      taxExempt: row.taxExempt,
+      registrationNo: row.registrationNo,
+      paymentTerm: row.paymentTerm,
+      dueDays: row.dueDays,
+      creditLimit:
+        row.creditLimit != null ? Number(row.creditLimit) : null,
+      currencyCode: row.currencyCode,
+      preferredPayMethod: row.preferredPayMethod,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      bank: bank
+        ? {
+            bankName: row.bankName,
+            bankAccountName: row.bankAccountName,
+            bankAccountNo: row.bankAccountNo,
+            bankIdentifier: row.bankIdentifier,
+            payHandle: row.payHandle,
+          }
+        : {
+            bankName: row.bankName ? '••••' : null,
+            bankAccountName: row.bankAccountName ? '••••' : null,
+            bankAccountNo: maskAccount(row.bankAccountNo),
+            bankIdentifier: row.bankIdentifier ? '••••' : null,
+            payHandle: row.payHandle ? '••••' : null,
+            masked: true,
+          },
+    };
+    if (!nested || !('contacts' in row)) return base;
+    return {
+      ...base,
+      contacts: row.contacts,
+      addresses: row.addresses,
+      documents: row.documents,
+      notesFeed: row.activityNotes,
+    };
+  }
+
+  private async insertSupplier(user: AuthUser, dto: CreateSupplierDto) {
+    const code =
+      dto.code?.trim().toUpperCase() ||
+      (await this.nextSupplierCode(user.tenantId));
+    const dup = await this.prisma.supplier.findFirst({
+      where: { tenantId: user.tenantId, code: { equals: code, mode: 'insensitive' } },
+      select: { id: true },
+    });
+    if (dup) throw new BadRequestException(`Supplier code ${code} already exists`);
+    try {
+      const created = await this.prisma.supplier.create({
+        data: this.supplierData(user.tenantId, dto, code, canSeeBank(user)),
+      });
+      return this.presentSupplier(created, user);
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new BadRequestException(`Supplier code ${code} already exists`);
+      }
+      throw e;
+    }
+  }
+
+  listSuppliers(user: AuthUser, status?: string) {
+    const st = status ? asStatus(status) : undefined;
+    return this.prisma.supplier
+      .findMany({
+        where: {
+          tenantId: user.tenantId,
+          ...(st ? { status: st } : {}),
+        },
+        orderBy: { name: 'asc' },
+      })
+      .then((rows) => rows.map((r) => this.presentSupplier(r, user)));
   }
 
   async getSupplier(user: AuthUser, id: string) {
     const row = await this.prisma.supplier.findFirst({
       where: { id, tenantId: user.tenantId },
+      include: {
+        contacts: { orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }] },
+        addresses: { orderBy: { createdAt: 'asc' } },
+        documents: { orderBy: { createdAt: 'desc' } },
+        activityNotes: { orderBy: { createdAt: 'desc' }, take: 50 },
+      },
     });
     if (!row) throw new NotFoundException('Supplier not found');
-    return row;
+    return this.presentSupplier(row, user, true);
   }
 
-  async updateSupplier(
+  /** Open AP vs optional credit limit — generic, not GST-specific. */
+  private async assertCreditLimit(
     user: AuthUser,
-    id: string,
-    dto: { name?: string; contact?: string; phone?: string },
+    supplierId: string,
+    additional: number,
   ) {
-    await this.getSupplier(user, id);
-    return this.prisma.supplier.update({
+    if (!(additional > 0)) return;
+    const supplier = await this.prisma.supplier.findFirst({
+      where: { id: supplierId, tenantId: user.tenantId },
+      select: { creditLimit: true, name: true },
+    });
+    if (!supplier?.creditLimit) return;
+    const cap = Number(supplier.creditLimit);
+    if (!Number.isFinite(cap) || cap <= 0) return;
+    const open = await this.prisma.supplierInvoice.findMany({
+      where: {
+        tenantId: user.tenantId,
+        supplierId,
+        status: { in: ['open', 'partial'] },
+      },
+      select: { grandTotal: true, amountPaid: true },
+    });
+    const due = open.reduce(
+      (s, i) => s + Number(i.grandTotal) - Number(i.amountPaid),
+      0,
+    );
+    if (due + additional > cap + 0.009) {
+      throw new BadRequestException(
+        `Credit limit ${cap.toFixed(2)} exceeded for ${supplier.name} (open AP ${due.toFixed(2)} + this ${additional.toFixed(2)})`,
+      );
+    }
+  }
+
+  async updateSupplier(user: AuthUser, id: string, dto: CreateSupplierDto) {
+    const existing = await this.prisma.supplier.findFirst({
+      where: { id, tenantId: user.tenantId },
+    });
+    if (!existing) throw new NotFoundException('Supplier not found');
+    if (dto.code && dto.code.trim().toUpperCase() !== existing.code) {
+      const code = dto.code.trim().toUpperCase();
+      const dup = await this.prisma.supplier.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          id: { not: id },
+          code: { equals: code, mode: 'insensitive' },
+        },
+      });
+      if (dup) throw new BadRequestException(`Supplier code ${code} already exists`);
+    }
+    const finance = canSeeBank(user);
+    const data: Prisma.SupplierUpdateInput = {};
+    if (dto.name !== undefined) data.name = dto.name.trim();
+    if (dto.code !== undefined) data.code = dto.code.trim().toUpperCase();
+    if (dto.legalName !== undefined) data.legalName = dto.legalName.trim() || null;
+    if (dto.supplierType !== undefined)
+      data.supplierType = dto.supplierType.trim() || null;
+    if (dto.category !== undefined) data.category = dto.category.trim() || null;
+    if (dto.status !== undefined) data.status = asStatus(dto.status);
+    if (dto.contact !== undefined) data.contact = dto.contact.trim() || null;
+    if (dto.designation !== undefined)
+      data.designation = dto.designation.trim() || null;
+    if (dto.phone !== undefined) data.phone = dto.phone.trim() || null;
+    if (dto.phoneAlt !== undefined) data.phoneAlt = dto.phoneAlt.trim() || null;
+    if (dto.email !== undefined) data.email = dto.email.trim() || null;
+    if (dto.website !== undefined) data.website = dto.website.trim() || null;
+    if (dto.notes !== undefined) data.notes = dto.notes.trim() || null;
+    if (dto.taxId !== undefined) data.taxId = dto.taxId.trim() || null;
+    if (dto.taxCategory !== undefined)
+      data.taxCategory = dto.taxCategory.trim() || null;
+    if (dto.taxExempt !== undefined) data.taxExempt = dto.taxExempt;
+    if (dto.registrationNo !== undefined)
+      data.registrationNo = dto.registrationNo.trim() || null;
+    if (dto.paymentTerm !== undefined)
+      data.paymentTerm = dto.paymentTerm.trim() || null;
+    if (dto.dueDays !== undefined) data.dueDays = dto.dueDays;
+    if (dto.creditLimit !== undefined) data.creditLimit = dto.creditLimit;
+    if (dto.currencyCode !== undefined)
+      data.currencyCode = dto.currencyCode.trim().toUpperCase() || null;
+    if (dto.preferredPayMethod !== undefined)
+      data.preferredPayMethod = dto.preferredPayMethod.trim() || null;
+    if (finance) {
+      if (dto.bankName !== undefined) data.bankName = dto.bankName.trim() || null;
+      if (dto.bankAccountName !== undefined)
+        data.bankAccountName = dto.bankAccountName.trim() || null;
+      if (dto.bankAccountNo !== undefined)
+        data.bankAccountNo = dto.bankAccountNo.trim() || null;
+      if (dto.bankIdentifier !== undefined)
+        data.bankIdentifier = dto.bankIdentifier.trim() || null;
+      if (dto.payHandle !== undefined)
+        data.payHandle = dto.payHandle.trim() || null;
+    }
+    const updated = await this.prisma.supplier.update({
       where: { id },
+      data,
+    });
+    return this.presentSupplier(updated, user);
+  }
+
+  async addContact(user: AuthUser, supplierId: string, dto: SupplierContactDto) {
+    await this.getSupplier(user, supplierId);
+    if (dto.isPrimary) {
+      await this.prisma.supplierContact.updateMany({
+        where: { tenantId: user.tenantId, supplierId },
+        data: { isPrimary: false },
+      });
+      await this.prisma.supplier.update({
+        where: { id: supplierId },
+        data: {
+          contact: dto.name.trim(),
+          phone: dto.phone?.trim() || undefined,
+          email: dto.email?.trim() || undefined,
+        },
+      });
+    }
+    return this.prisma.supplierContact.create({
       data: {
-        name: dto.name?.trim(),
-        contact: dto.contact?.trim(),
-        phone: dto.phone?.trim(),
+        tenantId: user.tenantId,
+        supplierId,
+        name: dto.name.trim(),
+        email: dto.email?.trim() || null,
+        phone: dto.phone?.trim() || null,
+        role: dto.role?.trim() || null,
+        notes: dto.notes?.trim() || null,
+        isPrimary: dto.isPrimary === true,
+      },
+    });
+  }
+
+  async addAddress(user: AuthUser, supplierId: string, dto: SupplierAddressDto) {
+    await this.getSupplier(user, supplierId);
+    return this.prisma.supplierAddress.create({
+      data: {
+        tenantId: user.tenantId,
+        supplierId,
+        kind: dto.kind || 'billing',
+        line1: dto.line1.trim(),
+        line2: dto.line2?.trim() || null,
+        city: dto.city?.trim() || null,
+        state: dto.state?.trim() || null,
+        postalCode: dto.postalCode?.trim() || null,
+        country: dto.country?.trim() || null,
+        isDefault: dto.isDefault === true,
+      },
+    });
+  }
+
+  async addNote(user: AuthUser, supplierId: string, dto: AddSupplierNoteDto) {
+    await this.getSupplier(user, supplierId);
+    return this.prisma.supplierNote.create({
+      data: {
+        tenantId: user.tenantId,
+        supplierId,
+        body: dto.body.trim(),
+        actorUserId: user.userId,
+      },
+    });
+  }
+
+  async addDocument(
+    user: AuthUser,
+    supplierId: string,
+    dto: UploadSupplierDocumentDto,
+  ) {
+    await this.getSupplier(user, supplierId);
+    const fileUrl = await saveProductImage(user.tenantId, dto.imageBase64);
+    return this.prisma.supplierDocument.create({
+      data: {
+        tenantId: user.tenantId,
+        supplierId,
+        docType: dto.docType.trim(),
+        fileUrl,
+        fileName: dto.fileName?.trim() || null,
+        notes: dto.notes?.trim() || null,
+        uploadedBy: user.userId,
+        expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
       },
     });
   }
@@ -77,6 +413,15 @@ export class SuppliersService {
       where: { id: dto.supplierId, tenantId: user.tenantId },
     });
     if (!supplier) throw new NotFoundException('Supplier not found');
+    const st = supplier.status;
+    const financeOverride =
+      canSeeBank(user) &&
+      (st === SupplierStatus.blocked || st === SupplierStatus.on_hold);
+    if (PO_BLOCKED.includes(st) && !financeOverride) {
+      throw new BadRequestException(
+        `Supplier is ${st.replaceAll('_', ' ')} — new purchase orders are not allowed`,
+      );
+    }
 
     if (dto.linkedOrderId) {
       const order = await this.prisma.order.findFirst({
@@ -97,6 +442,12 @@ export class SuppliersService {
         throw new BadRequestException('One or more stock levels not found');
       }
     }
+
+    const estimated = lines.reduce(
+      (s, l) => s + Number(l.unitCost ?? 0) * Number(l.qtyOrdered ?? 0),
+      0,
+    );
+    await this.assertCreditLimit(user, dto.supplierId, estimated);
 
     return this.prisma.purchaseOrder.create({
       data: {
@@ -710,6 +1061,9 @@ export class SuppliersService {
     const taxTotal = Number(dto.taxTotal ?? 0);
     const isCredit = dto.isCredit === true;
     const grandTotal = Number((subtotal + taxTotal).toFixed(2));
+    if (!isCredit) {
+      await this.assertCreditLimit(user, dto.supplierId, grandTotal);
+    }
     const invoiceNumber =
       dto.invoiceNumber?.trim() ||
       (await this.nextDocNumber(user.tenantId, isCredit ? 'SCN' : 'SINV'));

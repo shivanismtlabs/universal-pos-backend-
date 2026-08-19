@@ -17,6 +17,8 @@ const PALETTE: Record<string, { bg: string; fg: string; accent: string }> = {
   'Pool Chemicals': { bg: '#bfdbfe', fg: '#1e3a8a', accent: '#2563eb' },
   'Spa Products': { bg: '#e9d5ff', fg: '#581c87', accent: '#7c3aed' },
   Equipment: { bg: '#bae6fd', fg: '#0c4a6e', accent: '#0284c7' },
+  Service: { bg: '#e2e8f0', fg: '#0f172a', accent: '#0369a1' },
+  Clearance: { bg: '#fecaca', fg: '#7f1d1d', accent: '#dc2626' },
 };
 
 function escapeXml(s: string) {

@@ -9,8 +9,10 @@ import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import {
   CreateLocationDto,
+  CreateMeasureUnitDto,
   CreateOrganizationDto,
   UpdateLocationDto,
+  UpdateMeasureUnitDto,
   UpdateTenantDto,
 } from './dto/tenants.dto';
 import { ensureTenantTaxSettings } from '../../common/tax-engine';
@@ -22,6 +24,11 @@ import {
 } from '../../common/location-access';
 import { seedZeroStockForNewLocation } from '../../common/stock-at-location';
 import { Role } from '../../common/roles';
+import { saveProductImage } from '../../common/product-image';
+import {
+  type MeasureUnit,
+  parseMeasureUnits,
+} from '../../common/measure-units';
 
 const TENANT_SELECT = {
   id: true,
@@ -81,6 +88,43 @@ export class TenantsService {
       ...tenant,
       gstin: tenant.taxId,
     };
+  }
+
+  async uploadLogo(user: AuthUser, imageBase64: string) {
+    const existing = await this.prisma.tenant.findUnique({
+      where: { id: user.tenantId },
+      select: { branding: true },
+    });
+    if (!existing) throw new NotFoundException('Tenant not found');
+    const logoUrl = await saveProductImage(user.tenantId, imageBase64);
+    const prev =
+      existing.branding && typeof existing.branding === 'object'
+        ? { ...(existing.branding as Record<string, unknown>) }
+        : {};
+    const branding = { ...prev, logoUrl } as Prisma.InputJsonValue;
+    await this.prisma.tenant.update({
+      where: { id: user.tenantId },
+      data: { branding },
+    });
+    return { logoUrl };
+  }
+
+  async removeLogo(user: AuthUser) {
+    const existing = await this.prisma.tenant.findUnique({
+      where: { id: user.tenantId },
+      select: { branding: true },
+    });
+    if (!existing) throw new NotFoundException('Tenant not found');
+    const prev =
+      existing.branding && typeof existing.branding === 'object'
+        ? { ...(existing.branding as Record<string, unknown>) }
+        : {};
+    delete prev.logoUrl;
+    await this.prisma.tenant.update({
+      where: { id: user.tenantId },
+      data: { branding: prev as Prisma.InputJsonValue },
+    });
+    return { logoUrl: null };
   }
 
   async updateMe(user: AuthUser, dto: UpdateTenantDto) {
@@ -799,5 +843,103 @@ export class TenantsService {
       })),
       nav,
     };
+  }
+
+  private async unitsState(tenantId: string) {
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { settings: true },
+    });
+    if (!tenant) throw new NotFoundException('Tenant not found');
+    return {
+      settings: tenant.settings,
+      units: parseMeasureUnits(tenant.settings),
+    };
+  }
+
+  private async persistUnits(
+    tenantId: string,
+    units: MeasureUnit[],
+    prevSettings: unknown,
+  ) {
+    const root =
+      prevSettings && typeof prevSettings === 'object'
+        ? { ...(prevSettings as Record<string, unknown>) }
+        : {};
+    await this.prisma.tenant.update({
+      where: { id: tenantId },
+      data: {
+        settings: { ...root, units } as Prisma.InputJsonValue,
+      },
+    });
+    return { items: parseMeasureUnits({ units }) };
+  }
+
+  async listUnits(user: AuthUser) {
+    const { settings, units } = await this.unitsState(user.tenantId);
+    const raw =
+      settings && typeof settings === 'object'
+        ? (settings as Record<string, unknown>).units
+        : null;
+    if (!Array.isArray(raw)) {
+      return this.persistUnits(user.tenantId, units, settings);
+    }
+    return { items: units };
+  }
+
+  async createUnit(user: AuthUser, dto: CreateMeasureUnitDto) {
+    const { settings, units } = await this.unitsState(user.tenantId);
+    const code = dto.code.trim();
+    if (units.some((u) => u.code.toLowerCase() === code.toLowerCase())) {
+      throw new BadRequestException(`Unit "${code}" already exists`);
+    }
+    units.push({
+      code,
+      name: dto.name.trim(),
+      decimalQty: dto.decimalQty === true,
+      active: true,
+      system: false,
+    });
+    return this.persistUnits(user.tenantId, units, settings);
+  }
+
+  async updateUnit(user: AuthUser, rawCode: string, dto: UpdateMeasureUnitDto) {
+    const { settings, units } = await this.unitsState(user.tenantId);
+    const code = decodeURIComponent(rawCode).trim();
+    const idx = units.findIndex(
+      (u) => u.code.toLowerCase() === code.toLowerCase(),
+    );
+    if (idx < 0) throw new NotFoundException('Unit not found');
+    const current = units[idx]!;
+    if (dto.active === false && current.code === 'pcs') {
+      throw new BadRequestException('Piece (pcs) must stay active');
+    }
+    units[idx] = {
+      ...current,
+      name: dto.name?.trim() || current.name,
+      decimalQty:
+        dto.decimalQty === undefined ? current.decimalQty : dto.decimalQty,
+      active: dto.active === undefined ? current.active : dto.active,
+    };
+    return this.persistUnits(user.tenantId, units, settings);
+  }
+
+  async deleteUnit(user: AuthUser, rawCode: string) {
+    const { settings, units } = await this.unitsState(user.tenantId);
+    const code = decodeURIComponent(rawCode).trim();
+    const current = units.find(
+      (u) => u.code.toLowerCase() === code.toLowerCase(),
+    );
+    if (!current) throw new NotFoundException('Unit not found');
+    if (current.system) {
+      throw new BadRequestException(
+        'Built-in units cannot be deleted — deactivate them instead',
+      );
+    }
+    return this.persistUnits(
+      user.tenantId,
+      units.filter((u) => u.code.toLowerCase() !== code.toLowerCase()),
+      settings,
+    );
   }
 }

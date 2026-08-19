@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -15,8 +16,11 @@ import type { AuthUser } from '../auth/types';
 import {
   CreateLocationDto,
   CreateOrganizationDto,
+  CreateMeasureUnitDto,
   UpdateLocationDto,
+  UpdateMeasureUnitDto,
   UpdateTenantDto,
+  UploadTenantLogoDto,
 } from './dto/tenants.dto';
 import { TenantsService } from './tenants.service';
 
@@ -38,6 +42,23 @@ export class TenantsController {
   @ApiOperation({ summary: 'Update current tenant (admin / manager)' })
   updateMe(@CurrentUser() user: AuthUser, @Body() dto: UpdateTenantDto) {
     return this.tenantsService.updateMe(user, dto);
+  }
+
+  @Post('tenants/me/logo')
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Upload shop logo (JPEG/PNG/WebP/GIF/SVG, max 4MB)' })
+  uploadLogo(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: UploadTenantLogoDto,
+  ) {
+    return this.tenantsService.uploadLogo(user, dto.imageBase64);
+  }
+
+  @Post('tenants/me/logo/remove')
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Clear shop logo' })
+  removeLogo(@CurrentUser() user: AuthUser) {
+    return this.tenantsService.removeLogo(user);
   }
 
   @Get('organizations')
@@ -141,5 +162,75 @@ export class TenantsController {
     @Body() dto: UpdateLocationDto,
   ) {
     return this.tenantsService.updateStore(user, id, dto);
+  }
+
+  @Get('tenants/me/units')
+  @Roles(...RoleGroup.all)
+  @ApiOperation({ summary: 'List units of measure for this shop' })
+  listUnitsMe(@CurrentUser() user: AuthUser) {
+    return this.tenantsService.listUnits(user);
+  }
+
+  @Post('tenants/me/units')
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Add a unit of measure' })
+  createUnitMe(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateMeasureUnitDto,
+  ) {
+    return this.tenantsService.createUnit(user, dto);
+  }
+
+  @Patch('tenants/me/units/:code')
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Update a unit (name, decimal qty, active)' })
+  updateUnitMe(
+    @CurrentUser() user: AuthUser,
+    @Param('code') code: string,
+    @Body() dto: UpdateMeasureUnitDto,
+  ) {
+    return this.tenantsService.updateUnit(user, code, dto);
+  }
+
+  @Delete('tenants/me/units/:code')
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Remove a custom unit' })
+  deleteUnitMe(@CurrentUser() user: AuthUser, @Param('code') code: string) {
+    return this.tenantsService.deleteUnit(user, code);
+  }
+
+  @Get('units')
+  @Roles(...RoleGroup.all)
+  @ApiOperation({ summary: 'List units of measure for this shop' })
+  listUnits(@CurrentUser() user: AuthUser) {
+    return this.tenantsService.listUnits(user);
+  }
+
+  @Post('units')
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Add a unit of measure' })
+  createUnit(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateMeasureUnitDto,
+  ) {
+    return this.tenantsService.createUnit(user, dto);
+  }
+
+  @Patch('units/:code')
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Update a unit (name, decimal qty, active)' })
+  updateUnit(
+    @CurrentUser() user: AuthUser,
+    @Param('code') code: string,
+    @Body() dto: UpdateMeasureUnitDto,
+  ) {
+    return this.tenantsService.updateUnit(user, code, dto);
+  }
+
+  @Delete('units/:code')
+  @Roles(...RoleGroup.lead)
+  @ApiOperation({ summary: 'Remove a custom unit (system units cannot be deleted)' })
+  deleteUnit(@CurrentUser() user: AuthUser, @Param('code') code: string) {
+    return this.tenantsService.deleteUnit(user, code);
   }
 }

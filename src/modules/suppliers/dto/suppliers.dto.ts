@@ -20,33 +20,47 @@ import {
 } from 'class-validator';
 
 export class CreateSupplierDto {
-  @ApiProperty({ example: 'Metro Formal Wear Supply' })
-  @IsString()
-  @MinLength(2)
-  @MaxLength(200)
-  name!: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  @MaxLength(120)
-  contact?: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  @MaxLength(20)
-  phone?: string;
-}
-
-export class UpdateSupplierDto {
-  @ApiPropertyOptional()
+  @ApiProperty({ example: 'Metro Wholesale' })
   @IsOptional()
   @IsString()
   @MinLength(2)
   @MaxLength(200)
   name?: string;
 
+  @ApiPropertyOptional({ example: 'SUP-000042' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  code?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  legalName?: string;
+
+  @ApiPropertyOptional({
+    example: 'goods',
+    description: 'goods | services | both | manufacturer | wholesaler | other',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  supplierType?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  category?: string;
+
+  @ApiPropertyOptional({
+    enum: ['active', 'inactive', 'blocked', 'on_hold', 'archived'],
+  })
+  @IsOptional()
+  @IsIn(['active', 'inactive', 'blocked', 'on_hold', 'archived'])
+  status?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -56,8 +70,251 @@ export class UpdateSupplierDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
-  @MaxLength(20)
+  @MaxLength(80)
+  designation?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
   phone?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  phoneAlt?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  email?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  website?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  notes?: string;
+
+  @ApiPropertyOptional({ description: 'GSTIN / VAT / EIN / local tax id' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  taxId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  taxCategory?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  taxExempt?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  registrationNo?: string;
+
+  @ApiPropertyOptional({
+    example: 'net_30',
+    description: 'immediate | net_7 | net_15 | net_30 | net_45 | net_60 | custom',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  paymentTerm?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  dueDays?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  creditLimit?: number;
+
+  @ApiPropertyOptional({ example: 'INR' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(3)
+  currencyCode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  preferredPayMethod?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  bankName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  bankAccountName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  bankAccountNo?: string;
+
+  @ApiPropertyOptional({ description: 'IFSC / SWIFT / local bank id' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  bankIdentifier?: string;
+
+  @ApiPropertyOptional({ description: 'UPI / wallet handle' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  payHandle?: string;
+}
+
+export class UpdateSupplierDto extends CreateSupplierDto {}
+
+export class SupplierContactDto {
+  @ApiProperty()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(120)
+  name!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  email?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  phone?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  role?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isPrimary?: boolean;
+}
+
+export class SupplierAddressDto {
+  @ApiPropertyOptional({ example: 'billing' })
+  @IsOptional()
+  @IsIn(['billing', 'shipping', 'other'])
+  kind?: string;
+
+  @ApiProperty()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(200)
+  line1!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  line2?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  city?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  state?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  postalCode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  country?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isDefault?: boolean;
+}
+
+export class AddSupplierNoteDto {
+  @ApiProperty()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(4000)
+  body!: string;
+}
+
+export class UploadSupplierDocumentDto {
+  @ApiProperty({ example: 'tax_certificate' })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(64)
+  docType!: string;
+
+  @ApiProperty()
+  @IsString()
+  @MinLength(32)
+  imageBase64!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  fileName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsDateString()
+  expiresAt?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
 }
 
 export class CreatePoLineDto {

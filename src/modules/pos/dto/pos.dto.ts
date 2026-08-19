@@ -14,6 +14,7 @@ import {
   IsPositive,
   IsString,
   IsUUID,
+  Matches,
   MaxLength,
   Min,
   MinLength,
@@ -360,13 +361,11 @@ export class AddSaleProductDto {
   @MaxLength(18)
   sku!: string;
 
-  @ApiProperty({
-    example: 'kg',
-    enum: ['pcs', 'pack', 'kg', 'g', 'L', 'ml'],
-    description: 'Sell unit — grocery kg/L allow decimal qty',
-  })
+  @ApiPropertyOptional({ example: 'pcs' })
   @IsOptional()
-  @IsIn(['pcs', 'pack', 'kg', 'g', 'L', 'ml'])
+  @IsString()
+  @MaxLength(16)
+  @Matches(/^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/)
   sellUnit?: string;
 
   @ApiProperty({ example: 299, description: 'Price per sell unit (> 0)' })
@@ -655,9 +654,11 @@ export class ImportSaleProductRowDto {
   @IsUUID()
   categoryId?: string;
 
-  @ApiPropertyOptional({ enum: ['pcs', 'pack', 'kg', 'g', 'L', 'ml'] })
+  @ApiPropertyOptional({ example: 'pcs' })
   @IsOptional()
-  @IsIn(['pcs', 'pack', 'kg', 'g', 'L', 'ml'])
+  @IsString()
+  @MaxLength(16)
+  @Matches(/^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/)
   sellUnit?: string;
 
   @ApiProperty({ example: 199 })
@@ -794,9 +795,11 @@ export class UpdateSaleProductDto {
   @MaxLength(2000)
   photoUrl?: string;
 
-  @ApiPropertyOptional({ enum: ['pcs', 'pack', 'kg', 'g', 'L', 'ml'] })
+  @ApiPropertyOptional({ example: 'pcs' })
   @IsOptional()
-  @IsIn(['pcs', 'pack', 'kg', 'g', 'L', 'ml'])
+  @IsString()
+  @MaxLength(16)
+  @Matches(/^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/)
   sellUnit?: string;
 
   @ApiPropertyOptional()

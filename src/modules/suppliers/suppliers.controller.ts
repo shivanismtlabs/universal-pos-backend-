@@ -14,6 +14,7 @@ import { Roles } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
 import {
+  AddSupplierNoteDto,
   CreatePurchaseOrderDto,
   CreateSupplierDto,
   CreateSupplierInvoiceDto,
@@ -21,8 +22,11 @@ import {
   PaySupplierInvoiceDto,
   ReceivePurchaseOrderDto,
   ReturnPurchaseOrderDto,
+  SupplierAddressDto,
+  SupplierContactDto,
   UpdatePurchaseOrderDto,
   UpdateSupplierDto,
+  UploadSupplierDocumentDto,
 } from './dto/suppliers.dto';
 import { SuppliersService } from './suppliers.service';
 
@@ -40,12 +44,17 @@ export class SuppliersController {
   }
 
   @Get('suppliers')
+  @Roles(...RoleGroup.catalogRead)
   @ApiOperation({ summary: 'List suppliers' })
-  listSuppliers(@CurrentUser() user: AuthUser) {
-    return this.suppliersService.listSuppliers(user);
+  listSuppliers(
+    @CurrentUser() user: AuthUser,
+    @Query('status') status?: string,
+  ) {
+    return this.suppliersService.listSuppliers(user, status);
   }
 
   @Get('suppliers/:id')
+  @Roles(...RoleGroup.catalogRead)
   @ApiOperation({ summary: 'Get supplier' })
   getSupplier(
     @CurrentUser() user: AuthUser,
@@ -55,6 +64,7 @@ export class SuppliersController {
   }
 
   @Get('suppliers/:id/ledger')
+  @Roles(...RoleGroup.catalogRead)
   @ApiOperation({ summary: 'Supplier AP ledger (invoices + payments)' })
   supplierLedger(
     @CurrentUser() user: AuthUser,
@@ -71,6 +81,47 @@ export class SuppliersController {
     @Body() dto: UpdateSupplierDto,
   ) {
     return this.suppliersService.updateSupplier(user, id, dto);
+  }
+
+  @Post('suppliers/:id/contacts')
+  @ApiOperation({ summary: 'Add a supplier contact' })
+  addContact(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SupplierContactDto,
+  ) {
+    return this.suppliersService.addContact(user, id, dto);
+  }
+
+  @Post('suppliers/:id/addresses')
+  @ApiOperation({ summary: 'Add a supplier address' })
+  addAddress(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SupplierAddressDto,
+  ) {
+    return this.suppliersService.addAddress(user, id, dto);
+  }
+
+  @Post('suppliers/:id/notes')
+  @ApiOperation({ summary: 'Add supplier activity note' })
+  addNote(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AddSupplierNoteDto,
+  ) {
+    return this.suppliersService.addNote(user, id, dto);
+  }
+
+  @Post('suppliers/:id/documents')
+  @Roles(...RoleGroup.finance)
+  @ApiOperation({ summary: 'Upload supplier document (image/file as data URL)' })
+  addDocument(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UploadSupplierDocumentDto,
+  ) {
+    return this.suppliersService.addDocument(user, id, dto);
   }
 
   @Post('purchase-orders')

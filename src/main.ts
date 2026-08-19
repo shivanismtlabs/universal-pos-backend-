@@ -1,4 +1,3 @@
-import fastifyCors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import { NestFactory } from '@nestjs/core';
 import {
@@ -70,24 +69,6 @@ async function bootstrap() {
   app.setGlobalPrefix(prefix);
 
   const corsAllowlist = resolveCorsAllowlist(process.env);
-  await app.register(fastifyCors, {
-    origin: (origin, callback) => {
-      callback(null, isCorsOriginAllowed(origin, corsAllowlist));
-    },
-    credentials: true,
-    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-    allowedHeaders: [
-      'Content-Type',
-      'Authorization',
-      'Accept',
-      'Origin',
-      'X-Requested-With',
-    ],
-    preflight: true,
-    strictPreflight: false,
-    hook: 'onRequest',
-  });
-
   app.enableCors({
     origin: (origin, callback) => {
       callback(null, isCorsOriginAllowed(origin, corsAllowlist));

@@ -5,6 +5,12 @@ import {
   ProductKind,
   StockLedgerType,
 } from '@prisma/client';
+import {
+  isKitchenContext,
+  isServiceRevenueContext,
+  reportContextFromSettings,
+  type ReportContext,
+} from '../../common/report-capabilities';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import type {
@@ -107,8 +113,7 @@ export class ReportsInventoryService {
       costingMethod: this.resolveCosting(query.costingMethod, ctx.settings),
       filters: this.filterEcho(query),
       variations: {
-        restaurantIngredientSplit:
-          ctx.businessType === 'restaurant' || ctx.businessType === 'hybrid',
+        restaurantIngredientSplit: isKitchenContext(ctx.reportCtx),
         byClass: this.groupByClass(items),
       },
       summary,
@@ -664,7 +669,7 @@ export class ReportsInventoryService {
     const onHand = levels.filter((l) => l.qtyOnHand > 0);
     const productIds = [...new Set(onHand.map((l) => l.productId))];
     if (!productIds.length) {
-      const copy = this.slowMovingCopy(ctx.businessType);
+      const copy = this.slowMovingCopy(ctx.reportCtx);
       return {
         generatedAt: new Date().toISOString(),
         timeZone: ctx.timeZone,
@@ -809,7 +814,7 @@ export class ReportsInventoryService {
       const avgMonthlyVelocity = round2(sold / months);
       const supplier = lastSupplier.get(l.productId) ?? null;
       const action = this.suggestDeadStockAction({
-        businessType: ctx.businessType,
+        reportCtx: ctx.reportCtx,
         daysSinceLastSale,
         neverSold,
         avgMonthlyVelocity,
@@ -877,7 +882,7 @@ export class ReportsInventoryService {
       };
     });
 
-    const copy = this.slowMovingCopy(ctx.businessType);
+    const copy = this.slowMovingCopy(ctx.reportCtx);
 
     return {
       generatedAt: new Date().toISOString(),
@@ -917,9 +922,8 @@ export class ReportsInventoryService {
     };
   }
 
-  private slowMovingCopy(businessType: string) {
-    const t = businessType.toLowerCase();
-    if (t === 'restaurant') {
+  private slowMovingCopy(ctx: ReportContext) {
+    if (isKitchenContext(ctx)) {
       return {
         title: 'Slow-Moving Menu Items',
         labels: {
@@ -929,7 +933,7 @@ export class ReportsInventoryService {
         },
       };
     }
-    if (t === 'service' || t === 'salon' || t === 'spa') {
+    if (isServiceRevenueContext(ctx)) {
       return {
         title: 'Underbooked / Slow Offerings',
         labels: {
@@ -963,7 +967,7 @@ export class ReportsInventoryService {
   }
 
   private suggestDeadStockAction(input: {
-    businessType: string;
+    reportCtx: ReportContext;
     daysSinceLastSale: number | null;
     neverSold: boolean;
     avgMonthlyVelocity: number;
@@ -979,20 +983,19 @@ export class ReportsInventoryService {
       | 'promote';
     label: string;
   } {
-    const t = input.businessType.toLowerCase();
     const days = input.neverSold ? 999 : (input.daysSinceLastSale ?? 0);
     const seasonal =
       input.avgMonthlyVelocity > 0 &&
       input.avgMonthlyVelocity < 3 &&
       days >= 60;
 
-    if (t === 'restaurant') {
+    if (isKitchenContext(input.reportCtx)) {
       if (days >= 90 || input.neverSold)
         return { code: 'menu_review', label: 'Menu redesign' };
       if (seasonal) return { code: 'promote', label: 'Feature / promo' };
       return { code: 'discount', label: 'Discount' };
     }
-    if (t === 'service' || t === 'salon' || t === 'spa') {
+    if (isServiceRevenueContext(input.reportCtx)) {
       if (days >= 90 || input.neverSold)
         return { code: 'promote', label: 'Promote / retire' };
       return { code: 'bundle', label: 'Bundle with popular' };
@@ -1025,15 +1028,20 @@ export class ReportsInventoryService {
       tenant.settings && typeof tenant.settings === 'object'
         ? (tenant.settings as Record<string, unknown>)
         : {};
+    const businessType =
+      tenant.businessConfig?.businessType ||
+      (typeof settings.businessType === 'string'
+        ? settings.businessType
+        : 'other');
     return {
       timeZone: tenant.timezone || 'UTC',
       currencyCode: tenant.currencyCode || 'USD',
-      businessType:
-        tenant.businessConfig?.businessType ||
-        (typeof settings.businessType === 'string'
-          ? settings.businessType
-          : 'other'),
+      businessType,
       settings,
+      reportCtx: reportContextFromSettings({
+        ...settings,
+        businessType,
+      }),
     };
   }
 

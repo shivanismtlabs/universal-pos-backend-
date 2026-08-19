@@ -33,6 +33,7 @@ import { AccountingModule } from './modules/accounting/accounting.module';
 import { ResourcesModule } from './modules/resources/resources.module';
 import { JobsModule } from './modules/jobs/jobs.module';
 import { CustomFieldsModule } from './modules/custom-fields/custom-fields.module';
+import { EnterpriseModule } from './modules/enterprise/enterprise.module';
 
 const enableQueues = process.env.ENABLE_QUEUES === 'true';
 
@@ -60,6 +61,7 @@ const enableQueues = process.env.ENABLE_QUEUES === 'true';
     ResourcesModule,
     JobsModule,
     CustomFieldsModule,
+    EnterpriseModule,
     SuppliersModule,
     SyncModule,
     PosModule,

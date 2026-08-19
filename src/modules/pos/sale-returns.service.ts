@@ -24,6 +24,8 @@ import { BillingService } from '../billing/billing.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { PaymentsService } from '../payments/payments.service';
 import { AccountingPostingService } from '../accounting/posting.service';
+import { EnterpriseApprovalsService } from '../enterprise/enterprise-approvals.service';
+import { StockMutationEngine } from '../inventory/stock-mutation.engine';
 import type { SaleExchangeDto, SaleReturnDto } from './dto/pos.dto';
 import {
   computeReturnRefundFromOriginal,
@@ -59,6 +61,8 @@ export class SaleReturnsService {
     private readonly loyalty: LoyaltyService,
     private readonly billing: BillingService,
     private readonly accounting: AccountingPostingService,
+    private readonly approvals: EnterpriseApprovalsService,
+    private readonly stock: StockMutationEngine,
   ) {}
 
   async saleReturn(user: AuthUser, dto: SaleReturnDto) {
@@ -268,6 +272,15 @@ export class SaleReturnsService {
     const notes = dto.reason?.trim() || `Reason: ${dto.reasonCode}`;
     const lines = computed.lines;
 
+    const evaled = await this.approvals.evaluate(user, {
+      type: 'refund',
+      tenantId: user.tenantId,
+      amount: Number(refundAmount.toFixed(2)),
+      entityType: 'return_event',
+      entityId: order.id,
+      reason: notes,
+    });
+
     const autoComplete =
       this.isRefundApprover(user) ||
       (await this.withinApprovalThreshold(
@@ -275,7 +288,18 @@ export class SaleReturnsService {
         Number(refundAmount.toFixed(2)),
       ));
 
-    if (!autoComplete) {
+    if (!autoComplete || evaled.needsApproval) {
+      if (evaled.needsApproval) {
+        await this.approvals.createRequest(user, {
+          type: 'refund',
+          tenantId: user.tenantId,
+          amount: Number(refundAmount.toFixed(2)),
+          entityType: 'order',
+          entityId: order.id,
+          reason: evaled.reason ?? notes,
+          payload: { orderId: order.id, reasonCode: dto.reasonCode },
+        });
+      }
       const pending = await this.prisma.returnEvent.create({
         data: {
           tenantId: user.tenantId,
@@ -1433,54 +1457,32 @@ export class SaleReturnsService {
     }
     const resellable = RESELLABLE.has(line.condition || 'good');
     if (resellable) {
-      const updated = await tx.stockLevel.update({
-        where: { id: level.id },
-        data: { qtyOnHand: { increment: line.quantity } },
-      });
-      await tx.stockLedgerEntry.create({
-        data: {
-          tenantId: user.tenantId,
-          locationId: level.locationId,
-          productId: level.productId,
-          stockLevelId: level.id,
-          type: StockLedgerType.customer_return,
-          qtyDelta: line.quantity,
-          qtyAfter: Number(updated.qtyOnHand),
-          damageDelta: 0,
-          reason: notes,
-          referenceType: 'customer_return',
-          referenceId: order.id,
-          actorUserId: user.userId,
-          meta: {
-            condition: line.condition,
-            orderNumber: order.orderNumber,
-          },
-        },
+      await this.stock.mutateInTx(tx, {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        locationId: level.locationId,
+        stockLevelId: level.id,
+        qty: line.quantity,
+        type: StockLedgerType.customer_return,
+        reason: notes,
+        referenceType: 'customer_return',
+        referenceId: order.id,
+        skipComponentExplosion: true,
       });
     } else {
-      const updated = await tx.stockLevel.update({
-        where: { id: level.id },
-        data: { qtyDamaged: { increment: line.quantity } },
-      });
-      await tx.stockLedgerEntry.create({
-        data: {
-          tenantId: user.tenantId,
-          locationId: level.locationId,
-          productId: level.productId,
-          stockLevelId: level.id,
-          type: StockLedgerType.damage,
-          qtyDelta: 0,
-          qtyAfter: Number(level.qtyOnHand),
-          damageDelta: line.quantity,
-          reason: `Customer return (${line.condition}): ${notes}`,
-          referenceType: 'customer_return',
-          referenceId: order.id,
-          actorUserId: user.userId,
-          meta: {
-            condition: line.condition,
-            qtyDamagedAfter: Number(updated.qtyDamaged),
-          },
-        },
+      await this.stock.mutateInTx(tx, {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        locationId: level.locationId,
+        stockLevelId: level.id,
+        qty: 0,
+        type: StockLedgerType.damage,
+        damageDelta: line.quantity,
+        reason: notes,
+        referenceType: 'customer_return',
+        referenceId: order.id,
+        skipComponentExplosion: true,
+        allowNegative: true,
       });
     }
   }

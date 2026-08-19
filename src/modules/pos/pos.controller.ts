@@ -15,6 +15,7 @@ import {
   CommerceModeGuard,
   RequireCommerceModes,
 } from '../../common/guards/commerce-mode.guard';
+import { RegisterCashMovementKind } from '@prisma/client';
 import { Role, RoleGroup } from '../../common/roles';
 import { Roles } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -27,6 +28,7 @@ import {
   AdjustSaleStockDto,
   CheckoutDto,
   CloseRegisterDto,
+  RegisterCashMovementDto,
   ImportSaleProductsDto,
   OpenRegisterDto,
   ParkSaleDto,
@@ -263,6 +265,7 @@ export class PosController {
     @Query('lowStock') lowStock?: string,
     @Query('maxQty') maxQty?: string,
     @Query('forPurchase') forPurchase?: string,
+    @Query('categoryId') categoryId?: string,
   ) {
     return this.posService.saleCatalog(user, {
       locationId,
@@ -272,6 +275,7 @@ export class PosController {
       lowStock: lowStock === '1' || lowStock === 'true',
       maxQty: maxQty ? Number(maxQty) : undefined,
       forPurchase: forPurchase === '1' || forPurchase === 'true',
+      categoryId,
     });
   }
 
@@ -389,6 +393,40 @@ export class PosController {
     @Query('locationId') locationId?: string,
   ) {
     return this.posService.currentRegister(user, locationId);
+  }
+
+  @Post('sale/register/:id/cash-in')
+  @Roles(...RoleGroup.pos)
+  @ApiOperation({ summary: 'Record cash in (paid into drawer)' })
+  cashIn(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RegisterCashMovementDto,
+  ) {
+    return this.posService.addRegisterCashMovement(
+      user,
+      id,
+      RegisterCashMovementKind.cash_in,
+      dto.amount,
+      dto.note,
+    );
+  }
+
+  @Post('sale/register/:id/cash-drop')
+  @Roles(...RoleGroup.pos)
+  @ApiOperation({ summary: 'Record cash drop (removed from drawer)' })
+  cashDrop(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RegisterCashMovementDto,
+  ) {
+    return this.posService.addRegisterCashMovement(
+      user,
+      id,
+      RegisterCashMovementKind.cash_drop,
+      dto.amount,
+      dto.note,
+    );
   }
 
   @Post('sale/register/:id/close')

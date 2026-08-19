@@ -88,6 +88,8 @@ enum StockUnitStatus {
   cleaning
   repair
   retired
+  sold
+  lost
 }
 
 enum StockUnitCondition {
@@ -169,10 +171,18 @@ enum PaymentMethod {
 }
 
 enum PaymentStatus {
+  created
+  initiated
   pending
+  processing
   succeeded
   failed
   cancelled
+}
+
+enum RegisterCashMovementKind {
+  cash_in
+  cash_drop
 }
 
 enum AppointmentStatus {
@@ -230,6 +240,7 @@ enum SyncStatus {
   accepted
   conflict
   rejected
+  retry
 }
 
 enum PoType {
@@ -310,9 +321,16 @@ model Tenant {
   timezone     String       @default("Asia/Kolkata")
   branding     Json         @default("{}")
   settings     Json         @default("{}")
+  /// Optional holding company — null until identity wraps this shop
+  businessGroupId String?   @map("business_group_id") @db.Uuid
+  /// Opt-in: other group operators may see this tenant's stock
+  shareInventory  Boolean   @default(false) @map("share_inventory")
+  shareSuppliers  Boolean   @default(false) @map("share_suppliers")
+  shareCustomers  Boolean   @default(false) @map("share_customers")
   createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
 
+  businessGroup      BusinessGroup? @relation(fields: [businessGroupId], references: [id])
   organizations      Organization[]
   locations          Location[]
   departments        Department[]
@@ -367,6 +385,8 @@ model Tenant {
   userNotificationPrefs   UserNotificationPreference[]
   devicePushTokens        DevicePushToken[]
   webhookEndpoints        WebhookEndpoint[]
+  stripeWebhookEvents     StripeWebhookEvent[]
+  registerCashMovements   RegisterCashMovement[]
   apiKeys                 ApiKey[]
   offlineSyncEvents       OfflineSyncEvent[]
   customerSubscriptions   CustomerSubscription[]
@@ -392,8 +412,21 @@ model Tenant {
   rentalCleaningJobs ModRentalCleaningJob[]
   rentalDamageRecords ModRentalDamageRecord[]
   identityMemberships IdentityTenantMembership[]
+  qtyReservations         QtyReservation[]
+  inventoryIdempotency    InventoryIdempotency[]
+  stockTransfers          StockTransfer[]
+  unitConversions         UnitConversion[]
+  productionOrders        ProductionOrder[]
   /// Universal POS: 1:1 vertical config (order_fields / item_fields / ui_flow JSON)
   businessConfig     BusinessConfig?
+  approvalPolicies        ApprovalPolicy[]
+  approvalRequests        ApprovalRequest[]
+  exceptionAlertRules     ExceptionAlertRule[]
+  intercompanyAsSource    IntercompanyTransfer[] @relation("IcSourceTenant")
+  intercompanyAsDest      IntercompanyTransfer[] @relation("IcDestTenant")
+  spinOffs                BusinessSpinOff[]
+  groupSupplierLinks      GroupSupplierLink[]
+  groupCustomerLinks      GroupCustomerLink[]
   glAccounts              GlAccount[]
   journalEntries          JournalEntry[]
   journalEntryLines       JournalEntryLine[]
@@ -404,8 +437,30 @@ model Tenant {
   integrationExternalMaps IntegrationExternalMap[]
   integrationSyncJobs     IntegrationSyncJob[]
   integrationSyncLogs     IntegrationSyncLog[]
+  authSessions            AuthSession[]
 
+  @@index([businessGroupId])
   @@map("tenants")
+}
+
+/// Shop access/refresh session. Logout revokes one row; password reset / disable revokes all.
+model AuthSession {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @map("user_id") @db.Uuid
+  tenantId         String    @map("tenant_id") @db.Uuid
+  refreshTokenHash String?   @map("refresh_token_hash")
+  expiresAt        DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt        DateTime? @map("revoked_at") @db.Timestamptz(6)
+  revokeReason     String?   @map("revoke_reason")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([tenantId])
+  @@map("auth_sessions")
 }
 
 model TenantSubscription {
@@ -521,6 +576,10 @@ model Location {
   productBatches    ProductBatch[]
   stockLedgerEntries StockLedgerEntry[]
   stockCountSessions StockCountSession[]
+  qtyReservations   QtyReservation[]
+  stockTransfersFrom StockTransfer[] @relation("TransferFromLocation")
+  stockTransfersTo   StockTransfer[] @relation("TransferToLocation")
+  productionOrders  ProductionOrder[]
   orders            Order[]
   appointments      Appointment[]
   resources         Resource[]
@@ -537,6 +596,7 @@ model Location {
   journalEntryLines JournalEntryLine[]
   accountMappings   AccountMapping[]
   accountingTaxFacts AccountingTaxFact[]
+  payments          Payment[]
 
   @@unique([tenantId, code])
   @@map("locations")
@@ -596,6 +656,8 @@ model IdentityAccount {
   updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   memberships IdentityTenantMembership[]
+  ownedGroups BusinessGroup[] @relation("GroupOwner")
+  groupMemberships BusinessGroupMembership[]
 
   @@map("identity_accounts")
 }
@@ -706,10 +768,12 @@ model User {
   returnsReceived    ReturnEvent[]       @relation("ReturnReceivedBy")
   returnsApproved    ReturnEvent[]       @relation("ReturnApprovedBy")
   registerSessions   RegisterSession[]
+  registerCashMovements RegisterCashMovement[]
   rentalMeasurementsTaken ModRentalMeasurement[]
   expensesCreated    Expense[]
   expensesApproved   Expense[]           @relation("ExpenseApprovedBy")
   identityMembership IdentityTenantMembership?
+  authSessions       AuthSession[]
   shiftAssignments   ShiftAssignment[]
   attendanceEntries  AttendanceEntry[]
   webAuthnCredentials WebAuthnCredential[]
@@ -727,6 +791,11 @@ model User {
   periodsReopened     AccountingPeriod[]    @relation("PeriodReopenedBy")
   mappingsCreated     AccountMapping[]      @relation("AccountMappingCreatedBy")
   integrationConnections IntegrationConnection[] @relation("IntegrationConnectedBy")
+  approvalRequestsCreated  ApprovalRequest[] @relation("ApprovalRequestedBy")
+  approvalRequestsResolved ApprovalRequest[] @relation("ApprovalResolvedBy")
+  approvalStepsActed       ApprovalStep[]    @relation("ApprovalStepActor")
+  intercompanyCreated      IntercompanyTransfer[] @relation("IcCreatedBy")
+  intercompanyApproved     IntercompanyTransfer[] @relation("IcApprovedBy")
 
   @@unique([tenantId, email])
   @@map("users")
@@ -1169,6 +1238,9 @@ model Product {
   stockLedgerEntries    StockLedgerEntry[]
   stockCountLines       StockCountLine[]
   workJobLines          WorkJobLine[]
+  qtyReservations       QtyReservation[]
+  unitConversions       UnitConversion[]
+  productionOrders      ProductionOrder[]
 
   @@unique([tenantId, skuCode])
   @@index([tenantId, status])
@@ -1199,6 +1271,8 @@ model ProductVariant {
   product  Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
   batches  ProductBatch[]
   stockUnits StockUnit[]
+  stockLevels StockLevel[]
+  qtyReservations QtyReservation[]
 
   @@unique([tenantId, skuCode])
   @@index([tenantId, productId])
@@ -1213,6 +1287,10 @@ model ProductBundleLine {
   componentProductId   String   @map("component_product_id") @db.Uuid
   componentVariantId   String?  @map("component_variant_id") @db.Uuid
   quantity             Decimal  @default(1) @db.Decimal(12, 3)
+  /// When true, selling/completing the parent consumes this component (recipe, kit, service).
+  consumeOnSale        Boolean  @default(false) @map("consume_on_sale")
+  /// bundle | recipe | production
+  purpose              String   @default("bundle") @db.VarChar(24)
   createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -1350,8 +1428,15 @@ model StockLevel {
   sku       String   @db.VarChar(18)
   /// pcs | pack | kg | g | L | ml — drives qty validation & POS labels
   sellUnit  String   @default("pcs") @map("sell_unit") @db.VarChar(8)
+  /// Optional variant dimension — empty variantKey = product-level stock
+  variantId String?  @map("variant_id") @db.Uuid
+  variantKey String  @default("") @map("variant_key") @db.VarChar(36)
   /// Fractional OK for kg/L (e.g. 2.500); whole numbers for pcs/pack/g/ml
   qtyOnHand Decimal  @default(0) @map("qty_on_hand") @db.Decimal(12, 3)
+  /// Held for unfulfilled orders — not sellable, still physically on hand
+  qtyReserved Decimal @default(0) @map("qty_reserved") @db.Decimal(12, 3)
+  /// Issued transfers not yet received at destination
+  qtyInTransit Decimal @default(0) @map("qty_in_transit") @db.Decimal(12, 3)
   /// Quarantine / damaged qty (still at location, not sellable)
   qtyDamaged Decimal @default(0) @map("qty_damaged") @db.Decimal(12, 3)
   /// Low-stock / reorder alert threshold (null = fall back to product.meta)
@@ -1359,19 +1444,21 @@ model StockLevel {
   /// Suggested qty to order when at/below reorder point
   reorderQty   Decimal? @map("reorder_qty") @db.Decimal(12, 3)
   sellPrice Decimal  @default(0) @map("sell_price") @db.Decimal(12, 2)
+  version   Int      @default(0)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant             Tenant              @relation(fields: [tenantId], references: [id])
   location           Location            @relation(fields: [locationId], references: [id])
   product            Product             @relation(fields: [productId], references: [id])
+  variant            ProductVariant?     @relation(fields: [variantId], references: [id])
   orderItems         OrderItem[]
   purchaseOrderLines PurchaseOrderLine[]
   ledgerEntries      StockLedgerEntry[]
   countLines         StockCountLine[]
   goodsReceiptLines  GoodsReceiptLine[]
 
-  @@unique([tenantId, locationId, productId])
+  @@unique([tenantId, locationId, productId, variantKey])
   /// Same product SKU may exist at multiple locations (multi-store)
   @@unique([tenantId, locationId, sku])
   @@index([tenantId, productId])
@@ -1392,6 +1479,15 @@ enum StockLedgerType {
   damage
   damage_restore
   audit
+  opening
+  consumption
+  production_in
+  production_out
+  expiry
+  reservation
+  reservation_release
+  rental_out
+  rental_return
 }
 
 model StockLedgerEntry {
@@ -1401,14 +1497,20 @@ model StockLedgerEntry {
   productId      String          @map("product_id") @db.Uuid
   stockLevelId   String          @map("stock_level_id") @db.Uuid
   type           StockLedgerType
+  /// Sellable on-hand before this mutation
+  qtyBefore      Decimal         @default(0) @map("qty_before") @db.Decimal(12, 3)
   /// Signed qty change on sellable on-hand (can be 0 if only damaged moves)
   qtyDelta       Decimal         @map("qty_delta") @db.Decimal(12, 3)
   qtyAfter       Decimal         @map("qty_after") @db.Decimal(12, 3)
   damageDelta    Decimal         @default(0) @map("damage_delta") @db.Decimal(12, 3)
+  variantId      String?         @map("variant_id") @db.Uuid
+  batchId        String?         @map("batch_id") @db.Uuid
+  stockUnitId    String?         @map("stock_unit_id") @db.Uuid
   reason         String?
   referenceType  String?         @map("reference_type")
   referenceId    String?         @map("reference_id") @db.Uuid
   actorUserId    String?         @map("actor_user_id") @db.Uuid
+  idempotencyKey String?         @map("idempotency_key") @db.VarChar(120)
   meta           Json            @default("{}")
   createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
 
@@ -1421,6 +1523,7 @@ model StockLedgerEntry {
   @@index([tenantId, createdAt])
   @@index([tenantId, locationId, createdAt])
   @@index([tenantId, productId, createdAt])
+  @@index([tenantId, idempotencyKey])
   @@map("stock_ledger_entries")
 }
 
@@ -1492,6 +1595,31 @@ model StockReservation {
   @@map("stock_reservations")
 }
 
+enum QtyReservationStatus {
+  active
+  released
+  consumed
+  expired
+  cancelled
+}
+
+enum StockTransferStatus {
+  draft
+  approved
+  issued
+  in_transit
+  partially_received
+  received
+  cancelled
+  rejected
+}
+
+enum ProductionOrderStatus {
+  draft
+  completed
+  cancelled
+}
+
 model StockMovement {
   id          String          @id @default(uuid()) @db.Uuid
   tenantId    String          @map("tenant_id") @db.Uuid
@@ -1508,6 +1636,127 @@ model StockMovement {
   actor     User?     @relation(fields: [actorUserId], references: [id])
 
   @@map("stock_movements")
+}
+
+/// Qty holds for sale/fulfillment — does not reduce physical on-hand until consumed
+model QtyReservation {
+  id           String               @id @default(uuid()) @db.Uuid
+  tenantId     String               @map("tenant_id") @db.Uuid
+  locationId   String               @map("location_id") @db.Uuid
+  productId    String               @map("product_id") @db.Uuid
+  variantId    String?              @map("variant_id") @db.Uuid
+  batchId      String?              @map("batch_id") @db.Uuid
+  stockLevelId String?              @map("stock_level_id") @db.Uuid
+  orderId      String?              @map("order_id") @db.Uuid
+  customerId   String?              @map("customer_id") @db.Uuid
+  qty          Decimal              @db.Decimal(12, 3)
+  status       QtyReservationStatus @default(active)
+  expiresAt    DateTime?            @map("expires_at") @db.Timestamptz(6)
+  reason       String?
+  createdAt    DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant          @relation(fields: [tenantId], references: [id])
+  location Location        @relation(fields: [locationId], references: [id])
+  product  Product         @relation(fields: [productId], references: [id])
+  variant  ProductVariant? @relation(fields: [variantId], references: [id])
+
+  @@index([tenantId, locationId, productId, status])
+  @@map("qty_reservations")
+}
+
+model InventoryIdempotency {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  key       String   @db.VarChar(160)
+  operation String   @db.VarChar(64)
+  result    Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, key])
+  @@map("inventory_idempotency")
+}
+
+model StockTransfer {
+  id              String              @id @default(uuid()) @db.Uuid
+  tenantId        String              @map("tenant_id") @db.Uuid
+  fromLocationId  String              @map("from_location_id") @db.Uuid
+  toLocationId    String              @map("to_location_id") @db.Uuid
+  status          StockTransferStatus @default(draft)
+  notes           String?
+  actorUserId     String?             @map("actor_user_id") @db.Uuid
+  issuedAt        DateTime?           @map("issued_at") @db.Timestamptz(6)
+  receivedAt      DateTime?           @map("received_at") @db.Timestamptz(6)
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant              @relation(fields: [tenantId], references: [id])
+  from   Location            @relation("TransferFromLocation", fields: [fromLocationId], references: [id])
+  to     Location            @relation("TransferToLocation", fields: [toLocationId], references: [id])
+  lines  StockTransferLine[]
+
+  @@index([tenantId, status, createdAt])
+  @@map("stock_transfers")
+}
+
+model StockTransferLine {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenantId         String   @map("tenant_id") @db.Uuid
+  transferId       String   @map("transfer_id") @db.Uuid
+  productId        String   @map("product_id") @db.Uuid
+  variantId        String?  @map("variant_id") @db.Uuid
+  batchId          String?  @map("batch_id") @db.Uuid
+  qty              Decimal  @db.Decimal(12, 3)
+  qtyReceived      Decimal  @default(0) @map("qty_received") @db.Decimal(12, 3)
+  qtyDamaged       Decimal  @default(0) @map("qty_damaged") @db.Decimal(12, 3)
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+
+  @@index([transferId])
+  @@map("stock_transfer_lines")
+}
+
+/// 1 fromUnit = factor base/toUnit for a product (or tenant-wide if productId null)
+model UnitConversion {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  productId  String?  @map("product_id") @db.Uuid
+  productKey String   @default("") @map("product_key") @db.VarChar(36)
+  fromUnit   String   @map("from_unit") @db.VarChar(16)
+  toUnit     String   @map("to_unit") @db.VarChar(16)
+  factor     Decimal  @db.Decimal(18, 6)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id])
+  product Product? @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, productKey, fromUnit, toUnit])
+  @@map("unit_conversions")
+}
+
+model ProductionOrder {
+  id                 String                @id @default(uuid()) @db.Uuid
+  tenantId           String                @map("tenant_id") @db.Uuid
+  locationId         String                @map("location_id") @db.Uuid
+  finishedProductId  String                @map("finished_product_id") @db.Uuid
+  finishedVariantId  String?               @map("finished_variant_id") @db.Uuid
+  qty                Decimal               @db.Decimal(12, 3)
+  status             ProductionOrderStatus @default(draft)
+  notes              String?
+  actorUserId        String?               @map("actor_user_id") @db.Uuid
+  completedAt        DateTime?             @map("completed_at") @db.Timestamptz(6)
+  createdAt          DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id])
+  location Location @relation(fields: [locationId], references: [id])
+  finished Product @relation(fields: [finishedProductId], references: [id])
+
+  @@index([tenantId, status])
+  @@map("production_orders")
 }
 
 model PurchaseOrder {
@@ -1540,8 +1789,8 @@ model PurchaseOrderLine {
   tenantId        String   @map("tenant_id") @db.Uuid
   purchaseOrderId String   @map("purchase_order_id") @db.Uuid
   stockLevelId    String   @map("stock_level_id") @db.Uuid
-  qtyOrdered      Int      @map("qty_ordered")
-  qtyReceived     Int      @default(0) @map("qty_received")
+  qtyOrdered      Decimal  @map("qty_ordered") @db.Decimal(12, 3)
+  qtyReceived     Decimal  @default(0) @map("qty_received") @db.Decimal(12, 3)
   unitCost        Decimal? @map("unit_cost") @db.Decimal(12, 2)
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -1731,24 +1980,52 @@ model Payment {
   id                    String        @id @default(uuid()) @db.Uuid
   tenantId              String        @map("tenant_id") @db.Uuid
   orderId               String        @map("order_id") @db.Uuid
+  locationId            String?       @map("location_id") @db.Uuid
+  registerSessionId     String?       @map("register_session_id") @db.Uuid
   type                  PaymentType   @default(payment)
   method                PaymentMethod
   status                PaymentStatus @default(pending)
   amount                Decimal       @db.Decimal(12, 2)
   currencyCode          String        @default("INR") @map("currency_code") @db.Char(3)
   idempotencyKey        String        @map("idempotency_key")
+  provider              String?
   gatewayRef            String?       @map("gateway_ref")
   gatewayPayload        Json?         @map("gateway_payload")
+  failureReason         String?       @map("failure_reason")
+  parentPaymentId       String?       @map("parent_payment_id") @db.Uuid
   takenByUserId         String?       @map("taken_by_user_id") @db.Uuid
   createdAt             DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt             DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant  Tenant @relation(fields: [tenantId], references: [id])
-  order   Order  @relation(fields: [orderId], references: [id])
-  takenBy User?  @relation(fields: [takenByUserId], references: [id])
+  tenant          Tenant           @relation(fields: [tenantId], references: [id])
+  order           Order            @relation(fields: [orderId], references: [id])
+  location        Location?        @relation(fields: [locationId], references: [id])
+  registerSession RegisterSession? @relation(fields: [registerSessionId], references: [id])
+  takenBy         User?            @relation(fields: [takenByUserId], references: [id])
+  parentPayment   Payment?         @relation("PaymentRefunds", fields: [parentPaymentId], references: [id])
+  refunds         Payment[]        @relation("PaymentRefunds")
 
   @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, gatewayRef])
+  @@index([tenantId, registerSessionId])
+  @@index([tenantId, orderId, status])
   @@map("payments")
+}
+
+/// Stripe (and future PSP) webhook inbox — unique event id for idempotency
+model StripeWebhookEvent {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenantId         String?  @map("tenant_id") @db.Uuid
+  stripeEventId    String   @unique @map("stripe_event_id")
+  type             String
+  paymentIntentId  String?  @map("payment_intent_id")
+  processedAt      DateTime @default(now()) @map("processed_at") @db.Timestamptz(6)
+  payload          Json     @default("{}")
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, paymentIntentId])
+  @@map("stripe_webhook_events")
 }
 
 model OrderFee {
@@ -1875,9 +2152,30 @@ model RegisterSession {
   tenant   Tenant   @relation(fields: [tenantId], references: [id])
   location Location @relation(fields: [locationId], references: [id])
   openedBy User     @relation(fields: [openedById], references: [id])
+  payments Payment[]
+  cashMovements RegisterCashMovement[]
 
   @@index([tenantId, locationId, closedAt])
   @@map("register_sessions")
+}
+
+/// Cash in / cash drop against an open register shift
+model RegisterCashMovement {
+  id                String                    @id @default(uuid()) @db.Uuid
+  tenantId          String                    @map("tenant_id") @db.Uuid
+  registerSessionId String                    @map("register_session_id") @db.Uuid
+  kind              RegisterCashMovementKind
+  amount            Decimal                   @db.Decimal(12, 2)
+  note              String?
+  createdById       String                    @map("created_by_id") @db.Uuid
+  createdAt         DateTime                  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant          Tenant          @relation(fields: [tenantId], references: [id])
+  registerSession RegisterSession @relation(fields: [registerSessionId], references: [id])
+  createdBy       User            @relation(fields: [createdById], references: [id])
+
+  @@index([tenantId, registerSessionId, createdAt])
+  @@map("register_cash_movements")
 }
 
 // ─── Appointments (generic booking — salon, fitting, clinic) ────────────────
@@ -2880,4 +3178,243 @@ model IntegrationSyncLog {
   @@index([tenantId, provider, createdAt])
   @@index([tenantId, localEntityId])
   @@map("integration_sync_logs")
+}
+
+// ─── BusinessGroup enterprise layer (holding company) ───────────────────────
+// Tenant remains the isolation + legal/workflow boundary.
+// Group is billing, consolidation, All Businesses — sharing is opt-in.
+
+model BusinessGroup {
+  id               String   @id @default(uuid()) @db.Uuid
+  name             String
+  slug             String   @unique
+  ownerIdentityId  String   @map("owner_identity_id") @db.Uuid
+  /// Entitlement codes + alert defaults (not a second RBAC)
+  entitlements     Json     @default("[]")
+  settings         Json     @default("{}")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  owner           IdentityAccount              @relation("GroupOwner", fields: [ownerIdentityId], references: [id])
+  tenants         Tenant[]
+  memberships     BusinessGroupMembership[]
+  approvalPolicies ApprovalPolicy[]
+  approvalRequests ApprovalRequest[]
+  exceptionRules  ExceptionAlertRule[]
+  intercompany    IntercompanyTransfer[]
+  spinOffs        BusinessSpinOff[]
+  supplierLinks   GroupSupplierLink[]
+  customerLinks   GroupCustomerLink[]
+
+  @@index([ownerIdentityId])
+  @@map("business_groups")
+}
+
+/// Identity ↔ group (owner may see rollups; member does not get tenant access)
+model BusinessGroupMembership {
+  id          String   @id @default(uuid()) @db.Uuid
+  groupId     String   @map("group_id") @db.Uuid
+  identityId  String   @map("identity_id") @db.Uuid
+  /// owner | finance | auditor | member
+  role        String   @default("member")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  group    BusinessGroup   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  identity IdentityAccount @relation(fields: [identityId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, identityId])
+  @@index([identityId])
+  @@map("business_group_memberships")
+}
+
+model ApprovalPolicy {
+  id              String   @id @default(uuid()) @db.Uuid
+  businessGroupId String   @map("business_group_id") @db.Uuid
+  tenantId        String?  @map("tenant_id") @db.Uuid
+  /// refund | discount | purchase | stock_adjustment | stock_transfer | price_change | credit_sale | expense | intercompany
+  type            String
+  enabled         Boolean  @default(true)
+  /// { steps: [{ role, maxAmount?, maxPercent? }], cashierMaxPercent?, cashierMaxAmount? }
+  config          Json     @default("{}")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  group  BusinessGroup @relation(fields: [businessGroupId], references: [id], onDelete: Cascade)
+  tenant Tenant?       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([businessGroupId, type])
+  @@index([tenantId, type])
+  @@map("approval_policies")
+}
+
+model ApprovalRequest {
+  id              String    @id @default(uuid()) @db.Uuid
+  businessGroupId String    @map("business_group_id") @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  type            String
+  entityType      String    @map("entity_type")
+  entityId        String?   @map("entity_id")
+  requestedById   String?   @map("requested_by_id") @db.Uuid
+  resolvedById    String?   @map("resolved_by_id") @db.Uuid
+  amount          Decimal?  @db.Decimal(14, 2)
+  reason          String?
+  /// pending | approved | rejected | cancelled
+  status          String    @default("pending")
+  currentStep     Int       @default(0) @map("current_step")
+  payload         Json      @default("{}")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt      DateTime? @map("resolved_at") @db.Timestamptz(6)
+
+  group       BusinessGroup  @relation(fields: [businessGroupId], references: [id], onDelete: Cascade)
+  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  requestedBy User?          @relation("ApprovalRequestedBy", fields: [requestedById], references: [id])
+  resolvedBy  User?          @relation("ApprovalResolvedBy", fields: [resolvedById], references: [id])
+  steps       ApprovalStep[]
+
+  @@index([tenantId, status, createdAt])
+  @@index([businessGroupId, status, createdAt])
+  @@map("approval_requests")
+}
+
+model ApprovalStep {
+  id        String    @id @default(uuid()) @db.Uuid
+  requestId String    @map("request_id") @db.Uuid
+  stepIndex Int       @map("step_index")
+  /// pending | approved | rejected | skipped
+  status    String    @default("pending")
+  actorId   String?   @map("actor_id") @db.Uuid
+  note      String?
+  actedAt   DateTime? @map("acted_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  request ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  actor   User?           @relation("ApprovalStepActor", fields: [actorId], references: [id])
+
+  @@index([requestId, stepIndex])
+  @@map("approval_steps")
+}
+
+model ExceptionAlertRule {
+  id              String    @id @default(uuid()) @db.Uuid
+  businessGroupId String    @map("business_group_id") @db.Uuid
+  tenantId        String?   @map("tenant_id") @db.Uuid
+  /// sales_drop | cash_mismatch | unusual_discount | large_refund | inventory_shrinkage | low_stock | dead_stock | overdue_ap | overdue_ar | unusual_expense | negative_margin | high_return_rate
+  type            String
+  enabled         Boolean   @default(true)
+  threshold       Decimal?  @db.Decimal(14, 4)
+  /// minutes
+  cooldownMinutes Int       @default(360) @map("cooldown_minutes")
+  /// identity ids and/or roles
+  recipients      Json      @default("{}")
+  lastFiredAt     DateTime? @map("last_fired_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  group  BusinessGroup @relation(fields: [businessGroupId], references: [id], onDelete: Cascade)
+  tenant Tenant?       @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+
+  @@index([businessGroupId, type])
+  @@map("exception_alert_rules")
+}
+
+model IntercompanyTransfer {
+  id                  String    @id @default(uuid()) @db.Uuid
+  businessGroupId     String    @map("business_group_id") @db.Uuid
+  sourceTenantId      String    @map("source_tenant_id") @db.Uuid
+  destinationTenantId String    @map("destination_tenant_id") @db.Uuid
+  sourceLocationId    String    @map("source_location_id") @db.Uuid
+  destinationLocationId String  @map("destination_location_id") @db.Uuid
+  /// draft | pending_approval | issued | in_transit | received | cancelled
+  status              String    @default("draft")
+  notes               String?
+  createdById         String?   @map("created_by_id") @db.Uuid
+  approvedById        String?   @map("approved_by_id") @db.Uuid
+  issuedAt            DateTime? @map("issued_at") @db.Timestamptz(6)
+  receivedAt          DateTime? @map("received_at") @db.Timestamptz(6)
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  group       BusinessGroup @relation(fields: [businessGroupId], references: [id], onDelete: Cascade)
+  sourceTenant Tenant       @relation("IcSourceTenant", fields: [sourceTenantId], references: [id])
+  destTenant   Tenant       @relation("IcDestTenant", fields: [destinationTenantId], references: [id])
+  createdBy    User?        @relation("IcCreatedBy", fields: [createdById], references: [id])
+  approvedBy   User?        @relation("IcApprovedBy", fields: [approvedById], references: [id])
+  lines        IntercompanyTransferLine[]
+
+  @@index([businessGroupId, status, createdAt])
+  @@index([sourceTenantId, createdAt])
+  @@index([destinationTenantId, createdAt])
+  @@map("intercompany_transfers")
+}
+
+model IntercompanyTransferLine {
+  id          String  @id @default(uuid()) @db.Uuid
+  transferId  String  @map("transfer_id") @db.Uuid
+  sku         String  @db.VarChar(18)
+  name        String
+  sourceProductId String? @map("source_product_id") @db.Uuid
+  destProductId   String? @map("dest_product_id") @db.Uuid
+  quantity    Decimal @db.Decimal(12, 3)
+  unitCost    Decimal @default(0) @map("unit_cost") @db.Decimal(12, 2)
+  taxAmount   Decimal @default(0) @map("tax_amount") @db.Decimal(12, 2)
+
+  transfer IntercompanyTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+
+  @@index([transferId])
+  @@map("intercompany_transfer_lines")
+}
+
+model BusinessSpinOff {
+  id              String    @id @default(uuid()) @db.Uuid
+  businessGroupId String    @map("business_group_id") @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  /// pending | exported | detached | cancelled
+  status          String    @default("pending")
+  requestedByIdentityId String @map("requested_by_identity_id") @db.Uuid
+  exportPayload   Json      @default("{}") @map("export_payload")
+  confirmation    String?
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  group  BusinessGroup @relation(fields: [businessGroupId], references: [id], onDelete: Cascade)
+  tenant Tenant        @relation(fields: [tenantId], references: [id])
+
+  @@index([businessGroupId, status])
+  @@map("business_spin_offs")
+}
+
+/// Optional group supplier directory — PO stays on a legal tenant
+model GroupSupplierLink {
+  id              String   @id @default(uuid()) @db.Uuid
+  businessGroupId String   @map("business_group_id") @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  supplierId      String   @map("supplier_id") @db.Uuid
+  displayName     String
+  phone           String?
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  group  BusinessGroup @relation(fields: [businessGroupId], references: [id], onDelete: Cascade)
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([businessGroupId, tenantId, supplierId])
+  @@index([businessGroupId, displayName])
+  @@map("group_supplier_links")
+}
+
+/// Opt-in group customer match (phone/email/gst) — never auto-merge
+model GroupCustomerLink {
+  id              String   @id @default(uuid()) @db.Uuid
+  businessGroupId String   @map("business_group_id") @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  customerId      String   @map("customer_id") @db.Uuid
+  matchKey        String   @map("match_key")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  group  BusinessGroup @relation(fields: [businessGroupId], references: [id], onDelete: Cascade)
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([businessGroupId, tenantId, customerId])
+  @@index([businessGroupId, matchKey])
+  @@map("group_customer_links")
 }

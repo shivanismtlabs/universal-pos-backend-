@@ -4,7 +4,7 @@
  *
  *   node scripts/restaurant-full-e2e.mjs
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -61,15 +61,64 @@ function asList(payload) {
   return [];
 }
 
+let skuSeq = 0;
 function sku(prefix) {
-  return `${prefix}${STAMP}${Math.floor(Math.random() * 99)}`
+  skuSeq += 1;
+  return `${prefix}${STAMP}${skuSeq}${Math.floor(Math.random() * 9999)}`
     .replace(/[^A-Z0-9]/gi, '')
-    .slice(0, 18)
-    .padEnd(15, '0');
+    .slice(0, 18);
 }
 
 function phone() {
   return `9${String(Math.floor(Math.random() * 1e9)).padStart(9, '0')}`;
+}
+
+function foodImageDataUrl(category, name) {
+  const FILE_BY_NAME = {
+    'Gulab Jamun': 'food-gulab-jamun.jpg',
+    'Paneer Tikka': 'food-paneer-tikka.jpg',
+    'Butter Chicken': 'food-butter-chicken.jpg',
+    'Dal Makhani': 'food-dal-makhani.jpg',
+    'Jeera Rice': 'food-jeera-rice.jpg',
+    'Masala Chai': 'food-masala-chai.jpg',
+    'Mango Lassi': 'food-mango-lassi.jpg',
+    'Veg Spring Roll': 'food-veg-spring-roll.jpg',
+  };
+  const fileName = FILE_BY_NAME[name];
+  const dirs = [
+    join(__dir, 'menu-photos'),
+    join(
+      process.env.USERPROFILE || '',
+      '.cursor',
+      'projects',
+      'd-UNIVERSAl-POS',
+      'assets',
+    ),
+  ];
+  if (fileName) {
+    for (const dir of dirs) {
+      const p = join(dir, fileName);
+      if (existsSync(p)) {
+        const buf = readFileSync(p);
+        return `data:image/jpeg;base64,${buf.toString('base64')}`;
+      }
+    }
+  }
+  const palette = {
+    Starters: { bg: '#fef3c7', fg: '#92400e', accent: '#f59e0b' },
+    Mains: { bg: '#fee2e2', fg: '#991b1b', accent: '#ef4444' },
+    Beverages: { bg: '#dbeafe', fg: '#1e40af', accent: '#3b82f6' },
+    Desserts: { bg: '#fce7f3', fg: '#9d174d', accent: '#ec4899' },
+  };
+  const colors = palette[category] || { bg: '#e8eefb', fg: '#1e3a8a', accent: '#1a56db' };
+  const parts = String(name).trim().split(/\s+/).filter(Boolean);
+  const mark =
+    parts.length >= 2
+      ? `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase()
+      : (parts[0] || 'FD').slice(0, 2).toUpperCase();
+  const label = String(name).length > 20 ? `${String(name).slice(0, 18)}…` : name;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240"><rect width="320" height="240" fill="${colors.bg}"/><circle cx="160" cy="92" r="30" fill="${colors.accent}"/><text x="160" y="100" text-anchor="middle" font-family="Arial,sans-serif" font-size="20" font-weight="700" fill="#fff">${mark}</text><text x="160" y="178" text-anchor="middle" font-family="Arial,sans-serif" font-size="15" font-weight="700" fill="${colors.fg}">${label}</text><text x="160" y="202" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" fill="${colors.accent}">${category}</text></svg>`;
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
 }
 
 async function checkoutCash(token, locId, items, opts = {}) {
@@ -217,7 +266,7 @@ async function main() {
   ];
   const products = {};
   for (const item of menu) {
-    const res = await api('POST', '/pos/sale/products', {
+    let res = await api('POST', '/pos/sale/products', {
       token,
       body: {
         title: item.title,
@@ -228,6 +277,19 @@ async function main() {
         categoryId: cats[item.cat]?.id,
       },
     });
+    if (!res.ok && res.status === 409) {
+      res = await api('POST', '/pos/sale/products', {
+        token,
+        body: {
+          title: item.title,
+          sku: sku('RST'),
+          price: item.price,
+          qty: item.qty,
+          locationId: loc.id,
+          categoryId: cats[item.cat]?.id,
+        },
+      });
+    }
     if (!res.ok) {
       log(`menu ${item.title}`, 'FAIL', res.text.slice(0, 160));
       continue;
@@ -238,6 +300,16 @@ async function main() {
       price: item.price,
       stockLevelId: data.stockLevelId || data.stockLevel?.id || data.id,
     };
+    const stockId = data.stockLevelId || data.stockLevel?.id || data.id;
+    if (stockId) {
+      const img = await api('POST', `/pos/sale/products/${stockId}/image`, {
+        token,
+        body: { imageBase64: foodImageDataUrl(item.cat, item.title) },
+      });
+      if (!img.ok) {
+        log(`menu image ${item.title}`, 'PARTIAL', img.text.slice(0, 80));
+      }
+    }
     log(`menu ${item.title}`, 'PASS', `₹${item.price}`);
   }
 
@@ -314,27 +386,27 @@ async function main() {
   const jamun = products['Gulab Jamun'];
   const chai = products['Masala Chai'];
 
-  const dineIn = await checkoutCash(
-    token,
-    loc.id,
-    [
-      { stockLevelId: tikka?.stockLevelId, quantity: 1, unitPrice: 280 },
-      { stockLevelId: butter?.stockLevelId, quantity: 1, unitPrice: 420 },
-      { stockLevelId: rice?.stockLevelId, quantity: 2, unitPrice: 140 },
-      { stockLevelId: lassi?.stockLevelId, quantity: 2, unitPrice: 90 },
-    ],
-    {
-      customerId: diner.data?.id,
-      note: 'Dine-in Table 5',
-      meta: {
-        tableNumber: '5',
-        covers: 4,
-        orderType: 'dine_in',
-        kot_status: 'sent',
-        courseNote: 'Spice medium',
-      },
-    },
-  );
+  const dineLines = [
+    { stockLevelId: tikka?.stockLevelId, quantity: 1, unitPrice: 280 },
+    { stockLevelId: butter?.stockLevelId, quantity: 1, unitPrice: 420 },
+    { stockLevelId: rice?.stockLevelId, quantity: 2, unitPrice: 140 },
+    { stockLevelId: lassi?.stockLevelId, quantity: 2, unitPrice: 90 },
+  ].filter((l) => typeof l.stockLevelId === 'string' && l.stockLevelId.length > 10);
+
+  const dineIn =
+    dineLines.length >= 2
+      ? await checkoutCash(token, loc.id, dineLines, {
+          customerId: diner.data?.id,
+          note: 'Dine-in Table 5',
+          meta: {
+            tableNumber: '5',
+            covers: 4,
+            orderType: 'dine_in',
+            kot_status: 'sent',
+            courseNote: 'Spice medium',
+          },
+        })
+      : { ok: false, text: 'missing menu stock levels for dine-in' };
   const dineMeta = dineIn.data?.order?.meta || {};
   const tableOk = String(dineMeta.tableNumber) === '5';
   log(

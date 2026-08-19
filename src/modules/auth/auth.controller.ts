@@ -38,6 +38,7 @@ import type { AuthUser } from './types';
 import { PortalAuthService } from './portal-auth.service';
 import { AuthRecoveryService } from './auth-recovery.service';
 import { clientIpFromRequest } from '../security/client-ip';
+import { loginThrottleLimit } from '../../common/cors-origins';
 import { Login2faDto } from '../security/dto/security.dto';
 import type { FastifyRequest } from 'fastify';
 
@@ -149,8 +150,8 @@ export class AuthController {
   @HttpCode(200)
   @Throttle({
     default: {
-      // Shared shop IP: cashiers must login often; 5/min was too strict in prod
-      limit: process.env.NODE_ENV === 'production' ? 30 : 60,
+      // Shared shop NAT: cashiers log in often. Per-account lockout is still 5 fails / 15 min.
+      limit: loginThrottleLimit(),
       ttl: 60_000,
     },
   })

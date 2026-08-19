@@ -17,7 +17,11 @@ import {
   registryToDbPayload,
   resolveSetupBusinessProfile,
 } from '../../common/business-config';
-import { recommendCapabilities } from '../../common/capabilities';
+import {
+  recommendCapabilities,
+  recommendCommerceModes,
+  type SellKind,
+} from '../../common/capabilities';
 import { isCommerceMode, moduleStackForMode } from '../../common/commerce-schema';
 import { expandPermissions } from '../../common/rbac';
 import { PrismaService } from '../../database/database.module';
@@ -29,6 +33,7 @@ import type {
 import { AuthService } from './auth.service';
 import { SecurityService } from '../security/security.service';
 import { rethrowAuthDb, safePasswordMatch } from './auth-db-error';
+import { ensureBusinessGroupForIdentity } from '../../common/ensure-business-group';
 
 const BCRYPT_ROUNDS = 12;
 const DUMMY_PASSWORD_HASH =
@@ -320,7 +325,20 @@ export class PortalAuthService {
       }
     }
 
-    let modes = profile.defaultCommerceModes.filter(isCommerceMode);
+    const sells = (dto.sells ?? []).filter((s): s is SellKind =>
+      ['products', 'services', 'rentals', 'subscriptions', 'memberships', 'packages'].includes(
+        s,
+      ),
+    );
+    const requestedModes = (dto.commerceModes ?? []).filter(isCommerceMode);
+    let modes = requestedModes.length
+      ? requestedModes
+      : sells.length
+        ? recommendCommerceModes({
+            sells,
+            fallback: profile.defaultCommerceModes,
+          })
+        : profile.defaultCommerceModes.filter(isCommerceMode);
     if (!modes.length) modes = ['sale'];
     const modeModuleCodes = [
       ...new Set(modes.flatMap((m) => [...moduleStackForMode(m)])),
@@ -340,12 +358,14 @@ export class PortalAuthService {
           passwordHash,
           currencyCode,
           locale,
+          timezone: dto.timezone?.trim() || 'Asia/Kolkata',
         });
 
         // Zoho-style org profile + universal BusinessConfig link
         const capabilities = recommendCapabilities({
           businessType: profile.id,
           commerceModes: modes,
+          sells,
           extras: profile.defaultCapabilities,
         });
         const settings = {
@@ -367,13 +387,20 @@ export class PortalAuthService {
           },
           organizationProfile: {
             phone: dto.phone?.trim() || identity.phone || null,
+            email: dto.email?.trim() || identity.email || null,
+            website: dto.website?.trim() || null,
             addressLine1: dto.addressLine1?.trim() || null,
+            addressLine2: dto.addressLine2?.trim() || null,
             city: dto.city?.trim() || null,
             state: dto.state?.trim() || null,
             postalCode: dto.postalCode?.trim() || null,
             countryCode: (dto.countryCode?.trim() || 'IN').toUpperCase(),
             fiscalYearStart: dto.fiscalYearStart?.trim() || null,
             inventoryStartDate: dto.inventoryStartDate || null,
+            timezone: dto.timezone?.trim() || 'Asia/Kolkata',
+            locale: dto.locale?.trim() || locale,
+            organizationType: dto.organizationType?.trim() || null,
+            pan: dto.pan?.trim()?.toUpperCase() || null,
           },
         };
 
@@ -414,6 +441,8 @@ export class PortalAuthService {
       );
       rethrowAuthDb(e);
     }
+
+    await ensureBusinessGroupForIdentity(this.prisma, identityId);
 
     // Auto-enter the new shop (Zoho "Get Started")
     return this.enterOrganization(identityId, result.tenant.id);
@@ -485,6 +514,7 @@ export class PortalAuthService {
       }));
 
     const identityTokens = await this.issueIdentityTokens(identity.id);
+    void ensureBusinessGroupForIdentity(this.prisma, identity.id);
 
     return {
       stage: 'select_org' as const,
@@ -558,13 +588,16 @@ export class PortalAuthService {
     );
     const locationId = user.primaryLocationId;
 
-    const tokens = await this.issueTenantTokens({
-      userId: user.id,
-      tenantId: user.tenantId,
-      email: user.email,
-      fullName: user.fullName,
-      roles,
-      locationId,
+    const issued = await this.auth.issueSessionForUser(user.id);
+    const tokens = {
+      accessToken: issued.accessToken,
+      stationToken: issued.stationToken,
+      refreshToken: issued.refreshToken,
+    };
+    const identityTokens = await this.issueIdentityTokens(identityId);
+    const identity = await this.prisma.identityAccount.findUnique({
+      where: { id: identityId },
+      select: { id: true, email: true, fullName: true, phone: true },
     });
 
     await this.prisma.user.update({
@@ -584,6 +617,14 @@ export class PortalAuthService {
     return {
       stage: 'app' as const,
       requiresOrganizationSelection: false,
+      identity: identity
+        ? {
+            id: identity.id,
+            email: identity.email,
+            fullName: identity.fullName,
+            phone: identity.phone,
+          }
+        : undefined,
       user: {
         id: user.id,
         email: user.email,
@@ -601,6 +642,7 @@ export class PortalAuthService {
         name: membership.tenant.name,
       },
       ...tokens,
+      ...identityTokens,
     };
   }
 
@@ -639,7 +681,7 @@ export class PortalAuthService {
     });
   }
 
-  private async issueIdentityTokens(identityId: string) {
+  async issueIdentityTokens(identityId: string) {
     const accessSecret = this.config.getOrThrow<string>('JWT_ACCESS_SECRET');
     const refreshSecret = this.config.getOrThrow<string>('JWT_REFRESH_SECRET');
     const identity = await this.prisma.identityAccount.findUniqueOrThrow({
@@ -655,7 +697,7 @@ export class PortalAuthService {
       },
       {
         secret: accessSecret,
-        expiresIn: '2h',
+        expiresIn: '7d',
       },
     );
 
@@ -683,58 +725,6 @@ export class PortalAuthService {
     });
 
     return { identityToken, identityRefreshToken };
-  }
-
-  private async issueTenantTokens(user: {
-    userId: string;
-    tenantId: string;
-    email: string;
-    fullName: string;
-    roles: string[];
-    locationId?: string | null;
-  }) {
-    const jti = randomUUID();
-    const locationId = user.locationId ?? null;
-    const base = {
-      sub: user.userId,
-      tenantId: user.tenantId,
-      email: user.email,
-      roles: user.roles,
-      locationId,
-      storeId: locationId,
-    };
-    const accessTtl = this.config.get<string>('JWT_ACCESS_TTL', '15m');
-    const stationTtl = this.config.get<string>('JWT_STATION_TTL', '12h');
-    const refreshTtl = this.config.get<string>('JWT_REFRESH_TTL', '7d');
-    const accessSecret = this.config.getOrThrow<string>('JWT_ACCESS_SECRET');
-
-    const accessToken = await this.jwt.signAsync(
-      { ...base, typ: 'access', jti },
-      { secret: accessSecret, expiresIn: accessTtl as '15m' },
-    );
-    const stationToken = await this.jwt.signAsync(
-      { ...base, typ: 'station', jti: randomUUID() },
-      { secret: accessSecret, expiresIn: stationTtl as '12h' },
-    );
-    const refreshToken = await this.jwt.signAsync(
-      { ...base, typ: 'refresh', jti },
-      {
-        secret: this.config.getOrThrow<string>('JWT_REFRESH_SECRET'),
-        expiresIn: refreshTtl as '7d',
-      },
-    );
-
-    await this.prisma.user.update({
-      where: { id: user.userId },
-      data: {
-        refreshTokenHash: createHash('sha256')
-          .update(refreshToken)
-          .digest('hex'),
-        refreshTokenExpiresAt: new Date(Date.now() + 7 * 86400000),
-      },
-    });
-
-    return { accessToken, stationToken, refreshToken };
   }
 
   /**

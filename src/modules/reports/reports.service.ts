@@ -41,15 +41,10 @@ export class ReportsService {
         timezone: true,
         currencyCode: true,
         settings: true,
-        businessConfig: { select: { businessType: true } },
       },
     });
     const timezone = tenant?.timezone || 'Asia/Kolkata';
     const currencyCode = tenant?.currencyCode || 'INR';
-    const businessType =
-      tenant?.businessConfig?.businessType ||
-      (tenant?.settings as { businessType?: string } | null)?.businessType ||
-      'general';
 
     const day = this.dayRange(query.date, timezone);
     const prevDay = this.shiftYmd(query.date, -1);
@@ -367,13 +362,16 @@ export class ReportsService {
 
     let tableTurnover: number | null = null;
     let avgDiningMinutes: number | null = null;
-    if (
-      businessType === 'restaurant' ||
-      businessType === 'hybrid' ||
-      fulfillmentSplit.some((f) =>
-        /dine|table|takeaway|delivery/i.test(f.key),
-      )
-    ) {
+    // Use order meta signals, not hardcoded businessType, to decide whether
+    // table/dining metrics are relevant. Any business that records tableNumber
+    // or seatedAt in order.meta will get these analytics automatically.
+    const hasTableMeta = fulfillmentSplit.some((f) =>
+      /dine|table|takeaway|delivery/i.test(f.key),
+    ) || saleOrders.some((o) => {
+      const m = (o.meta ?? {}) as Record<string, unknown>;
+      return m.tableNumber != null || m.tableId != null || m.seatedAt != null;
+    });
+    if (hasTableMeta) {
       const tables = new Set<string>();
       let dineMs = 0;
       let dineCount = 0;
@@ -472,7 +470,6 @@ export class ReportsService {
       date: query.date,
       timezone,
       currencyCode,
-      businessType,
       filters: {
         locationId: query.locationId ?? null,
         employeeId: query.employeeId ?? null,

@@ -53,6 +53,15 @@ export const NOTIFICATION_TYPES = [
     defaultRoles: ['inventory', 'manager', 'admin'] as string[],
     urgent: true,
   },
+  {
+    code: 'exception_alert',
+    label: 'Owner exception alerts',
+    description:
+      'Group-level exceptions: sales drop, cash mismatch, large refund, overdue AP/AR',
+    defaultEnabled: true,
+    defaultRoles: ['admin', 'manager', 'accountant'] as string[],
+    urgent: true,
+  },
 ] as const;
 
 export type NotificationTypeCode =

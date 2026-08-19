@@ -35,7 +35,11 @@ const TEMPLATES: Record<
     `Hi ${String(v.customerName ?? 'there')}, here is your invoice ${String(v.orderNumber ?? '')} from ${String(v.storeName ?? 'our store')}.\nSubtotal: ${String(v.subtotal ?? '')}\nTax: ${String(v.taxTotal ?? '')}\nTotal: ${String(v.total ?? '')}${v.balanceDue && Number(v.balanceDue) > 0 ? `\nBalance due: ${String(v.balanceDue)}` : '\nStatus: Paid'}.\nThank you!`,
   birthday_wish: (v) =>
     `Happy Birthday ${String(v.customerName ?? '')}! 🎉 Wishing you a wonderful year from ${String(v.storeName ?? 'all of us')}.`,
-  custom: (v) => String(v.message ?? v.text ?? '').trim(),
+  custom: (v) => String(v.message ?? v.text ?? v.body ?? '').trim(),
+  scheduled_report: (v) =>
+    String(v.message ?? v.body ?? v.text ?? '').trim(),
+  monthly_sales_report: (v) =>
+    String(v.message ?? v.body ?? v.text ?? '').trim(),
 };
 
 @Injectable()
@@ -466,8 +470,11 @@ export class NotifyService {
     vars: Record<string, unknown>,
   ): Promise<{ mode: 'mock' | 'webhook' | 'smtp'; raw?: unknown }> {
     const subject =
-      `Invoice ${String(vars.orderNumber ?? '')}`.trim() ||
-      'Message from Universal POS';
+      (typeof vars.subject === 'string' && vars.subject.trim()
+        ? vars.subject.trim()
+        : vars.orderNumber
+          ? `Invoice ${String(vars.orderNumber)}`
+          : 'Message from Universal POS');
     if (this.mail.isConfigured()) {
       await this.mail.send({ to, subject, text });
       return { mode: 'smtp' };

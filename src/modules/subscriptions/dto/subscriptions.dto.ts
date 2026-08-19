@@ -149,6 +149,19 @@ export class ListSubscriptionsQueryDto {
   limit?: number;
 }
 
+export class CheckInSubscriptionDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  note?: string;
+}
+
 export class CreateServiceProductDto {
   @ApiProperty({ example: 'Haircut Classic' })
   @IsString()

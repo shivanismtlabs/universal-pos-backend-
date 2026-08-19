@@ -9,6 +9,7 @@ import * as bcrypt from 'bcrypt';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
+import { AuthSessionService } from '../auth/auth-session.service';
 import { AssignRoleDto, CreateUserDto, UpdateUserDto } from './dto/users.dto';
 
 const BCRYPT_ROUNDS = 12;
@@ -70,7 +71,10 @@ function toUserView(
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly sessions: AuthSessionService,
+  ) {}
 
   /** Only shop admin may grant admin. Managers may invite day-ops + custom non-admin roles. */
   private assertCanAssignRole(actor: AuthUser, roleCode: string) {
@@ -274,6 +278,10 @@ export class UsersService {
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
 
     await this.prisma.user.update({ where: { id }, data });
+
+    if (dto.isActive === false) {
+      await this.sessions.revokeAllForUser(id, 'USER_DISABLED');
+    }
 
     if (dto.jobTitle !== undefined) {
       await this.prisma.employee.updateMany({

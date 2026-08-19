@@ -400,6 +400,66 @@ export class CreateOrganizationDto {
   @MaxLength(100)
   storeName?: string;
 
+  @ApiPropertyOptional({ example: 'billing@shop.example' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  email?: string;
+
+  @ApiPropertyOptional({ example: 'https://www.myshop.com' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  website?: string;
+
+  @ApiPropertyOptional({ example: 'Floor 2, opposite metro' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  addressLine2?: string;
+
+  @ApiPropertyOptional({ example: 'Asia/Kolkata' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  timezone?: string;
+
+  @ApiPropertyOptional({
+    example: 'proprietorship',
+    description: 'Legal structure (Zoho org type)',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  organizationType?: string;
+
+  @ApiPropertyOptional({ example: 'ABCDE1234F' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  pan?: string;
+
+  @ApiPropertyOptional({
+    example: ['products', 'services'],
+    isArray: true,
+    description:
+      'What the shop sells — maps to commerce modes when the industry is Other / unlisted',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  sells?: string[];
+
+  @ApiPropertyOptional({
+    example: ['sale', 'service'],
+    isArray: true,
+    description: 'Explicit commerce modes (overrides sells and template defaults)',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  commerceModes?: string[];
+
   @ApiPropertyOptional({ example: 'city-apparel' })
   @Transform(optionalLowerTrim)
   @IsOptional()

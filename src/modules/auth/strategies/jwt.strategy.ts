@@ -47,6 +47,27 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       throw new UnauthorizedException('User not found');
     }
 
+    if (!payload.sid) {
+      throw new UnauthorizedException(
+        'Access token expired. Please login again.',
+      );
+    }
+    const session = await this.prisma.authSession.findFirst({
+      where: {
+        id: payload.sid,
+        userId: user.id,
+        tenantId: user.tenantId,
+        revokedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      select: { id: true },
+    });
+    if (!session) {
+      throw new UnauthorizedException(
+        'Access token expired. Please login again.',
+      );
+    }
+
     await this.security.assertTenantIp(
       payload.tenantId,
       clientIpFromRequest(req),
@@ -77,6 +98,8 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       roles,
       permissions,
       tokenTyp: payload.typ,
+      sessionId: payload.sid,
+      jti: payload.jti,
     };
   }
 }

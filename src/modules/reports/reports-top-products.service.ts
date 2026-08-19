@@ -1,5 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { OrderItemKind, OrderStatus } from '@prisma/client';
+import {
+  isKitchenContext,
+  isServiceRevenueContext,
+  reportContextFromSettings,
+  type ReportContext,
+} from '../../common/report-capabilities';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import type { TopSellingProductsQueryDto } from './dto/reports.dto';
@@ -48,11 +54,20 @@ export class ReportsTopProductsService {
     });
     const timezone = tenant?.timezone || 'Asia/Kolkata';
     const currencyCode = tenant?.currencyCode || 'INR';
+    const settings =
+      tenant?.settings && typeof tenant.settings === 'object'
+        ? (tenant.settings as Record<string, unknown>)
+        : {};
     const businessType = String(
       tenant?.businessConfig?.businessType ||
-        (tenant?.settings as { businessType?: string } | null)?.businessType ||
-        'general',
+        (typeof settings.businessType === 'string'
+          ? settings.businessType
+          : 'general'),
     ).toLowerCase();
+    const reportCtx = reportContextFromSettings({
+      ...settings,
+      businessType,
+    });
 
     const today = ymdInZone(new Date(), timezone);
     const to = (query.to || today).slice(0, 10);
@@ -78,7 +93,7 @@ export class ReportsTopProductsService {
       end: zonedLocalToUtc(prevTo, 23, 59, 59, 999, timezone),
     };
 
-    const itemKinds = this.itemKindsFor(businessType);
+    const itemKinds = this.itemKindsFor(reportCtx);
     const [currentItems, prevItems] = await Promise.all([
       this.loadLines(
         user.tenantId,
@@ -210,7 +225,7 @@ export class ReportsTopProductsService {
       ...row,
     }));
 
-    const copy = this.copyFor(businessType);
+    const copy = this.copyFor(reportCtx);
 
     return {
       title: copy.title,
@@ -259,19 +274,15 @@ export class ReportsTopProductsService {
     };
   }
 
-  private itemKindsFor(businessType: string): OrderItemKind[] {
-    if (
-      businessType === 'service' ||
-      businessType === 'salon' ||
-      businessType === 'spa'
-    ) {
+  private itemKindsFor(ctx: ReportContext): OrderItemKind[] {
+    if (isServiceRevenueContext(ctx) && !isKitchenContext(ctx)) {
       return [OrderItemKind.service, OrderItemKind.product];
     }
     return [OrderItemKind.product, OrderItemKind.service, OrderItemKind.custom];
   }
 
-  private copyFor(businessType: string) {
-    if (businessType === 'restaurant') {
+  private copyFor(ctx: ReportContext) {
+    if (isKitchenContext(ctx)) {
       return {
         title: 'Top-Selling Menu Items',
         showMealPeriod: true,
@@ -285,11 +296,7 @@ export class ReportsTopProductsService {
         },
       };
     }
-    if (
-      businessType === 'service' ||
-      businessType === 'salon' ||
-      businessType === 'spa'
-    ) {
+    if (isServiceRevenueContext(ctx)) {
       return {
         title: 'Top-Booked Services',
         showMealPeriod: false,
@@ -305,7 +312,7 @@ export class ReportsTopProductsService {
     }
     return {
       title: 'Top-Selling Products',
-      showMealPeriod: businessType === 'hybrid',
+      showMealPeriod: false,
       emphasizeMargin: true,
       labels: {
         units: 'Units sold',

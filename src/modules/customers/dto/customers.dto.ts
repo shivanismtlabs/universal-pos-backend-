@@ -31,6 +31,14 @@ export class CreateCustomerDto {
   })
   phone!: string;
 
+  @ApiPropertyOptional({
+    description:
+      'If a customer with this phone already exists, return them instead of 409',
+  })
+  @IsOptional()
+  @IsBoolean()
+  returnExisting?: boolean;
+
   @ApiPropertyOptional({ example: 'amit@example.com' })
   @IsOptional()
   @IsEmail()

@@ -9,11 +9,18 @@ import {
   ROLE_PERMISSION_FALLBACK,
   hasPermission,
 } from '../../../common/rbac';
+import { RoleGroup } from '../../../common/roles';
 import {
   PERMISSIONS_KEY,
   ROLES_KEY,
 } from '../decorators/auth.decorators';
 import type { AuthUser } from '../types';
+
+/** True when the handler is gated as “any shop user” (system RoleGroup.all). */
+function isAnyStaffGate(requiredRoles: string[]): boolean {
+  if (!requiredRoles.length) return false;
+  return RoleGroup.all.every((r) => requiredRoles.includes(r));
+}
 
 @Injectable()
 export class RolesGuard implements CanActivate {
@@ -45,6 +52,12 @@ export class RolesGuard implements CanActivate {
     if (requiredPerms?.length) {
       const ok = requiredPerms.some((p) => hasPermission(user.permissions, p));
       if (ok) return true;
+    }
+
+    // Custom tenant roles are not in Role.admin/cashier/… — they still need
+    // bootstrap, attendance, and other “any staff” endpoints.
+    if (requiredRoles?.length && isAnyStaffGate(requiredRoles) && user.userId) {
+      return true;
     }
 
     if (requiredRoles?.length) {

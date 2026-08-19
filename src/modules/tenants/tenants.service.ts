@@ -20,6 +20,7 @@ import {
   parseLocationSettings,
   resolveAllowedLocationIds,
 } from '../../common/location-access';
+import { seedZeroStockForNewLocation } from '../../common/stock-at-location';
 import { Role } from '../../common/roles';
 
 const TENANT_SELECT = {
@@ -307,6 +308,9 @@ export class TenantsService {
     if (dto.defaultWarehouseId) {
       await this.assertWarehouse(user.tenantId, dto.defaultWarehouseId);
     }
+    if (dto.parentLocationId) {
+      await this.assertParentLocation(user.tenantId, dto.parentLocationId);
+    }
 
     const settings = mergeLocationSettings(
       {},
@@ -318,6 +322,7 @@ export class TenantsService {
         timezone: dto.timezone,
         currencyCode: dto.currencyCode,
         defaultWarehouseId: dto.defaultWarehouseId,
+        parentLocationId: dto.parentLocationId,
       },
     );
 
@@ -334,6 +339,10 @@ export class TenantsService {
           isActive: true,
           settings: settings as Prisma.InputJsonValue,
         },
+      });
+      await seedZeroStockForNewLocation(this.prisma, {
+        tenantId: user.tenantId,
+        locationId: location.id,
       });
       if (sub) {
         await this.prisma.tenantSubscription.update({
@@ -402,6 +411,13 @@ export class TenantsService {
     if (dto.defaultWarehouseId) {
       await this.assertWarehouse(user.tenantId, dto.defaultWarehouseId);
     }
+    if (dto.parentLocationId) {
+      await this.assertParentLocation(
+        user.tenantId,
+        dto.parentLocationId,
+        id,
+      );
+    }
 
     const settingsPatch: Record<string, unknown> = {};
     const hasSettingsPatch =
@@ -411,7 +427,8 @@ export class TenantsService {
       dto.businessHours !== undefined ||
       dto.timezone !== undefined ||
       dto.currencyCode !== undefined ||
-      dto.defaultWarehouseId !== undefined;
+      dto.defaultWarehouseId !== undefined ||
+      dto.parentLocationId !== undefined;
 
     const data: Prisma.LocationUpdateInput = {};
     if (dto.name !== undefined) data.name = dto.name.trim();
@@ -428,6 +445,7 @@ export class TenantsService {
         timezone: dto.timezone,
         currencyCode: dto.currencyCode,
         defaultWarehouseId: dto.defaultWarehouseId,
+        parentLocationId: dto.parentLocationId,
       }) as Prisma.InputJsonValue;
       Object.assign(settingsPatch, data.settings as object);
     }
@@ -672,6 +690,7 @@ export class TenantsService {
       timezone: s.timezone ?? null,
       currencyCode: s.currencyCode ?? null,
       defaultWarehouseId: s.defaultWarehouseId ?? null,
+      parentLocationId: s.parentLocationId ?? null,
       settings: row.settings,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
@@ -699,6 +718,44 @@ export class TenantsService {
     });
     if (!w) {
       throw new BadRequestException('Default warehouse / location not found');
+    }
+  }
+
+  /**
+   * Organization → Location tree via settings.parentLocationId.
+   * Location has no Prisma parentId yet — JSON keeps this additive (no migrate).
+   */
+  private async assertParentLocation(
+    tenantId: string,
+    parentId: string,
+    childId?: string,
+  ) {
+    if (childId && parentId === childId) {
+      throw new BadRequestException('A location cannot be its own parent');
+    }
+    const parent = await this.prisma.location.findFirst({
+      where: { id: parentId, tenantId },
+      select: { id: true },
+    });
+    if (!parent) {
+      throw new BadRequestException('Parent location not found');
+    }
+    let cur: string | null = parentId;
+    const seen = new Set<string>();
+    while (cur) {
+      if (childId && cur === childId) {
+        throw new BadRequestException(
+          'Circular location hierarchy — choose a different parent',
+        );
+      }
+      if (seen.has(cur)) break;
+      seen.add(cur);
+      const row: { settings: Prisma.JsonValue } | null =
+        await this.prisma.location.findFirst({
+          where: { id: cur, tenantId },
+          select: { settings: true },
+        });
+      cur = parseLocationSettings(row?.settings).parentLocationId ?? null;
     }
   }
 

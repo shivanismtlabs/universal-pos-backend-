@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -12,6 +13,10 @@ import {
   PaymentStatus,
   PaymentType,
   Prisma,
+    ProductKind,
+    ProductStatus,
+    RegisterCashMovementKind,
+    StockLedgerType,
 } from '@prisma/client';
 import {
   SALE_PRODUCT_FIELDS,
@@ -30,14 +35,47 @@ import { saveProductImage } from '../../common/product-image';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import { nextInternalCode128Candidate } from '../../common/barcode';
 import { resolveDefaultLocationId } from '../../common/location-access';
+import { categoryIdsWithDescendants } from '../../common/category-tree';
+import {
+  seedZeroStockAtOtherLocations,
+  seedZeroStockForNewLocation,
+} from '../../common/stock-at-location';
 import { LowStockAlertService } from '../notify/low-stock-alert.service';
+import { StockMutationEngine } from '../inventory/stock-mutation.engine';
 
 const MAX_PRODUCT_IMAGES = 8;
+
+/** Items that belong on the billing counter (sale + service + rentable SKUs). */
+const COUNTER_PRODUCT: Prisma.ProductWhereInput = {
+  isActive: true,
+  availableInPos: true,
+  canSell: true,
+  status: ProductStatus.active,
+  kind: {
+    in: [
+      ProductKind.physical,
+      ProductKind.service,
+      ProductKind.digital,
+      ProductKind.bundle,
+      ProductKind.rental,
+    ],
+  },
+};
 
 function asMeta(meta: unknown): Record<string, unknown> {
   return meta && typeof meta === 'object' && !Array.isArray(meta)
     ? { ...(meta as Record<string, unknown>) }
     : {};
+}
+
+function batchPickStrategy(meta: unknown): 'fefo' | 'fifo' | 'manual' {
+  const s = String(asMeta(meta).batchPickStrategy ?? asMeta(meta).batchStrategy ?? 'fefo').toLowerCase();
+  if (s === 'fifo' || s === 'manual') return s;
+  return 'fefo';
+}
+
+function requiresManualBatch(trackBatch: boolean | undefined, meta: unknown): boolean {
+  return trackBatch === true && batchPickStrategy(meta) === 'manual';
 }
 
 /** Gallery URLs from meta.images + cover photoUrl */
@@ -66,8 +104,14 @@ import {
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import { AccountingPostingService } from '../accounting/posting.service';
+import { EnterpriseApprovalsService } from '../enterprise/enterprise-approvals.service';
 import { OrdersService } from '../orders/orders.service';
 import { PaymentsService } from '../payments/payments.service';
+import {
+  getPaymentMethodCapability,
+  isInternalImmediate,
+} from '../payments/payment-capabilities';
+import { expectedCash, cashVariance } from '../payments/register-cash';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { NotifyService } from '../notify/notify.service';
 import {
@@ -91,20 +135,24 @@ const READY_FROM: OrderStatus[] = [
   OrderStatus.in_progress,
 ];
 
-const IMMEDIATE_PAY: PaymentMethod[] = [
-  PaymentMethod.cash,
-  PaymentMethod.card,
-  PaymentMethod.upi,
-  PaymentMethod.bank_transfer,
-  PaymentMethod.wallet,
-  PaymentMethod.qr,
-  PaymentMethod.emi,
-  PaymentMethod.store_credit,
-  PaymentMethod.gift_card,
-];
-
 function money(n: number | string | Prisma.Decimal) {
   return new Prisma.Decimal(n);
+}
+
+function posSettingsOf(settings: unknown): {
+  customerRequired: boolean;
+} {
+  const root =
+    settings && typeof settings === 'object'
+      ? (settings as Record<string, unknown>)
+      : {};
+  const pos =
+    root.pos && typeof root.pos === 'object'
+      ? (root.pos as Record<string, unknown>)
+      : {};
+  return {
+    customerRequired: pos.customerRequired === true,
+  };
 }
 
 @Injectable()
@@ -117,6 +165,8 @@ export class PosService {
     private readonly notify: NotifyService,
     private readonly lowStock: LowStockAlertService,
     private readonly accounting: AccountingPostingService,
+    private readonly approvals: EnterpriseApprovalsService,
+    private readonly stock: StockMutationEngine,
   ) {}
 
   /**
@@ -167,7 +217,7 @@ export class PosService {
       this.prisma.product.count({
         where: {
           tenantId: user.tenantId,
-          fulfillmentMode: FulfillmentMode.sale,
+          ...COUNTER_PRODUCT,
         },
       }),
       this.saleCatalog(user, { locationId: locId, limit: 100 }),
@@ -282,6 +332,14 @@ export class PosService {
     }
 
     try {
+      let photoUrl: string | null = null;
+      const rawImage = (dto.image ?? dto.photoUrl)?.trim();
+      if (rawImage) {
+        photoUrl = rawImage.startsWith('data:')
+          ? await saveProductImage(user.tenantId, rawImage)
+          : rawImage;
+      }
+
       const product = await this.prisma.product.create({
         data: {
           tenantId: user.tenantId,
@@ -289,7 +347,7 @@ export class PosService {
           name: dto.title.trim(),
           skuCode: dto.sku.trim().toUpperCase(),
           description: dto.description?.trim(),
-          photoUrl: (dto.image ?? dto.photoUrl)?.trim() || null,
+          photoUrl,
           kind: isService
             ? 'service'
             : dto.isComposite
@@ -324,6 +382,7 @@ export class PosService {
             sellUnit,
             itemType: isService ? 'service' : 'goods',
             itemStructure: dto.itemStructure === 'variants' ? 'variants' : 'single',
+            ...(photoUrl ? { images: [photoUrl] } : {}),
             ...(dto.manufacturer?.trim()
               ? { manufacturer: dto.manufacturer.trim() }
               : {}),
@@ -447,9 +506,31 @@ export class PosService {
           productId: product.id,
           sku: dto.sku.trim().toUpperCase(),
           sellUnit,
-          qtyOnHand: trackInventory ? qty : 0,
+          qtyOnHand: 0,
           sellPrice: price.toFixed(2),
         },
+      });
+      if (trackInventory && qty > 0) {
+        await this.stock.mutate(this.prisma, {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          locationId,
+          stockLevelId: level.id,
+          qty,
+          type: StockLedgerType.opening,
+          reason: 'Opening stock',
+          referenceType: 'product',
+          referenceId: product.id,
+          skipComponentExplosion: true,
+        });
+      }
+      await seedZeroStockAtOtherLocations(this.prisma, {
+        tenantId: user.tenantId,
+        productId: product.id,
+        sku: dto.sku.trim().toUpperCase(),
+        sellUnit,
+        sellPrice: price,
+        exceptLocationId: locationId,
       });
       return {
         mode: 'sale' as const,
@@ -646,13 +727,20 @@ export class PosService {
     if (!locationId) throw new BadRequestException('No location configured');
 
     const q = opts.q?.trim();
+    const categoryIds = opts.categoryId
+      ? await categoryIdsWithDescendants(
+          this.prisma,
+          user.tenantId,
+          opts.categoryId,
+        )
+      : null;
     const rows = await this.prisma.stockLevel.findMany({
       where: {
         tenantId: user.tenantId,
         locationId,
         product: {
-          fulfillmentMode: FulfillmentMode.sale,
-          ...(opts.categoryId ? { categoryId: opts.categoryId } : {}),
+          ...COUNTER_PRODUCT,
+          ...(categoryIds ? { categoryId: { in: categoryIds } } : {}),
           ...(q
             ? {
                 OR: [
@@ -698,23 +786,23 @@ export class PosService {
         const images = productImageList(r.product.photoUrl, r.product.meta);
         const cover = images[0] ?? r.product.photoUrl ?? null;
         return {
-          id: r.id,
-          productId: r.productId,
-          sku: r.sku,
-          title: r.product.name,
-          description: r.product.description,
+        id: r.id,
+        productId: r.productId,
+        sku: r.sku,
+        title: r.product.name,
+        description: r.product.description,
           image: cover,
           photoUrl: cover,
           images,
-          price: r.sellPrice,
+        price: r.sellPrice,
           qty: Number(r.qtyOnHand),
           sellUnit: r.sellUnit,
-          isActive: r.product.isActive,
+        isActive: r.product.isActive,
           barcode: r.product.barcode,
           kind: r.product.kind,
           status: r.product.status,
           brand: r.product.brand,
-          category: r.product.category,
+        category: r.product.category,
         };
       }),
     };
@@ -824,10 +912,30 @@ export class PosService {
       );
     }
     const normalized = normalizeQty(next, unit);
+    const delta = normalized - beforeQty;
+    if (Math.abs(delta) < 1e-9) {
+      return {
+        id: level.id,
+        sku: level.sku,
+        qty: beforeQty,
+        sellUnit: level.sellUnit,
+        delta: 0,
+        beforeQty,
+        reason: dto.reason?.trim() || null,
+      };
+    }
 
-    const updated = await this.prisma.stockLevel.update({
-      where: { id: level.id },
-      data: { qtyOnHand: normalized },
+    const mut = await this.stock.mutate(this.prisma, {
+      tenantId: user.tenantId,
+      actorUserId: user.userId,
+      locationId: level.locationId,
+      stockLevelId: level.id,
+      qty: delta,
+      type: StockLedgerType.adjustment,
+      reason: dto.reason?.trim() || 'POS qty adjust',
+      referenceType: 'stock_level',
+      referenceId: level.id,
+      skipComponentExplosion: true,
     });
 
     await this.prisma.auditLog.create({
@@ -843,8 +951,8 @@ export class PosService {
           productSku: level.product?.skuCode ?? null,
           locationId: level.locationId,
           beforeQty,
-          afterQty: Number(updated.qtyOnHand),
-          delta: Number(dto.delta),
+          afterQty: mut.qtyAfter,
+          delta,
           sellUnit: unit,
           reason: dto.reason?.trim() || null,
         },
@@ -852,11 +960,11 @@ export class PosService {
     });
 
     return {
-      id: updated.id,
-      sku: updated.sku,
-      qty: Number(updated.qtyOnHand),
-      sellUnit: updated.sellUnit,
-      delta: dto.delta,
+      id: mut.stockLevelId,
+      sku: level.sku,
+      qty: mut.qtyAfter,
+      sellUnit: level.sellUnit,
+      delta,
       beforeQty,
       reason: dto.reason?.trim() || null,
     };
@@ -1046,7 +1154,7 @@ export class PosService {
           select: {
             products: {
               where: {
-                fulfillmentMode: FulfillmentMode.sale,
+                ...COUNTER_PRODUCT,
                 stockLevels: { some: {} },
               },
             },
@@ -1137,11 +1245,30 @@ export class PosService {
     }
   }
 
+  private async assertCounterShop(tenantId: string) {
+    const tenant = await this.prisma.tenant.findUniqueOrThrow({
+      where: { id: tenantId },
+      select: { settings: true },
+    });
+    const parsed = parseCommerceModes(tenant.settings);
+    if (!parsed.setupComplete) {
+      throw new BadRequestException('Shop commerce is not ready');
+    }
+    const ok = parsed.modes.some(
+      (m) => m === 'sale' || m === 'service' || m === 'rental',
+    );
+    if (!ok) {
+      throw new BadRequestException(
+        'Counter is not enabled for this shop’s commerce modes',
+      );
+    }
+  }
+
   /**
-   * Cashiers are capped by settings.pos.maxCashierDiscountPercent (default 15).
-   * Admin/manager may exceed the cap (audited on order meta).
+   * Cashiers are capped by configurable approval policy (default 5% cashier / 15% manager).
+   * Over-limit creates an approval request — does not silently apply.
    */
-  private assertDiscountAllowed(
+  private async assertDiscountAllowed(
     user: AuthUser,
     settings: unknown,
     discountAmount: number | undefined,
@@ -1153,6 +1280,32 @@ export class PosService {
     }
     if (discountAmount > merchandiseSubtotal + 1e-9) {
       throw new BadRequestException('Discount cannot exceed merchandise subtotal');
+    }
+
+    const pct = (discountAmount / merchandiseSubtotal) * 100;
+    const evaled = await this.approvals.evaluate(user, {
+      type: 'discount',
+      tenantId: user.tenantId,
+      amount: discountAmount,
+      percent: pct,
+      entityType: 'order',
+      reason: `Discount ${pct.toFixed(1)}%`,
+    });
+    if (evaled.needsApproval) {
+      const req = await this.approvals.createRequest(user, {
+        type: 'discount',
+        tenantId: user.tenantId,
+        amount: discountAmount,
+        percent: pct,
+        entityType: 'order',
+        reason: evaled.reason,
+        payload: { percent: pct, amount: discountAmount },
+      });
+      throw new ForbiddenException({
+        message: evaled.reason ?? 'Discount requires approval',
+        approvalRequestId: req.id,
+        status: 'pending',
+      });
     }
 
     const root =
@@ -1169,9 +1322,8 @@ export class PosService {
         ? Math.min(100, Math.max(0, pos.maxCashierDiscountPercent))
         : 15;
 
-    const pct = (discountAmount / merchandiseSubtotal) * 100;
     const isLead = user.roles.some((r) => r === 'admin' || r === 'manager');
-    if (pct > cap + 1e-6 && !isLead) {
+    if (pct > cap + 1e-6 && !isLead && !evaled.allowed) {
       throw new BadRequestException(
         `Discount ${pct.toFixed(1)}% exceeds cashier limit of ${cap}%. Ask a manager.`,
       );
@@ -1192,6 +1344,7 @@ export class PosService {
       maxQty?: number;
       /** Include out-of-stock SKUs (purchase orders / restock). */
       forPurchase?: boolean;
+      categoryId?: string;
     },
   ) {
     const locationId =
@@ -1204,33 +1357,39 @@ export class PosService {
     });
     if (!loc) throw new NotFoundException('Location not found');
 
+    await seedZeroStockForNewLocation(this.prisma, {
+      tenantId: user.tenantId,
+      locationId,
+    });
+
     const limitCap = opts.forPurchase ? 200 : 100;
     const limit = Math.min(Math.max(opts.limit ?? 40, 1), limitCap);
     const page = Math.max(opts.page ?? 1, 1);
     const skip = (page - 1) * limit;
     const q = opts.q?.trim();
     const threshold = Math.min(Math.max(opts.maxQty ?? 5, 1), 100);
+    const categoryIds = opts.categoryId
+      ? await categoryIdsWithDescendants(
+          this.prisma,
+          user.tenantId,
+          opts.categoryId,
+        )
+      : null;
 
     const where: Prisma.StockLevelWhereInput = {
       tenantId: user.tenantId,
       locationId,
+      variantKey: '',
       ...(opts.forPurchase
         ? {}
         : opts.lowStock
           ? { qtyOnHand: { gt: 0, lte: threshold } }
-          : {
-              // In-stock tracked items, OR non-tracked (services) even at 0 qty
-              OR: [
-                { qtyOnHand: { gt: 0 } },
-                { product: { trackQty: false } },
-              ],
-            }),
+          : {}),
       AND: [
         {
           product: {
-            fulfillmentMode: FulfillmentMode.sale,
-            isActive: true,
-            availableInPos: true,
+            ...COUNTER_PRODUCT,
+            ...(categoryIds ? { categoryId: { in: categoryIds } } : {}),
           },
         },
         ...(q
@@ -1271,30 +1430,109 @@ export class PosService {
     const [total, items] = await Promise.all([
       this.prisma.stockLevel.count({ where }),
       this.prisma.stockLevel.findMany({
-        where,
+      where,
         skip,
-        take: limit,
-        orderBy: [{ product: { name: 'asc' } }, { sku: 'asc' }],
-        include: {
-          product: {
-            select: {
-              id: true,
-              name: true,
-              skuCode: true,
+      take: limit,
+      orderBy: [{ product: { name: 'asc' } }, { sku: 'asc' }],
+      include: {
+        product: {
+          select: {
+            id: true,
+            name: true,
+            skuCode: true,
               barcode: true,
-              description: true,
-              photoUrl: true,
+            description: true,
+            photoUrl: true,
               taxCode: true,
               costPrice: true,
               meta: true,
               trackQty: true,
-              category: { select: { id: true, name: true } },
-            },
+              trackSerial: true,
+              trackBatch: true,
+              kind: true,
+            category: { select: { id: true, name: true } },
           },
-          location: { select: { id: true, name: true, code: true } },
         },
+        location: { select: { id: true, name: true, code: true } },
+      },
       }),
     ]);
+
+    const productIds = items.map((r) => r.productId);
+    const [variants, batches, variantLevels] = await Promise.all([
+      productIds.length
+        ? this.prisma.productVariant.findMany({
+            where: {
+              tenantId: user.tenantId,
+              productId: { in: productIds },
+              isActive: true,
+            },
+            select: {
+              id: true,
+              productId: true,
+              name: true,
+              skuCode: true,
+              barcode: true,
+              attributes: true,
+            },
+            orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+          })
+        : Promise.resolve([]),
+      productIds.length
+        ? this.prisma.productBatch.findMany({
+            where: {
+              tenantId: user.tenantId,
+              locationId,
+              productId: { in: productIds },
+              isActive: true,
+              qtyOnHand: { gt: 0 },
+            },
+            select: {
+              id: true,
+              productId: true,
+              batchCode: true,
+              qtyOnHand: true,
+              expiresAt: true,
+            },
+            orderBy: [{ expiresAt: 'asc' }, { batchCode: 'asc' }],
+          })
+        : Promise.resolve([]),
+      productIds.length
+        ? this.prisma.stockLevel.findMany({
+            where: {
+              tenantId: user.tenantId,
+              locationId,
+              productId: { in: productIds },
+              variantKey: { not: '' },
+            },
+            select: {
+              productId: true,
+              qtyOnHand: true,
+              qtyReserved: true,
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+    const variantsByProduct = new Map<string, typeof variants>();
+    for (const v of variants) {
+      const list = variantsByProduct.get(v.productId) ?? [];
+      list.push(v);
+      variantsByProduct.set(v.productId, list);
+    }
+    const batchesByProduct = new Map<string, typeof batches>();
+    for (const b of batches) {
+      const list = batchesByProduct.get(b.productId) ?? [];
+      list.push(b);
+      batchesByProduct.set(b.productId, list);
+    }
+
+    const variantQtyByProduct = new Map<string, number>();
+    for (const vl of variantLevels) {
+      variantQtyByProduct.set(
+        vl.productId,
+        (variantQtyByProduct.get(vl.productId) ?? 0) + Number(vl.qtyOnHand),
+      );
+    }
 
     const totalPages = Math.max(1, Math.ceil(total / limit));
 
@@ -1307,7 +1545,11 @@ export class PosService {
       total,
       totalPages,
       items: items.map((row) => {
-        const qty = Number(row.qtyOnHand);
+        const rowVariants = variantsByProduct.get(row.productId) ?? [];
+        const qty =
+          rowVariants.length > 0
+            ? Number(variantQtyByProduct.get(row.productId) ?? 0)
+            : Number(row.qtyOnHand);
         const images = productImageList(row.product.photoUrl, row.product.meta);
         const cover = images[0] ?? row.product.photoUrl ?? null;
         const taxRatePercent = resolveProductTaxRatePercent({
@@ -1316,25 +1558,53 @@ export class PosService {
         });
         const costPrice =
           row.product.costPrice != null ? Number(row.product.costPrice) : null;
+        const rowBatches = batchesByProduct.get(row.productId) ?? [];
+        const meta =
+          row.product.meta && typeof row.product.meta === 'object'
+            ? (row.product.meta as Record<string, unknown>)
+            : {};
+        const itemStructure =
+          typeof meta.itemStructure === 'string' ? meta.itemStructure : '';
         return {
-          id: row.id,
-          sku: row.sku,
-          sellPrice: row.sellPrice,
+        id: row.id,
+          productId: row.productId,
+        sku: row.sku,
+        sellPrice: row.sellPrice,
           costPrice,
           qtyOnHand: qty,
+          qtyReserved: Number(row.qtyReserved ?? 0),
+          qtyAvailable: qty - Number(row.qtyReserved ?? 0),
           sellUnit: row.sellUnit,
           trackQty: row.product.trackQty !== false,
           lowStock: qty > 0 && qty <= threshold,
-          name: row.product.name,
-          productSku: row.product.skuCode,
+        name: row.product.name,
+        productSku: row.product.skuCode,
           barcode: row.product.barcode,
-          description: row.product.description,
+        description: row.product.description,
           image: cover,
           photoUrl: cover,
           images,
           taxCode: row.product.taxCode,
           taxRatePercent,
-          category: row.product.category,
+        category: row.product.category,
+          kind: row.product.kind,
+          requiresVariant: itemStructure === 'variants' || rowVariants.length > 0,
+          variantOptions: rowVariants.map((v) => ({
+            id: v.id,
+            skuCode: v.skuCode,
+            barcode: v.barcode,
+            label: v.name,
+          })),
+          requiresBatch: requiresManualBatch(row.product.trackBatch, row.product.meta),
+          batchPickStrategy: batchPickStrategy(row.product.meta),
+          batchTracked: row.product.trackBatch === true,
+          batchOptions: rowBatches.map((b) => ({
+            id: b.id,
+            batchCode: b.batchCode,
+            qtyOnHand: Number(b.qtyOnHand),
+            expiresAt: b.expiresAt?.toISOString() ?? null,
+          })),
+          requiresSerial: row.product.trackSerial === true,
           location: row.location,
         };
       }),
@@ -1354,10 +1624,7 @@ export class PosService {
       opts.locationId ?? (await this.defaultLocationId(user.tenantId, user));
     if (!locationId) throw new BadRequestException('No location configured');
 
-    const productSale = {
-      fulfillmentMode: FulfillmentMode.sale,
-      isActive: true,
-    } as const;
+    const productSale = COUNTER_PRODUCT;
 
     // Prefer exact matches like a live scanner expects (SKU, catalog barcode, product code)
     let row = await this.prisma.stockLevel.findFirst({
@@ -1373,7 +1640,7 @@ export class PosService {
           { product: { barcode: { equals: raw, mode: 'insensitive' } } },
           { product: { barcode: { equals: sku, mode: 'insensitive' } } },
           {
-            product: {
+        product: {
               internalCode: { equals: raw, mode: 'insensitive' },
             },
           },
@@ -1393,6 +1660,7 @@ export class PosService {
           },
         ],
       },
+      orderBy: [{ variantKey: 'desc' }, { createdAt: 'asc' }],
       include: {
         product: {
           select: {
@@ -1404,6 +1672,8 @@ export class PosService {
             taxCode: true,
             meta: true,
             trackQty: true,
+            trackSerial: true,
+            trackBatch: true,
             category: { select: { id: true, name: true } },
           },
         },
@@ -1415,8 +1685,7 @@ export class PosService {
       const orphan = await this.prisma.product.findFirst({
         where: {
           tenantId: user.tenantId,
-          fulfillmentMode: FulfillmentMode.sale,
-          isActive: true,
+          ...COUNTER_PRODUCT,
           OR: [
             { skuCode: { equals: raw, mode: 'insensitive' } },
             { skuCode: { equals: sku, mode: 'insensitive' } },
@@ -1477,6 +1746,8 @@ export class PosService {
                 taxCode: true,
                 meta: true,
                 trackQty: true,
+                trackSerial: true,
+                trackBatch: true,
                 category: { select: { id: true, name: true } },
               },
             },
@@ -1502,12 +1773,54 @@ export class PosService {
       taxCode: row.product.taxCode,
       meta: row.product.meta,
     });
+    const [variants, batches] = await Promise.all([
+      this.prisma.productVariant.findMany({
+        where: {
+          tenantId: user.tenantId,
+          productId: row.product.id,
+          isActive: true,
+        },
+        select: {
+          id: true,
+          name: true,
+          skuCode: true,
+          barcode: true,
+          attributes: true,
+        },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      }),
+      this.prisma.productBatch.findMany({
+        where: {
+          tenantId: user.tenantId,
+          locationId,
+          productId: row.product.id,
+          isActive: true,
+          qtyOnHand: { gt: 0 },
+        },
+        select: {
+          id: true,
+          batchCode: true,
+          qtyOnHand: true,
+          expiresAt: true,
+        },
+        orderBy: [{ expiresAt: 'asc' }, { batchCode: 'asc' }],
+      }),
+    ]);
+    const meta =
+      row.product.meta && typeof row.product.meta === 'object'
+        ? (row.product.meta as Record<string, unknown>)
+        : {};
+    const itemStructure =
+      typeof meta.itemStructure === 'string' ? meta.itemStructure : '';
     return {
       id: row.id,
+      productId: row.product.id,
       sku: row.sku,
       name: row.product.name,
       sellPrice: row.sellPrice,
       qtyOnHand: onHand,
+      qtyReserved: Number(row.qtyReserved ?? 0),
+      qtyAvailable: onHand - Number(row.qtyReserved ?? 0),
       sellUnit: row.sellUnit,
       trackQty: tracks,
       productSku: row.product.skuCode,
@@ -1517,7 +1830,129 @@ export class PosService {
       images,
       taxRatePercent,
       category: row.product.category,
+      requiresVariant: itemStructure === 'variants' || variants.length > 0,
+      variantOptions: variants.map((v) => ({
+        id: v.id,
+        skuCode: v.skuCode,
+        barcode: v.barcode,
+        label: v.name,
+      })),
+      requiresBatch: requiresManualBatch(row.product.trackBatch, row.product.meta),
+      batchPickStrategy: batchPickStrategy(row.product.meta),
+      batchTracked: row.product.trackBatch === true,
+      batchOptions: batches.map((b) => ({
+        id: b.id,
+        batchCode: b.batchCode,
+        qtyOnHand: Number(b.qtyOnHand),
+        expiresAt: b.expiresAt?.toISOString() ?? null,
+      })),
+      requiresSerial: row.product.trackSerial === true,
     };
+  }
+
+  private async resolvePosSaleLine(
+    tx: Prisma.TransactionClient,
+    user: AuthUser,
+    locationId: string,
+    line: {
+      stockLevelId: string;
+      quantity: number;
+      variantId?: string;
+      batchId?: string;
+      serialNumber?: string;
+    },
+  ) {
+    const level = await tx.stockLevel.findFirst({
+      where: {
+        id: line.stockLevelId,
+        tenantId: user.tenantId,
+        locationId,
+      },
+      include: { product: true },
+    });
+    if (!level) {
+      throw new NotFoundException(`Stock level not found: ${line.stockLevelId}`);
+    }
+    const unit = normalizeSellUnit(level.sellUnit);
+    const qty = Number(line.quantity);
+    const qtyErr = validateSellQty(qty, unit);
+    if (qtyErr) {
+      throw new BadRequestException(`${level.sku}: ${qtyErr}`);
+    }
+
+    const itemMeta = asMeta(level.product.meta);
+    const itemStructure =
+      typeof itemMeta.itemStructure === 'string' ? itemMeta.itemStructure : '';
+    const hasVariants = await tx.productVariant.count({
+      where: {
+        tenantId: user.tenantId,
+        productId: level.productId,
+        isActive: true,
+      },
+    });
+    if ((itemStructure === 'variants' || hasVariants > 0) && !line.variantId) {
+      throw new BadRequestException(`${level.sku}: variant is required`);
+    }
+
+    let sellLevel = level;
+    if (line.variantId) {
+      const variant = await tx.productVariant.findFirst({
+        where: {
+          id: line.variantId,
+          tenantId: user.tenantId,
+          productId: level.productId,
+          isActive: true,
+        },
+        select: { id: true },
+      });
+      if (!variant) {
+        throw new BadRequestException(`${level.sku}: invalid variant`);
+      }
+      const vLevel = await tx.stockLevel.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          locationId,
+          productId: level.productId,
+          variantKey: line.variantId,
+        },
+        include: { product: true },
+      });
+      if (vLevel) sellLevel = vLevel;
+    }
+
+    const tracks = sellLevel.product.trackQty !== false;
+    const available =
+      Number(sellLevel.qtyOnHand) - Number(sellLevel.qtyReserved);
+    if (tracks && available + 1e-9 < qty) {
+      throw new BadRequestException(
+        `Insufficient stock for ${sellLevel.sku} (available ${available} ${unit}, need ${qty})`,
+      );
+    }
+
+    if (
+      requiresManualBatch(sellLevel.product.trackBatch, sellLevel.product.meta) &&
+      !line.batchId
+    ) {
+      throw new BadRequestException(`${sellLevel.sku}: batch is required`);
+    }
+    if (sellLevel.product.trackBatch === true && line.batchId) {
+      const batch = await tx.productBatch.findFirst({
+        where: {
+          id: line.batchId,
+          tenantId: user.tenantId,
+          locationId,
+          productId: sellLevel.productId,
+          isActive: true,
+        },
+        select: { id: true },
+      });
+      if (!batch) throw new BadRequestException(`${sellLevel.sku}: invalid batch`);
+    }
+    if (sellLevel.product.trackSerial === true && !line.serialNumber?.trim()) {
+      throw new BadRequestException(`${sellLevel.sku}: serial is required`);
+    }
+
+    return { level: sellLevel, qty, tracks, unit };
   }
 
   /**
@@ -1553,6 +1988,9 @@ export class PosService {
       where: { id: user.tenantId },
       select: { currencyCode: true, taxMode: true, taxId: true, settings: true },
     });
+    if (!dto.customerId && posSettingsOf(tenant.settings).customerRequired) {
+      throw new BadRequestException('Customer is required for checkout');
+    }
     const taxProfile = buildTaxProfile({
       taxMode: tenant.taxMode,
       taxId: tenant.taxId,
@@ -1584,6 +2022,18 @@ export class PosService {
               taxId: taxProfile.taxId,
             },
             ...(dto.note ? { note: dto.note } : {}),
+            ...(dto.meta && typeof dto.meta === 'object' && !Array.isArray(dto.meta)
+              ? Object.fromEntries(
+                  Object.entries(dto.meta).filter(
+                    ([k, v]) =>
+                      k !== 'taxSnapshot' &&
+                      k !== 'awaitingStripePayment' &&
+                      typeof k === 'string' &&
+                      k.length <= 64 &&
+                      v !== undefined,
+                  ),
+                )
+              : {}),
           },
           ...(dto.discountAmount !== undefined && dto.discountAmount > 0
             ? { discountTotal: money(dto.discountAmount).toFixed(2) }
@@ -1592,32 +2042,12 @@ export class PosService {
       });
 
       for (const line of dto.items) {
-        const level = await tx.stockLevel.findFirst({
-          where: {
-            id: line.stockLevelId,
-            tenantId: user.tenantId,
-            locationId: dto.locationId,
-          },
-          include: { product: true },
-        });
-        if (!level) {
-          throw new NotFoundException(
-            `Stock level not found: ${line.stockLevelId}`,
-          );
-        }
-        const unit = normalizeSellUnit(level.sellUnit);
-        const qty = Number(line.quantity);
-        const qtyErr = validateSellQty(qty, unit);
-        if (qtyErr) {
-          throw new BadRequestException(`${level.sku}: ${qtyErr}`);
-        }
-        const onHand = Number(level.qtyOnHand);
-        const tracks = level.product.trackQty !== false;
-        if (tracks && onHand < qty) {
-          throw new BadRequestException(
-            `Insufficient stock for ${level.sku} (have ${onHand} ${unit}, need ${qty})`,
-          );
-        }
+        const { level, qty } = await this.resolvePosSaleLine(
+          tx,
+          user,
+          dto.locationId,
+          line,
+        );
 
         const unitPrice =
           line.unitPrice !== undefined
@@ -1634,6 +2064,17 @@ export class PosService {
             ? { rate: productRatePct / 100 }
             : {}),
         });
+        const lineMeta: Record<string, unknown> = {
+          taxRate:
+            productRatePct != null ? productRatePct / 100 : taxProfile.rate,
+          taxInclusive: taxProfile.inclusive,
+          taxCode: level.product.taxCode ?? null,
+          ...(line.variantId ? { variantId: line.variantId } : {}),
+          ...(line.batchId ? { batchId: line.batchId } : {}),
+          ...(line.serialNumber?.trim()
+            ? { serialNumber: line.serialNumber.trim() }
+            : {}),
+        };
 
         await tx.orderItem.create({
           data: {
@@ -1647,14 +2088,7 @@ export class PosService {
             unitPrice: unitPrice.toFixed(2),
             lineTotal: taxed.lineTotal.toFixed(2),
             taxAmount: taxed.taxAmount.toFixed(2),
-            meta: {
-              taxRate:
-                productRatePct != null
-                  ? productRatePct / 100
-                  : taxProfile.rate,
-              taxInclusive: taxProfile.inclusive,
-              taxCode: level.product.taxCode ?? null,
-            },
+            meta: lineMeta as Prisma.InputJsonValue,
           },
         });
       }
@@ -1667,7 +2101,7 @@ export class PosService {
       const merchandise =
         Number(lineSum._sum.lineTotal ?? 0) +
         Number(lineSum._sum.taxAmount ?? 0);
-      this.assertDiscountAllowed(
+      await this.assertDiscountAllowed(
         user,
         tenant.settings,
         dto.discountAmount,
@@ -1781,6 +2215,7 @@ export class PosService {
   async cancelPreparedSale(user: AuthUser, orderId: string) {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, tenantId: user.tenantId, kind: OrderKind.sale },
+      include: { payments: true },
     });
     if (!order) throw new NotFoundException('Order not found');
     const meta = (order.meta ?? {}) as Record<string, unknown>;
@@ -1791,6 +2226,44 @@ export class PosService {
       throw new BadRequestException('Order already closed');
     }
 
+    const succeeded = order.payments.filter(
+      (p) => p.status === PaymentStatus.succeeded,
+    );
+    const pendingExternal = order.payments.filter(
+      (p) =>
+        p.status === PaymentStatus.initiated ||
+        p.status === PaymentStatus.pending ||
+        p.status === PaymentStatus.processing,
+    );
+
+    if (succeeded.length > 0) {
+      await this.prisma.$transaction(async (tx) => {
+        for (const p of pendingExternal) {
+          await tx.payment.update({
+            where: { id: p.id },
+            data: {
+              status: PaymentStatus.cancelled,
+              failureReason: p.failureReason ?? 'Checkout cancelled by cashier',
+            },
+          });
+        }
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: OrderStatus.confirmed,
+            meta: {
+              ...meta,
+              awaitingStripePayment: false,
+              cancelledStripe: true,
+              partialAfterStripeCancel: true,
+            },
+          },
+        });
+        await this.ordersService.recalculateTotals(tx, user.tenantId, orderId);
+      });
+      return { id: orderId, status: OrderStatus.confirmed, cashKept: true };
+    }
+
     await this.prisma.order.update({
       where: { id: orderId },
       data: {
@@ -1798,6 +2271,15 @@ export class PosService {
         meta: { ...meta, awaitingStripePayment: false, cancelledStripe: true },
       },
     });
+    for (const p of pendingExternal) {
+      await this.prisma.payment.update({
+        where: { id: p.id },
+        data: {
+          status: PaymentStatus.cancelled,
+          failureReason: 'Prepared sale cancelled',
+        },
+      });
+    }
     return { id: orderId, status: OrderStatus.cancelled };
   }
 
@@ -1833,9 +2315,29 @@ export class PosService {
               `Insufficient stock for ${level.sku} after payment (have ${level.qtyOnHand})`,
             );
           }
-          await tx.stockLevel.update({
-            where: { id: level.id },
-            data: { qtyOnHand: { decrement: qty } },
+          const itemMeta =
+            item.meta && typeof item.meta === 'object'
+              ? (item.meta as Record<string, unknown>)
+              : {};
+          await this.stock.mutateInTx(tx, {
+            tenantId: user.tenantId,
+            actorUserId: user.userId,
+            locationId: order.locationId,
+            stockLevelId: level.id,
+            productId: level.productId,
+            variantId:
+              typeof itemMeta.variantId === 'string' ? itemMeta.variantId : undefined,
+            batchId:
+              typeof itemMeta.batchId === 'string' ? itemMeta.batchId : undefined,
+            serialNumber:
+              typeof itemMeta.serialNumber === 'string'
+                ? itemMeta.serialNumber
+                : undefined,
+            qty: -qty,
+            type: StockLedgerType.sale,
+            referenceType: 'order',
+            referenceId: orderId,
+            idempotencyKey: `sale:${orderId}:${level.id}:${qty}`,
           });
         }
       }
@@ -1868,17 +2370,17 @@ export class PosService {
           },
         });
       } else {
-        await tx.order.update({
-          where: { id: orderId },
-          data: {
-            status: OrderStatus.fulfilled,
-            meta: { ...meta, awaitingStripePayment: false },
-          },
-        });
-        await tx.order.update({
-          where: { id: orderId },
-          data: { status: OrderStatus.closed },
-        });
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          status: OrderStatus.fulfilled,
+          meta: { ...meta, awaitingStripePayment: false },
+        },
+      });
+      await tx.order.update({
+        where: { id: orderId },
+        data: { status: OrderStatus.closed },
+      });
       }
 
       await tx.outboxEvent.create({
@@ -1904,7 +2406,7 @@ export class PosService {
    * Stock decrements only if payment succeeds (same transaction).
    */
   async saleCheckout(user: AuthUser, dto: SaleCheckoutDto) {
-    await this.assertSaleShop(user.tenantId);
+    await this.assertCounterShop(user.tenantId);
 
     const loc = await this.prisma.location.findFirst({
       where: {
@@ -1930,6 +2432,24 @@ export class PosService {
 
     if (!dto.payments.length) {
       throw new BadRequestException('At least one payment is required');
+    }
+
+    const tenantForRules = await this.prisma.tenant.findFirstOrThrow({
+      where: { id: user.tenantId },
+      select: { settings: true },
+    });
+    if (!dto.customerId && posSettingsOf(tenantForRules.settings).customerRequired) {
+      throw new BadRequestException('Customer is required for checkout');
+    }
+
+    const hasCreditRemainder =
+      dto.allowPartial === true &&
+      dto.payments.some((p) => p.method === PaymentMethod.collect_later);
+    if (
+      hasCreditRemainder &&
+      !dto.customerId
+    ) {
+      throw new BadRequestException('Customer is required for a credit sale');
     }
 
     // Idempotency: if primary key already paid a closed sale, return it
@@ -2007,32 +2527,12 @@ export class PosService {
       });
 
       for (const line of dto.items) {
-        const level = await tx.stockLevel.findFirst({
-          where: {
-            id: line.stockLevelId,
-            tenantId: user.tenantId,
-            locationId: dto.locationId,
-          },
-          include: { product: true },
-        });
-        if (!level) {
-          throw new NotFoundException(
-            `Stock level not found: ${line.stockLevelId}`,
-          );
-        }
-        const unit = normalizeSellUnit(level.sellUnit);
-        const qty = Number(line.quantity);
-        const qtyErr = validateSellQty(qty, unit);
-        if (qtyErr) {
-          throw new BadRequestException(`${level.sku}: ${qtyErr}`);
-        }
-        const onHand = Number(level.qtyOnHand);
-        const tracks = level.product.trackQty !== false;
-        if (tracks && onHand < qty) {
-          throw new BadRequestException(
-            `Insufficient stock for ${level.sku} (have ${onHand} ${unit}, need ${qty})`,
-          );
-        }
+        const { level, qty, tracks } = await this.resolvePosSaleLine(
+          tx,
+          user,
+          dto.locationId,
+          line,
+        );
 
         const unitPrice =
           line.unitPrice !== undefined
@@ -2049,11 +2549,45 @@ export class PosService {
             ? { rate: productRatePct / 100 }
             : {}),
         });
+        const lineMeta: Record<string, unknown> = {
+          taxRate:
+            productRatePct != null ? productRatePct / 100 : taxProfile.rate,
+          taxInclusive: taxProfile.inclusive,
+          taxCode: level.product.taxCode ?? null,
+          ...(line.variantId ? { variantId: line.variantId } : {}),
+          ...(line.batchId ? { batchId: line.batchId } : {}),
+          ...(line.serialNumber?.trim()
+            ? { serialNumber: line.serialNumber.trim() }
+            : {}),
+        };
 
         if (tracks) {
-          await tx.stockLevel.update({
-            where: { id: level.id },
-            data: { qtyOnHand: { decrement: qty } },
+          const mut = await this.stock.mutateInTx(tx, {
+            tenantId: user.tenantId,
+            actorUserId: user.userId,
+            locationId: dto.locationId,
+            stockLevelId: level.id,
+            productId: level.productId,
+            variantId: line.variantId,
+            batchId: line.batchId,
+            serialNumber: line.serialNumber,
+            qty: -qty,
+            type: StockLedgerType.sale,
+            referenceType: 'order',
+            referenceId: created.id,
+            idempotencyKey: `sale:${created.id}:${level.id}:${qty}:${line.variantId ?? ''}:${line.batchId ?? ''}:${line.serialNumber ?? ''}`,
+          });
+          if (mut.batchId) lineMeta.batchId = mut.batchId;
+          if (mut.stockUnitId) lineMeta.stockUnitId = mut.stockUnitId;
+        } else {
+          await this.stock.consumeForParent(tx, {
+            tenantId: user.tenantId,
+            actorUserId: user.userId,
+            locationId: dto.locationId,
+            productId: level.productId,
+            parentQty: qty,
+            referenceType: 'order',
+            referenceId: created.id,
           });
         }
 
@@ -2069,14 +2603,7 @@ export class PosService {
             unitPrice: unitPrice.toFixed(2),
             lineTotal: taxed.lineTotal.toFixed(2),
             taxAmount: taxed.taxAmount.toFixed(2),
-            meta: {
-              taxRate:
-                productRatePct != null
-                  ? productRatePct / 100
-                  : taxProfile.rate,
-              taxInclusive: taxProfile.inclusive,
-              taxCode: level.product.taxCode ?? null,
-            },
+            meta: lineMeta as Prisma.InputJsonValue,
           },
         });
       }
@@ -2088,7 +2615,7 @@ export class PosService {
       const merchandise =
         Number(lineSum._sum.lineTotal ?? 0) +
         Number(lineSum._sum.taxAmount ?? 0);
-      this.assertDiscountAllowed(
+      await this.assertDiscountAllowed(
         user,
         tenant.settings,
         dto.discountAmount,
@@ -2268,9 +2795,47 @@ export class PosService {
       }
 
       const payments = [];
+      const openRegister =
+        paymentLines.some((p) => p.method === PaymentMethod.cash)
+          ? await tx.registerSession.findFirst({
+              where: {
+                tenantId: user.tenantId,
+                locationId: dto.locationId,
+                closedAt: null,
+              },
+              orderBy: { openedAt: 'desc' },
+            })
+          : null;
+      if (
+        paymentLines.some((p) => p.method === PaymentMethod.cash) &&
+        !openRegister
+      ) {
+        throw new BadRequestException(
+          'Open the register before recording a cash payment',
+        );
+      }
+
       for (const p of paymentLines) {
-        const status = IMMEDIATE_PAY.includes(p.method)
+        const cap = getPaymentMethodCapability(p.method);
+        if (
+          cap.requiresProvider &&
+          p.method !== PaymentMethod.bank_transfer
+        ) {
+          throw new BadRequestException(
+            `${cap.displayName} requires provider confirmation — use the ${cap.displayName} checkout flow`,
+          );
+        }
+        if (p.method === PaymentMethod.emi) {
+          throw new BadRequestException(
+            `${cap.displayName} provider is not configured`,
+          );
+        }
+
+        const status = isInternalImmediate(p.method)
           ? PaymentStatus.succeeded
+          : p.method === PaymentMethod.bank_transfer ||
+              p.method === PaymentMethod.collect_later
+            ? PaymentStatus.pending
           : PaymentStatus.pending;
 
         if (
@@ -2345,40 +2910,18 @@ export class PosService {
           }
         }
 
-        if (p.method === PaymentMethod.emi) {
-          const tenure = Number(
-            p.emiTenureMonths ??
-              (typeof p.bankReference === 'string' &&
-              /^EMI(\d+)m/i.test(p.bankReference)
-                ? p.bankReference.replace(/^EMI(\d+)m.*/i, '$1')
-                : NaN),
-          );
-          const provider = (p.emiProvider ?? p.bankName)?.trim();
-          const emiRef = (p.emiReference ?? p.bankReference)?.trim() || null;
-          if (!Number.isFinite(tenure) || tenure < 1 || tenure > 36) {
-            throw new BadRequestException(
-              'EMI needs tenure in months (1–36)',
-            );
-          }
-          if (!provider) {
-            throw new BadRequestException(
-              'EMI needs a provider / bank name',
-            );
-          }
-          // Normalize onto payment DTO fields for payload write below
-          p.emiTenureMonths = tenure;
-          p.emiProvider = provider;
-          if (emiRef && !p.emiReference) p.emiReference = emiRef;
-        }
-
         const payment = await tx.payment.create({
           data: {
             tenantId: user.tenantId,
             orderId: created.id,
+            locationId: dto.locationId,
+            registerSessionId:
+              p.method === PaymentMethod.cash ? openRegister?.id ?? null : null,
             type: p.type ?? PaymentType.payment,
             method: p.method,
             amount: money(p.amount).toFixed(2),
             status,
+            provider: cap.provider === 'none' ? null : cap.provider,
             idempotencyKey: p.idempotencyKey,
             takenByUserId: user.userId,
             ...(p.giftCardCode
@@ -2398,16 +2941,6 @@ export class PosService {
                     bankAccountNumber: p.bankAccountNumber?.trim() || null,
                     bankIfsc: p.bankIfsc?.trim() || null,
                     bankName: p.bankName?.trim() || null,
-                  },
-                }
-              : {}),
-            ...(p.method === PaymentMethod.emi
-              ? {
-                  gatewayRef: p.emiReference?.trim() || null,
-                  gatewayPayload: {
-                    emiTenureMonths: Number(p.emiTenureMonths),
-                    emiProvider: p.emiProvider?.trim() || null,
-                    emiReference: p.emiReference?.trim() || null,
                   },
                 }
               : {}),
@@ -2731,7 +3264,12 @@ export class PosService {
         typeof settings.tax?.receiptFooter === 'string'
           ? settings.tax.receiptFooter
           : '',
-      items: order.items.map((item) => ({
+      items: order.items.map((item) => {
+        const itemMeta =
+          item.meta && typeof item.meta === 'object'
+            ? (item.meta as Record<string, unknown>)
+            : {};
+        return {
         id: item.id,
         itemType: item.itemKind,
         itemKind: item.itemKind,
@@ -2752,7 +3290,32 @@ export class PosService {
         product: item.product
           ? { name: item.product.name, skuCode: item.product.skuCode }
           : null,
-      })),
+        tracking: {
+          ...(typeof itemMeta.variantId === 'string'
+            ? { variantId: itemMeta.variantId }
+            : {}),
+          ...(typeof itemMeta.batchId === 'string'
+            ? { batchId: itemMeta.batchId }
+            : {}),
+          ...(typeof itemMeta.serialNumber === 'string'
+            ? { serialNumber: itemMeta.serialNumber }
+            : {}),
+        },
+      };
+      }),
+      fulfillment: {
+        ...(typeof meta.orderType === 'string' ? { orderType: meta.orderType } : {}),
+        ...(typeof meta.tableId === 'string' ? { resourceId: meta.tableId } : {}),
+        ...(typeof meta.covers === 'number' ? { covers: meta.covers } : {}),
+        ...(typeof meta.note === 'string' ? { note: meta.note } : {}),
+      },
+      rentalWindow: order.rentalExt
+        ? {
+            pickupDate: order.rentalExt.pickupDate,
+            returnDueDate: order.rentalExt.returnDueDate,
+            lifecycle: order.rentalExt.lifecycle,
+          }
+        : null,
       totals: {
         subtotal: order.subtotal,
         taxTotal: order.taxTotal,
@@ -2760,13 +3323,25 @@ export class PosService {
         depositTotal: order.depositTotal,
         balanceDue: order.balanceDue,
       },
-      payments: succeededPayments.map((p) => ({
+      payments: order.payments.map((p) => ({
         id: p.id,
         type: p.type,
         method: p.method,
+        status: p.status,
         amount: p.amount,
+        provider: p.provider,
+        gatewayRef: p.gatewayRef,
         createdAt: p.createdAt,
       })),
+      register: (() => {
+        const sid = order.payments.find((p) => p.registerSessionId)
+          ?.registerSessionId;
+        return sid ? { sessionId: sid } : null;
+      })(),
+      amountPaid: succeededPayments
+        .filter((p) => p.type === 'payment' || p.type === 'deposit')
+        .reduce((s, p) => s + Number(p.amount), 0),
+      remainingDue: order.balanceDue,
       cashTendered:
         typeof meta.cashTendered === 'string' ||
         typeof meta.cashTendered === 'number'
@@ -3053,23 +3628,64 @@ export class PosService {
     });
     if (!session) throw new NotFoundException('Open register not found');
 
-    const cashSales = await this.prisma.payment.aggregate({
-      where: {
+    const paymentWhere = {
         tenantId: user.tenantId,
         method: PaymentMethod.cash,
-        type: PaymentType.payment,
         status: PaymentStatus.succeeded,
+      OR: [
+        { registerSessionId: session.id },
+        {
+          registerSessionId: null,
         createdAt: { gte: session.openedAt },
-        order: { locationId: session.locationId, kind: OrderKind.sale },
+          order: { locationId: session.locationId },
+        },
+      ],
+    };
+
+    const [cashSales, cashRefunds, movements] = await Promise.all([
+      this.prisma.payment.aggregate({
+        where: {
+          ...paymentWhere,
+          type: { in: [PaymentType.payment, PaymentType.deposit] },
       },
       _sum: { amount: true },
-    });
-    const expected =
-      Number(session.openingFloat) + Number(cashSales._sum.amount ?? 0);
-    const counted = Number(dto.closingCash);
-    const variance = counted - expected;
+      }),
+      this.prisma.payment.aggregate({
+        where: {
+          ...paymentWhere,
+          type: { in: [PaymentType.refund, PaymentType.deposit_refund] },
+        },
+        _sum: { amount: true },
+      }),
+      this.prisma.registerCashMovement.groupBy({
+        by: ['kind'],
+        where: { tenantId: user.tenantId, registerSessionId: session.id },
+        _sum: { amount: true },
+      }),
+    ]);
 
-    return this.prisma.registerSession.update({
+    const cashIn = Number(
+      movements.find((m) => m.kind === RegisterCashMovementKind.cash_in)?._sum
+        .amount ?? 0,
+    );
+    const cashDrops = Number(
+      movements.find((m) => m.kind === RegisterCashMovementKind.cash_drop)?._sum
+        .amount ?? 0,
+    );
+    const salesAmt = Number(cashSales._sum.amount ?? 0);
+    const refundAmt = Number(cashRefunds._sum.amount ?? 0);
+    const expected = expectedCash({
+      openingFloat: Number(session.openingFloat),
+      cashSales: salesAmt,
+      cashIn,
+      cashRefunds: refundAmt,
+      cashDrops,
+    });
+    const counted = Number(dto.closingCash);
+    const variance = cashVariance(counted, expected);
+
+    return this.prisma.registerSession
+      .update({
       where: { id: sessionId },
       data: {
         closingCash: money(counted).toFixed(2),
@@ -3077,24 +3693,58 @@ export class PosService {
         meta: {
           ...((session.meta as object) ?? {}),
           expectedCash: expected,
-          cashSales: Number(cashSales._sum.amount ?? 0),
+            cashSales: salesAmt,
+            cashRefunds: refundAmt,
+            cashIn,
+            cashDrops,
           variance,
           note: dto.note?.trim() || null,
           closedById: user.userId,
         },
       },
-    }).then((row) => ({
+      })
+      .then((row) => ({
       ...row,
       zReport: {
         openedAt: session.openedAt,
         closedAt: row.closedAt,
         openingFloat: Number(session.openingFloat),
-        cashSales: Number(cashSales._sum.amount ?? 0),
+          cashSales: salesAmt,
+          cashRefunds: refundAmt,
+          cashIn,
+          cashDrops,
         expectedCash: expected,
         closingCash: counted,
         variance,
       },
     }));
+  }
+
+  async addRegisterCashMovement(
+    user: AuthUser,
+    sessionId: string,
+    kind: RegisterCashMovementKind,
+    amount: number,
+    note?: string,
+  ) {
+    await this.assertSaleShop(user.tenantId);
+    if (!(amount > 0)) {
+      throw new BadRequestException('Amount must be greater than 0');
+    }
+    const session = await this.prisma.registerSession.findFirst({
+      where: { id: sessionId, tenantId: user.tenantId, closedAt: null },
+    });
+    if (!session) throw new NotFoundException('Open register not found');
+    return this.prisma.registerCashMovement.create({
+      data: {
+          tenantId: user.tenantId,
+        registerSessionId: session.id,
+        kind,
+        amount: money(amount).toFixed(2),
+        note: note?.trim() || null,
+        createdById: user.userId,
+      },
+    });
   }
 
   /**

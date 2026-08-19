@@ -5,8 +5,11 @@ import {
   Patch,
   Post,
   Query,
+  Res,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { FastifyReply } from 'fastify';
 import { RoleGroup } from '../../common/roles';
 import { Roles } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -23,6 +26,7 @@ import {
   CustomerReportsQueryDto,
   EmployeeSalesQueryDto,
   UpsertMonthlyTargetDto,
+  UpsertReportSchedulesDto,
 } from './dto/reports.dto';
 import { ReportsCustomersService } from './reports-customers.service';
 import { ReportsEmployeesService } from './reports-employees.service';
@@ -32,10 +36,15 @@ import { ReportsMonthlyService } from './reports-monthly.service';
 import { ReportsPnlService } from './reports-pnl.service';
 import { ReportsService } from './reports.service';
 import { ReportsTopProductsService } from './reports-top-products.service';
+import { salesSummaryToCsv } from './reports.util';
+import { ReportsLocationGuard } from './reports-location.guard';
+import { ReportsModesService } from './reports-modes.service';
+import { ReportsScheduleService } from './reports-schedule.service';
 
 @ApiTags('reports')
 @ApiBearerAuth('access-token')
 @Roles(...RoleGroup.finance)
+@UseGuards(ReportsLocationGuard)
 @Controller('reports')
 export class ReportsController {
   constructor(
@@ -47,7 +56,69 @@ export class ReportsController {
     private readonly customers: ReportsCustomersService,
     private readonly employees: ReportsEmployeesService,
     private readonly finance: ReportsFinanceService,
+    private readonly modes: ReportsModesService,
+    private readonly schedules: ReportsScheduleService,
   ) {}
+
+  @Get('packs')
+  @ApiOperation({
+    summary:
+      'Which report packs this tenant should show (commerce modes + capabilities, not industry)',
+  })
+  reportPacks(@CurrentUser() user: AuthUser) {
+    return this.modes.packs(user);
+  }
+
+  @Get('rental-ops')
+  @ApiOperation({
+    summary:
+      'Rental / asset ops — utilization, overdue returns, deposits, damage (any rentable business)',
+  })
+  rentalOps(
+    @CurrentUser() user: AuthUser,
+    @Query() query: DateRangeQueryDto,
+  ) {
+    return this.modes.rentalOps(user, query);
+  }
+
+  @Get('subscriptions')
+  @ApiOperation({
+    summary:
+      'Plans & memberships — active, recurring, churn, renewals, check-ins',
+  })
+  subscriptionsReport(
+    @CurrentUser() user: AuthUser,
+    @Query() query: DateRangeQueryDto,
+  ) {
+    return this.modes.subscriptions(user, query);
+  }
+
+  @Get('schedules')
+  @ApiOperation({ summary: 'List email report schedules (daily / weekly / monthly)' })
+  listSchedules(@CurrentUser() user: AuthUser) {
+    return this.schedules.list(user);
+  }
+
+  @Patch('schedules')
+  @ApiOperation({ summary: 'Replace email report schedules' })
+  upsertSchedules(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: UpsertReportSchedulesDto,
+  ) {
+    return this.schedules.upsert(user, dto);
+  }
+
+  @Post('schedules/send')
+  @ApiOperation({
+    summary:
+      'Send due scheduled reports (cron daily). force=true sends regardless of cadence.',
+  })
+  sendSchedules(
+    @CurrentUser() user: AuthUser,
+    @Query('force') force?: string,
+  ) {
+    return this.schedules.sendDue(user, force === '1' || force === 'true');
+  }
 
   @Get('tax')
   @ApiOperation({
@@ -363,13 +434,24 @@ export class ReportsController {
 
   @Get('sales-summary')
   @ApiOperation({
-    summary: 'Order counts by status + subtotal/tax/balance sums',
+    summary:
+      'Order counts by status + subtotal/tax/balance sums. Pass format=csv for a file download.',
   })
-  salesSummary(
+  async salesSummary(
     @CurrentUser() user: AuthUser,
     @Query() query: DateRangeQueryDto,
+    @Res({ passthrough: true }) reply: FastifyReply,
   ) {
-    return this.reportsService.salesSummary(user, query);
+    const data = await this.reportsService.salesSummary(user, query);
+    if (query.format === 'csv') {
+      reply.header('Content-Type', 'text/csv; charset=utf-8');
+      reply.header(
+        'Content-Disposition',
+        'attachment; filename="sales-summary.csv"',
+      );
+      return salesSummaryToCsv(data);
+    }
+    return data;
   }
 
   @Get('payments-summary')

@@ -14,19 +14,31 @@ import {
   ListCustomersQueryDto,
   UpdateCustomerDto,
 } from './dto/customers.dto';
+import {
+  canonicalPhone,
+  phoneDigits,
+  phoneLookupVariants,
+} from '../payments/phone-normalize';
 
 @Injectable()
 export class CustomersService {
   constructor(private readonly prisma: PrismaService) {}
 
   async create(user: AuthUser, dto: CreateCustomerDto) {
-    const phone = dto.phone.trim();
+    const variants = phoneLookupVariants(dto.phone);
     const existing = await this.prisma.customer.findFirst({
-      where: { tenantId: user.tenantId, phone, deletedAt: null },
+      where: {
+        tenantId: user.tenantId,
+        deletedAt: null,
+        phone: { in: variants },
+      },
     });
     if (existing) {
+      if (dto.returnExisting) return existing;
       throw new ConflictException('Customer with this phone already exists');
     }
+
+    const phone = canonicalPhone(dto.phone);
 
     const marketingOptIn = dto.marketingOptIn ?? false;
     const meta: Record<string, unknown> = {};
@@ -68,6 +80,8 @@ export class CustomersService {
     const limit = query.limit ?? 20;
     const skip = (page - 1) * limit;
     const q = query.q?.trim();
+    const qDigits = q ? phoneDigits(q) : '';
+    const phoneVariants = q ? phoneLookupVariants(q) : [];
 
     const where: Prisma.CustomerWhereInput = {
       tenantId: user.tenantId,
@@ -77,6 +91,12 @@ export class CustomersService {
             OR: [
               { fullName: { contains: q, mode: 'insensitive' } },
               { phone: { contains: q } },
+              ...(qDigits.length >= 7
+                ? [
+                    { phone: { in: phoneVariants } },
+                    { phone: { contains: qDigits.slice(-10) } },
+                  ]
+                : []),
               { email: { contains: q, mode: 'insensitive' } },
             ],
           }

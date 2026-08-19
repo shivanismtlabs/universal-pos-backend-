@@ -25,6 +25,8 @@ import {
   POOL_STORE_CATEGORIES,
   POOL_STORE_PRODUCTS,
 } from './pool-store-catalog';
+import { saveProductImage } from '../src/common/product-image';
+import { foodProductImageDataUrl } from './food-product-images';
 import { poolProductImageDataUrl } from './pool-store-images';
 import {
   FORMAL_CATEGORIES,
@@ -58,6 +60,22 @@ const SALON_MODULES = [
 ] as const;
 
 async function wipeAllBusinessData() {
+  try {
+    await prisma.intercompanyTransferLine.deleteMany();
+    await prisma.intercompanyTransfer.deleteMany();
+    await prisma.approvalStep.deleteMany();
+    await prisma.approvalRequest.deleteMany();
+    await prisma.approvalPolicy.deleteMany();
+    await prisma.exceptionAlertRule.deleteMany();
+    await prisma.groupSupplierLink.deleteMany();
+    await prisma.groupCustomerLink.deleteMany();
+    await prisma.businessSpinOff.deleteMany();
+    await prisma.businessGroupMembership.deleteMany();
+    await prisma.tenant.updateMany({ data: { businessGroupId: null } });
+    await prisma.businessGroup.deleteMany();
+  } catch {
+    /* tables may not exist yet */
+  }
   await prisma.payment.deleteMany();
   await prisma.orderFee.deleteMany();
   await prisma.layawaySchedule.deleteMany();
@@ -308,6 +326,7 @@ async function seedSaleShop(opts: {
     qty: number;
     kind?: 'physical' | 'service';
     trackQty?: boolean;
+    photoUrl?: string;
     meta: Record<string, unknown>;
   };
   staff: Array<{
@@ -352,6 +371,11 @@ async function seedSaleShop(opts: {
     data: { tenantId: result.tenant.id, name: opts.category },
   });
 
+  let cover = opts.product.photoUrl ?? null;
+  if (cover?.startsWith('data:')) {
+    cover = await saveProductImage(result.tenant.id, cover);
+  }
+
   const product = await prisma.product.create({
     data: {
       tenantId: result.tenant.id,
@@ -363,9 +387,11 @@ async function seedSaleShop(opts: {
       basePrice: opts.product.price,
       trackQty: opts.product.trackQty ?? true,
       trackSerial: false,
+      photoUrl: cover,
       meta: {
         sellUnit: 'pcs',
         itemType: opts.product.kind === 'service' ? 'service' : 'goods',
+        ...(cover ? { images: [cover] } : {}),
         ...opts.product.meta,
       },
     },
@@ -760,6 +786,7 @@ async function main() {
       sku: 'RST-PANEER-BM',
       price: 280,
       qty: 999,
+      photoUrl: foodProductImageDataUrl('Mains', 'Paneer Butter Masala'),
       meta: {
         modifiers: ['Extra cheese', 'No onion', 'Extra gravy', 'Butter naan side'],
         sellUnit: 'pcs',

@@ -11,6 +11,7 @@ import {
   IsUUID,
   Max,
   Min,
+  ValidateNested,
 } from 'class-validator';
 
 export class DateRangeQueryDto {
@@ -28,6 +29,14 @@ export class DateRangeQueryDto {
   @IsOptional()
   @IsUUID()
   locationId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Response format. csv returns a file download.',
+    enum: ['json', 'csv'],
+  })
+  @IsOptional()
+  @IsIn(['json', 'csv'])
+  format?: 'json' | 'csv';
 }
 
 /** Single-day sales snapshot for owners / managers */
@@ -566,4 +575,56 @@ export class EmployeeSalesQueryDto {
   @Min(1)
   @Max(500)
   limit?: number;
+}
+
+export class ReportScheduleItemDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  id?: string;
+
+  @ApiProperty({
+    enum: [
+      'sales_summary',
+      'daily_sales',
+      'rental_ops',
+      'subscriptions',
+      'inventory_utilization',
+    ],
+  })
+  @IsIn([
+    'sales_summary',
+    'daily_sales',
+    'rental_ops',
+    'subscriptions',
+    'inventory_utilization',
+  ])
+  reportKey!:
+    | 'sales_summary'
+    | 'daily_sales'
+    | 'rental_ops'
+    | 'subscriptions'
+    | 'inventory_utilization';
+
+  @ApiProperty({ enum: ['daily', 'weekly', 'monthly'] })
+  @IsIn(['daily', 'weekly', 'monthly'])
+  cadence!: 'daily' | 'weekly' | 'monthly';
+
+  @ApiProperty({ type: [String] })
+  @IsArray()
+  @IsString({ each: true })
+  recipients!: string[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+}
+
+export class UpsertReportSchedulesDto {
+  @ApiProperty({ type: [ReportScheduleItemDto] })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ReportScheduleItemDto)
+  items!: ReportScheduleItemDto[];
 }

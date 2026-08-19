@@ -489,6 +489,13 @@ export class ListCatalogQueryDto {
   @IsOptional()
   @IsIn(['true', 'false'])
   availableInPos?: string;
+
+  @ApiPropertyOptional({
+    description: 'When set, list includes stockOnHand for this branch',
+  })
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
 }
 
 export class CreateVariantDto {
@@ -580,6 +587,18 @@ export class BundleLineDto {
   @IsNumber()
   @Min(0.001)
   quantity?: number;
+
+  @ApiPropertyOptional({
+    description: 'Consume this component when the parent is sold or completed',
+  })
+  @IsOptional()
+  @IsBoolean()
+  consumeOnSale?: boolean;
+
+  @ApiPropertyOptional({ enum: ['bundle', 'recipe', 'production'] })
+  @IsOptional()
+  @IsString()
+  purpose?: string;
 }
 
 export class SetBundleLinesDto {

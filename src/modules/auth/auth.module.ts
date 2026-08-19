@@ -9,6 +9,7 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { PortalAuthService } from './portal-auth.service';
 import { AuthRecoveryService } from './auth-recovery.service';
+import { AuthSessionModule } from './auth-session.module';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RolesGuard } from './guards/roles.guard';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -30,6 +31,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
       },
     ]),
     SecurityModule,
+    AuthSessionModule,
   ],
   controllers: [AuthController],
   providers: [
@@ -41,6 +43,6 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
   ],
-  exports: [AuthService, JwtModule],
+  exports: [AuthService, AuthSessionModule, JwtModule],
 })
 export class AuthModule {}

@@ -30,6 +30,7 @@ import { assertPinAllowed, isPinSwitchEnabled } from './pin.policy';
 import { RESERVED_TENANT_SLUGS } from './password.policy';
 import type { AuthUser, JwtPayload, JwtTokenTyp } from './types';
 import { PortalAuthService } from './portal-auth.service';
+import { AuthSessionService } from './auth-session.service';
 import { SecurityService } from '../security/security.service';
 import {
   isPrismaSchemaMismatch,
@@ -73,6 +74,7 @@ export class AuthService {
     private readonly config: ConfigService,
     @Inject(forwardRef(() => PortalAuthService))
     private readonly portal: PortalAuthService,
+    private readonly sessions: AuthSessionService,
     private readonly security: SecurityService,
   ) {}
 
@@ -513,8 +515,8 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    // Link identity for future portal logins
-    await this.portal
+    // Link identity so Switch organization + multi-shop picker keep working
+    const identity = await this.portal
       .ensureAfterTenantRegister({
         email: user.email,
         fullName: user.fullName,
@@ -574,6 +576,18 @@ export class AuthService {
       },
     });
 
+    const identityPack = identity
+      ? {
+          identity: {
+            id: identity.id,
+            email: identity.email,
+            fullName: identity.fullName,
+            phone: identity.phone,
+          },
+          ...(await this.portal.issueIdentityTokens(identity.id)),
+        }
+      : {};
+
     return {
       stage: 'app' as const,
       requiresOrganizationSelection: false,
@@ -594,6 +608,7 @@ export class AuthService {
         name: user.tenant.name,
       },
       ...tokens,
+      ...identityPack,
     };
   }
 
@@ -730,6 +745,9 @@ export class AuthService {
     if (payload.typ !== 'refresh') {
       throw new UnauthorizedException('Invalid refresh token');
     }
+    if (!payload.sid) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
 
     const user = await this.prisma.user.findFirst({
       where: {
@@ -741,18 +759,21 @@ export class AuthService {
       include: { userRoles: { include: { role: true } } },
     });
 
-    if (!user?.refreshTokenHash || !user.refreshTokenExpiresAt) {
+    if (!user) {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
-    if (user.refreshTokenExpiresAt < new Date()) {
-      await this.clearRefreshToken(user.id);
-      throw new UnauthorizedException('Refresh token expired');
+    const session = await this.sessions.findActiveForRefresh(
+      payload.sid,
+      user.id,
+    );
+    if (!session?.refreshTokenHash || session.expiresAt < new Date()) {
+      throw new UnauthorizedException('Invalid refresh token');
     }
 
     const incomingHash = this.hashToken(dto.refreshToken);
-    if (incomingHash !== user.refreshTokenHash) {
-      await this.clearRefreshToken(user.id);
+    if (incomingHash !== session.refreshTokenHash) {
+      await this.sessions.revokeAllForUser(user.id, 'REFRESH_REUSE');
       await this.prisma.auditLog.create({
         data: {
           tenantId: user.tenantId,
@@ -774,12 +795,18 @@ export class AuthService {
       locationId,
       storeId: locationId,
       roles: user.userRoles.map((ur) => ur.role.code),
+      sessionId: session.id,
     };
 
-    return this.issueTokens(authUser);
+    return this.issueTokens(authUser, { sessionId: session.id });
   }
 
   async logout(user: AuthUser) {
+    if (user.sessionId) {
+      await this.sessions.revoke(user.sessionId, 'LOGOUT');
+    } else {
+      await this.sessions.revokeAllForUser(user.userId, 'LOGOUT');
+    }
     await this.clearRefreshToken(user.userId);
     await this.prisma.auditLog.create({
       data: {
@@ -1228,8 +1255,10 @@ export class AuthService {
     stationPinFailures.delete(stationKey);
   }
 
-  private async issueTokens(user: AuthUser) {
-    const jti = randomUUID();
+  private async issueTokens(
+    user: AuthUser,
+    opts?: { sessionId?: string },
+  ) {
     const locationId = user.locationId ?? user.storeId ?? null;
     const base = {
       sub: user.userId,
@@ -1244,9 +1273,24 @@ export class AuthService {
     const stationTtl = this.config.get<string>('JWT_STATION_TTL', '12h');
     const refreshTtl = this.config.get<string>('JWT_REFRESH_TTL', '7d');
     const accessSecret = this.config.getOrThrow<string>('JWT_ACCESS_SECRET');
+    const refreshMs = this.parseTtlToMs(refreshTtl);
+    const expiresAt = new Date(Date.now() + refreshMs);
 
+    let sid = opts?.sessionId;
+    if (sid) {
+      await this.sessions.assertActive(sid, user.userId);
+    } else {
+      const created = await this.sessions.create({
+        userId: user.userId,
+        tenantId: user.tenantId,
+        expiresAt,
+      });
+      sid = created.id;
+    }
+
+    const jti = randomUUID();
     const accessToken = await this.jwt.signAsync(
-      { ...base, typ: 'access', jti } as JwtPayload & { jti: string },
+      { ...base, typ: 'access', jti, sid } as JwtPayload,
       {
         secret: accessSecret,
         expiresIn: accessTtl as `${number}m` | `${number}d` | `${number}h`,
@@ -1258,7 +1302,8 @@ export class AuthService {
         ...base,
         typ: 'station',
         jti: randomUUID(),
-      } as JwtPayload & { jti: string },
+        sid,
+      } as JwtPayload,
       {
         secret: accessSecret,
         expiresIn: stationTtl as `${number}m` | `${number}d` | `${number}h`,
@@ -1266,19 +1311,20 @@ export class AuthService {
     );
 
     const refreshToken = await this.jwt.signAsync(
-      { ...base, typ: 'refresh', jti } as JwtPayload & { jti: string },
+      { ...base, typ: 'refresh', jti, sid } as JwtPayload,
       {
         secret: this.config.getOrThrow<string>('JWT_REFRESH_SECRET'),
         expiresIn: refreshTtl as `${number}m` | `${number}d` | `${number}h`,
       },
     );
 
-    const refreshMs = this.parseTtlToMs(refreshTtl);
+    const refreshHash = this.hashToken(refreshToken);
+    await this.sessions.setRefreshHash(sid, refreshHash, expiresAt);
     await this.prisma.user.update({
       where: { id: user.userId },
       data: {
-        refreshTokenHash: this.hashToken(refreshToken),
-        refreshTokenExpiresAt: new Date(Date.now() + refreshMs),
+        refreshTokenHash: refreshHash,
+        refreshTokenExpiresAt: expiresAt,
       },
     });
 
@@ -1291,6 +1337,12 @@ export class AuthService {
     ttl: string,
   ) {
     const locationId = user.locationId ?? user.storeId ?? null;
+    const expiresAt = new Date(Date.now() + this.parseTtlToMs(ttl));
+    const created = await this.sessions.create({
+      userId: user.userId,
+      tenantId: user.tenantId,
+      expiresAt,
+    });
     return this.jwt.signAsync(
       {
         sub: user.userId,
@@ -1301,7 +1353,8 @@ export class AuthService {
         storeId: locationId,
         typ,
         jti: randomUUID(),
-      } as JwtPayload & { jti: string },
+        sid: created.id,
+      } as JwtPayload,
       {
         secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
         expiresIn: ttl as `${number}m` | `${number}d` | `${number}h`,

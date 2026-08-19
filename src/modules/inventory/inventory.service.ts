@@ -8,6 +8,7 @@ import {
   FulfillmentMode,
   Prisma,
   ReservationStatus,
+  StockLedgerType,
   StockUnitStatus,
 } from '@prisma/client';
 import { randomUUID } from 'crypto';
@@ -28,14 +29,18 @@ import {
   TransferStockDto,
   UpdateUnitStatusDto,
 } from './dto/inventory.dto';
-import { assertLocationAccess } from '../../common/location-access';
+import { assertLocationAccess, locationAccessFilter } from '../../common/location-access';
 import { LowStockAlertService } from '../notify/low-stock-alert.service';
+import { EnterpriseApprovalsService } from '../enterprise/enterprise-approvals.service';
+import { StockMutationEngine } from './stock-mutation.engine';
 
 const BLOCKED_FOR_RESERVE: StockUnitStatus[] = [
   StockUnitStatus.checked_out,
   StockUnitStatus.cleaning,
   StockUnitStatus.repair,
   StockUnitStatus.retired,
+  StockUnitStatus.sold,
+  StockUnitStatus.lost,
 ];
 
 const ACTIVE_RESERVATION: ReservationStatus[] = [
@@ -58,6 +63,8 @@ export class InventoryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly lowStock: LowStockAlertService,
+    private readonly approvals: EnterpriseApprovalsService,
+    private readonly stock: StockMutationEngine,
   ) {}
 
   async createCategory(user: AuthUser, dto: CreateCategoryDto) {
@@ -406,9 +413,14 @@ export class InventoryService {
 
   async listRetailSkus(user: AuthUser, query: ListRetailSkusQueryDto) {
     const { page, limit, skip } = paginate(query.page, query.limit);
+    const locFilter = await locationAccessFilter(
+      this.prisma,
+      user,
+      this.alias(query.locationId, query.storeId),
+    );
     const where: Prisma.StockLevelWhereInput = {
       tenantId: user.tenantId,
-      ...(this.alias(query.locationId, query.storeId) ? { locationId: this.alias(query.locationId, query.storeId) } : {}),
+      ...locFilter,
       ...(this.alias(query.productId, query.productStyleId) ? { productId: this.alias(query.productId, query.productStyleId) } : {}),
     };
     const [items, total] = await this.prisma.$transaction([
@@ -441,7 +453,20 @@ export class InventoryService {
     await this.assertLocation(user.tenantId, dto.fromLocationId, user);
     await this.assertLocation(user.tenantId, dto.toLocationId, user);
 
+    await this.approvals.assertOrQueue(user, {
+      type: 'stock_transfer',
+      tenantId: user.tenantId,
+      entityType: 'stock_transfer',
+      reason: `Transfer ${dto.lines.length} line(s)`,
+      payload: {
+        fromLocationId: dto.fromLocationId,
+        toLocationId: dto.toLocationId,
+        lines: dto.lines,
+      },
+    });
+
     const result = await this.prisma.$transaction(async (tx) => {
+      const transferId = randomUUID();
       const moved: Array<{
         productId: string;
         productName: string;
@@ -482,70 +507,54 @@ export class InventoryService {
           );
         }
 
-        const fromLevel = await tx.stockLevel.findFirst({
-          where: {
-            tenantId: user.tenantId,
-            locationId: dto.fromLocationId,
-            productId: product.id,
-          },
+        const fromMut = await this.stock.mutateInTx(tx, {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          locationId: dto.fromLocationId,
+          productId: product.id,
+          qty: -qty,
+          type: StockLedgerType.transfer_out,
+          reason: dto.notes ?? null,
+          referenceType: 'stock_transfer',
+          referenceId: transferId,
+          skipComponentExplosion: true,
         });
-        if (!fromLevel) {
-          throw new BadRequestException(
-            `No stock for "${product.name}" at source location`,
-          );
-        }
-        const fromQty = Number(fromLevel.qtyOnHand);
-        if (fromQty + 1e-9 < qty) {
-          throw new BadRequestException(
-            `Insufficient stock for "${product.name}" (have ${fromQty}, need ${qty})`,
-          );
-        }
-
-        const updatedFrom = await tx.stockLevel.update({
-          where: { id: fromLevel.id },
-          data: { qtyOnHand: { decrement: qty } },
+        const fromLevel = await tx.stockLevel.findFirstOrThrow({
+          where: { id: fromMut.stockLevelId },
         });
-
-        let toLevel = await tx.stockLevel.findFirst({
-          where: {
-            tenantId: user.tenantId,
-            locationId: dto.toLocationId,
-            productId: product.id,
-          },
+        const toLevelId = await this.stock.ensureLevel(tx, {
+          tenantId: user.tenantId,
+          locationId: dto.toLocationId,
+          productId: product.id,
+          sku: product.skuCode,
+          sellUnit: fromLevel.sellUnit,
+          sellPrice: fromLevel.sellPrice,
         });
-
-        if (toLevel) {
-          toLevel = await tx.stockLevel.update({
-            where: { id: toLevel.id },
-            data: { qtyOnHand: { increment: qty } },
-          });
-        } else {
-          toLevel = await tx.stockLevel.create({
-            data: {
-              tenantId: user.tenantId,
-              locationId: dto.toLocationId,
-              productId: product.id,
-              sku: product.skuCode,
-              sellUnit: fromLevel.sellUnit,
-              sellPrice: fromLevel.sellPrice,
-              qtyOnHand: qty,
-            },
-          });
-        }
+        const toMut = await this.stock.mutateInTx(tx, {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          locationId: dto.toLocationId,
+          stockLevelId: toLevelId,
+          productId: product.id,
+          qty,
+          type: StockLedgerType.transfer_in,
+          reason: dto.notes ?? null,
+          referenceType: 'stock_transfer',
+          referenceId: transferId,
+          skipComponentExplosion: true,
+        });
 
         moved.push({
           productId: product.id,
           productName: product.name,
           sku: product.skuCode,
           qty,
-          fromQtyOnHand: Number(updatedFrom.qtyOnHand),
-          toQtyOnHand: Number(toLevel.qtyOnHand),
-          fromLevelId: fromLevel.id,
-          toLevelId: toLevel.id,
+          fromQtyOnHand: fromMut.qtyAfter,
+          toQtyOnHand: toMut.qtyAfter,
+          fromLevelId: fromMut.stockLevelId,
+          toLevelId: toMut.stockLevelId,
         });
       }
-
-      const transferId = randomUUID();
 
       await tx.auditLog.create({
         data: {
@@ -568,39 +577,6 @@ export class InventoryService {
           },
         },
       });
-
-      for (const m of moved) {
-        await tx.stockLedgerEntry.create({
-          data: {
-            tenantId: user.tenantId,
-            locationId: dto.fromLocationId,
-            productId: m.productId,
-            stockLevelId: m.fromLevelId,
-            type: 'transfer_out',
-            qtyDelta: -m.qty,
-            qtyAfter: m.fromQtyOnHand,
-            reason: dto.notes ?? null,
-            referenceType: 'stock_transfer',
-            referenceId: transferId,
-            actorUserId: user.userId,
-          },
-        });
-        await tx.stockLedgerEntry.create({
-          data: {
-            tenantId: user.tenantId,
-            locationId: dto.toLocationId,
-            productId: m.productId,
-            stockLevelId: m.toLevelId,
-            type: 'transfer_in',
-            qtyDelta: m.qty,
-            qtyAfter: m.toQtyOnHand,
-            reason: dto.notes ?? null,
-            referenceType: 'stock_transfer',
-            referenceId: transferId,
-            actorUserId: user.userId,
-          },
-        });
-      }
 
       return { transferId, moved };
     });

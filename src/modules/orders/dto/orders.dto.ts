@@ -6,6 +6,7 @@ import {
   IsEnum,
   IsIn,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
@@ -202,6 +203,14 @@ export class UpdateOrderDto {
   @IsOptional()
   @IsDateString()
   returnDueDate?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Capability-driven order metadata patch. Examples: tableId, orderType, covers, kitchenStatus, course.',
+  })
+  @IsOptional()
+  @IsObject()
+  meta?: Record<string, unknown>;
 }
 
 export class UpdateOrderStatusDto {

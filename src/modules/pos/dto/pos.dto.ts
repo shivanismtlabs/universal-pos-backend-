@@ -154,6 +154,22 @@ export class SaleCheckoutItemDto {
   @IsNumber()
   @Min(0)
   unitPrice?: number;
+
+  @ApiPropertyOptional({ description: 'Selected product variant id when variants are enabled' })
+  @IsOptional()
+  @IsUUID()
+  variantId?: string;
+
+  @ApiPropertyOptional({ description: 'Selected batch/lot id when batch tracking is enabled' })
+  @IsOptional()
+  @IsUUID()
+  batchId?: string;
+
+  @ApiPropertyOptional({ description: 'Selected serial number / unit barcode when serial tracking is enabled' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  serialNumber?: string;
 }
 
 /**
@@ -306,6 +322,15 @@ export class PrepareSaleCheckoutDto {
   @IsString()
   @MaxLength(40)
   couponCode?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Structured order extras (tableId, orderType, covers). Same as cash checkout meta.',
+    example: { tableId: 'T12', orderType: 'dine_in', covers: 2 },
+  })
+  @IsOptional()
+  @IsObject()
+  meta?: Record<string, unknown>;
 }
 
 /**
@@ -1121,6 +1146,20 @@ export class CloseRegisterDto {
   @IsNumber()
   @Min(0)
   closingCash!: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string;
+}
+
+export class RegisterCashMovementDto {
+  @ApiProperty({ example: 500 })
+  @Type(() => Number)
+  @IsNumber()
+  @IsPositive()
+  amount!: number;
 
   @ApiPropertyOptional()
   @IsOptional()

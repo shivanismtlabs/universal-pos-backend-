@@ -94,10 +94,11 @@ async function main() {
       if (location) {
         await prisma.stockLevel.upsert({
           where: {
-            tenantId_locationId_productId: {
+            tenantId_locationId_productId_variantKey: {
               tenantId: tenant.id,
               locationId: location.id,
               productId: existing.id,
+              variantKey: '',
             },
           },
           create: {

@@ -9,7 +9,9 @@ import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import { PaymentsService } from '../payments/payments.service';
+import { isInternalImmediate } from '../payments/payment-capabilities';
 import { PaymentMethod, PaymentType } from '@prisma/client';
+import { PosService } from '../pos/pos.service';
 import {
   CreateSyncEventDto,
   ListSyncEventsQueryDto,
@@ -26,6 +28,7 @@ export class SyncService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly paymentsService: PaymentsService,
+    private readonly posService: PosService,
   ) {}
 
   /** Lightweight reachability probe for offline connectivity detection */
@@ -379,12 +382,79 @@ export class SyncService {
         if (!payload.orderId || !payload.amount) {
           throw new BadRequestException('Invalid cash payment payload');
         }
+        const method = (payload.method as PaymentMethod) || PaymentMethod.cash;
+        if (!isInternalImmediate(method)) {
+          throw new BadRequestException(
+            'Offline sync cannot record external payments as succeeded',
+          );
+        }
         await this.paymentsService.create(user, {
           orderId: payload.orderId,
           amount: Number(payload.amount),
-          method: (payload.method as PaymentMethod) || PaymentMethod.cash,
+          method,
           type: (payload.type as PaymentType) || PaymentType.payment,
           idempotencyKey: `offline:${dto.clientEventId}`,
+        });
+      }
+      if (dto.eventType === 'pos.sale_checkout_cash') {
+        const payload = dto.payload as {
+          locationId?: string;
+          customerId?: string;
+          items?: Array<{
+            stockLevelId: string;
+            quantity: number;
+            unitPrice?: number;
+            variantId?: string;
+            batchId?: string;
+            serialNumber?: string;
+          }>;
+          note?: string;
+          discountAmount?: number;
+          loyaltyPointsToRedeem?: number;
+          allowPartial?: boolean;
+          cashTendered?: number;
+          paymentAmount?: number;
+          meta?: Record<string, unknown>;
+        };
+        if (!payload.locationId || !Array.isArray(payload.items) || !payload.items.length) {
+          throw new BadRequestException('Invalid offline sale payload');
+        }
+        await this.posService.saleCheckout(user, {
+          locationId: payload.locationId,
+          ...(payload.customerId ? { customerId: payload.customerId } : {}),
+          items: payload.items.map((line) => ({
+            stockLevelId: line.stockLevelId,
+            quantity: Number(line.quantity),
+            ...(line.unitPrice != null ? { unitPrice: Number(line.unitPrice) } : {}),
+            ...(line.variantId ? { variantId: line.variantId } : {}),
+            ...(line.batchId ? { batchId: line.batchId } : {}),
+            ...(line.serialNumber ? { serialNumber: line.serialNumber } : {}),
+          })),
+          payments: [
+            {
+              method: PaymentMethod.cash,
+              amount: Number(
+                payload.paymentAmount ??
+                  payload.items.reduce((sum, i) => {
+                    const price = i.unitPrice ?? 0;
+                    return sum + Number(price) * Number(i.quantity);
+                  }, 0),
+              ),
+              idempotencyKey: `offline:${dto.clientEventId}`,
+            },
+          ],
+          ...(payload.cashTendered != null
+            ? { cashTendered: Number(payload.cashTendered) }
+            : {}),
+          ...(payload.note ? { note: payload.note } : {}),
+          ...(payload.discountAmount != null
+            ? { discountAmount: Number(payload.discountAmount) }
+            : {}),
+          ...(payload.loyaltyPointsToRedeem != null
+            ? { loyaltyPointsToRedeem: Number(payload.loyaltyPointsToRedeem) }
+            : {}),
+          ...(payload.allowPartial ? { allowPartial: true } : {}),
+          ...(payload.meta ? { meta: payload.meta } : {}),
         });
       }
 
@@ -392,10 +462,23 @@ export class SyncService {
         where: { id: eventId },
         data: { status: SyncStatus.accepted },
       });
-    } catch {
+    } catch (e) {
+      const msg =
+        e instanceof Error ? e.message : 'Inventory sync could not be applied';
+      const payload =
+        dto.payload && typeof dto.payload === 'object'
+          ? { ...(dto.payload as Record<string, unknown>) }
+          : { value: dto.payload };
       await this.prisma.offlineSyncEvent.update({
         where: { id: eventId },
-        data: { status: SyncStatus.conflict },
+        data: {
+          status: SyncStatus.conflict,
+          payload: {
+            ...payload,
+            _syncError: msg,
+            _serverAuthoritative: true,
+          } as Prisma.InputJsonValue,
+        },
       });
     }
   }
@@ -446,7 +529,12 @@ export class SyncService {
     createdAt: Date;
     locationId?: string | null;
     deviceId: string;
+    payload?: unknown;
   }) {
+    const payload =
+      row.payload && typeof row.payload === 'object'
+        ? (row.payload as Record<string, unknown>)
+        : {};
     return {
       id: row.id,
       eventType: row.eventType,
@@ -457,6 +545,8 @@ export class SyncService {
       locationId: row.locationId,
       deviceId: row.deviceId,
       createdAt: row.createdAt,
+      lastError: typeof payload._syncError === 'string' ? payload._syncError : null,
+      serverAuthoritative: payload._serverAuthoritative === true,
     };
   }
 }

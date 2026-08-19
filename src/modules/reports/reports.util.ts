@@ -138,6 +138,27 @@ export function parseFiscalStartMonth(settings: unknown): number {
   return 1;
 }
 
+export const REPORT_SCHEDULE_KEYS = [
+  'sales_summary',
+  'daily_sales',
+  'rental_ops',
+  'subscriptions',
+  'inventory_utilization',
+] as const;
+
+export type ReportScheduleKey = (typeof REPORT_SCHEDULE_KEYS)[number];
+
+export type ReportScheduleCadence = 'daily' | 'weekly' | 'monthly';
+
+export type ReportSchedule = {
+  id: string;
+  reportKey: ReportScheduleKey;
+  cadence: ReportScheduleCadence;
+  recipients: string[];
+  enabled: boolean;
+  lastSentFor: string | null;
+};
+
 export type ReportsSettings = {
   monthlyTargetAmount?: number | null;
   monthlyTargets?: Record<string, number>;
@@ -146,6 +167,7 @@ export type ReportsSettings = {
     recipients: string[];
     lastSentFor?: string | null;
   };
+  schedules?: ReportSchedule[];
 };
 
 export function parseReportsSettings(settings: unknown): ReportsSettings {
@@ -179,5 +201,95 @@ export function parseReportsSettings(settings: unknown): ReportsSettings {
       lastSentFor:
         typeof email.lastSentFor === 'string' ? email.lastSentFor : null,
     },
+    schedules: parseReportSchedules(reports.schedules),
   };
+}
+
+export function parseReportSchedules(raw: unknown): ReportSchedule[] {
+  if (!Array.isArray(raw)) return [];
+  const keys = REPORT_SCHEDULE_KEYS as readonly string[];
+  const out: ReportSchedule[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    const reportKey = String(row.reportKey ?? '');
+    const cadence = String(row.cadence ?? '');
+    if (!keys.includes(reportKey)) continue;
+    if (cadence !== 'daily' && cadence !== 'weekly' && cadence !== 'monthly') {
+      continue;
+    }
+    const recipients = Array.isArray(row.recipients)
+      ? row.recipients.filter((x): x is string => typeof x === 'string')
+      : [];
+    out.push({
+      id:
+        typeof row.id === 'string' && row.id.trim()
+          ? row.id
+          : `sch-${out.length + 1}`,
+      reportKey: reportKey as ReportScheduleKey,
+      cadence,
+      recipients,
+      enabled: row.enabled !== false,
+      lastSentFor:
+        typeof row.lastSentFor === 'string' ? row.lastSentFor : null,
+    });
+  }
+  return out;
+}
+
+function csvCell(v: string | number | null | undefined) {
+  const s = v == null ? '' : String(v);
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+/** UTF-8 CSV (with BOM) for report file downloads. */
+export function rowsToCsv(
+  rows: Array<Array<string | number | null | undefined>>,
+) {
+  return (
+    '\uFEFF' + rows.map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n'
+  );
+}
+
+export function salesSummaryToCsv(data: {
+  from?: string | null;
+  to?: string | null;
+  locationId?: string | null;
+  byStatus?: Array<{ status: string; count: number }>;
+  byKind?: Array<{
+    kind: string;
+    count: number;
+    subtotal?: unknown;
+    taxTotal?: unknown;
+    balanceDue?: unknown;
+  }>;
+  totals?: {
+    orderCount?: number;
+    subtotal?: unknown;
+    taxTotal?: unknown;
+    balanceDue?: unknown;
+  };
+}) {
+  const rows: Array<Array<string | number | null | undefined>> = [
+    ['section', 'metric', 'value'],
+    ['sales', 'from', data.from ?? ''],
+    ['sales', 'to', data.to ?? ''],
+    ['sales', 'location_id', data.locationId ?? 'all'],
+    ['sales', 'order_count', data.totals?.orderCount ?? 0],
+    ['sales', 'subtotal', Number(data.totals?.subtotal ?? 0)],
+    ['sales', 'tax_total', Number(data.totals?.taxTotal ?? 0)],
+    ['sales', 'balance_due', Number(data.totals?.balanceDue ?? 0)],
+  ];
+  for (const r of data.byStatus ?? []) {
+    rows.push(['orders_by_status', r.status, r.count]);
+  }
+  for (const r of data.byKind ?? []) {
+    rows.push([
+      'orders_by_kind',
+      r.kind,
+      `${r.count}|${Number(r.subtotal ?? 0)}`,
+    ]);
+  }
+  return rowsToCsv(rows);
 }

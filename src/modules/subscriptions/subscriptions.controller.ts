@@ -14,6 +14,7 @@ import { Roles } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
 import {
+  CheckInSubscriptionDto,
   CreatePlanDto,
   EnrollSubscriptionDto,
   ListSubscriptionsQueryDto,
@@ -96,5 +97,37 @@ export class SubscriptionsController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.subscriptions.cancel(user, id);
+  }
+
+  @Get(':id/check-in')
+  @Roles(...RoleGroup.pos)
+  @ApiOperation({ summary: 'Get membership check-in status and history' })
+  checkInStatus(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.subscriptions.checkInStatus(user, id);
+  }
+
+  @Post(':id/check-in')
+  @Roles(...RoleGroup.pos)
+  @ApiOperation({ summary: 'Check in a member with an active subscription' })
+  checkIn(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CheckInSubscriptionDto,
+  ) {
+    return this.subscriptions.checkIn(user, id, dto);
+  }
+
+  @Post(':id/check-out')
+  @Roles(...RoleGroup.pos)
+  @ApiOperation({ summary: 'Check out a currently checked-in member' })
+  checkOut(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CheckInSubscriptionDto,
+  ) {
+    return this.subscriptions.checkOut(user, id, dto);
   }
 }

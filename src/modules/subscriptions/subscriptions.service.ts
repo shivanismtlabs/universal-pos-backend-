@@ -20,6 +20,7 @@ import { validateSku } from '../../common/sell-units';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import {
+  CheckInSubscriptionDto,
   CreatePlanDto,
   EnrollSubscriptionDto,
   ListSubscriptionsQueryDto,
@@ -289,6 +290,130 @@ export class SubscriptionsService {
       })),
       counts: { active: activeCount, listed: items.length },
     };
+  }
+
+  private async getSubscriptionForCheckIn(user: AuthUser, id: string) {
+    await this.assertMode(user.tenantId, 'subscription');
+    const sub = await this.prisma.customerSubscription.findFirst({
+      where: { id, tenantId: user.tenantId },
+      include: {
+        customer: {
+          select: { id: true, fullName: true, phone: true, email: true },
+        },
+        product: {
+          select: { id: true, name: true, skuCode: true, basePrice: true },
+        },
+      },
+    });
+    if (!sub) throw new NotFoundException('Subscription not found');
+    return sub;
+  }
+
+  async checkInStatus(user: AuthUser, id: string) {
+    const sub = await this.getSubscriptionForCheckIn(user, id);
+    const logs = await this.prisma.auditLog.findMany({
+      where: {
+        tenantId: user.tenantId,
+        entityType: 'customer_subscription',
+        entityId: id,
+        action: { in: ['membership.check_in', 'membership.check_out'] },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+    });
+
+    const latestIn = logs.find((l) => l.action === 'membership.check_in');
+    const latestOut = logs.find((l) => l.action === 'membership.check_out');
+    const isCheckedIn =
+      !!latestIn &&
+      (!latestOut || latestIn.createdAt.getTime() > latestOut.createdAt.getTime());
+
+    return {
+      subscriptionId: sub.id,
+      status: sub.status,
+      isCheckedIn,
+      customer: sub.customer,
+      plan: {
+        id: sub.product.id,
+        title: sub.product.name,
+        sku: sub.product.skuCode,
+        price: sub.price,
+      },
+      startsAt: sub.startsAt,
+      currentPeriodEnd: sub.currentPeriodEnd,
+      cancelledAt: sub.cancelledAt,
+      lastVisitAt: latestIn?.createdAt ?? null,
+      currentSessionStartedAt: isCheckedIn ? latestIn?.createdAt ?? null : null,
+      history: logs.map((l) => ({
+        id: l.id,
+        action: l.action,
+        at: l.createdAt,
+        note:
+          l.beforeAfter && typeof l.beforeAfter === 'object'
+            ? ((l.beforeAfter as Record<string, unknown>).note ?? null)
+            : null,
+      })),
+    };
+  }
+
+  async checkIn(user: AuthUser, id: string, dto: CheckInSubscriptionDto) {
+    const sub = await this.getSubscriptionForCheckIn(user, id);
+    if (sub.status !== CustomerSubscriptionStatus.active) {
+      throw new BadRequestException(
+        `Membership is ${sub.status.toLowerCase()} and cannot be checked in`,
+      );
+    }
+    if (sub.currentPeriodEnd < new Date()) {
+      throw new BadRequestException('Membership has expired');
+    }
+    const state = await this.checkInStatus(user, id);
+    if (state.isCheckedIn) {
+      throw new BadRequestException('Member is already checked in');
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        entityType: 'customer_subscription',
+        entityId: id,
+        action: 'membership.check_in',
+        beforeAfter: {
+          customerId: sub.customerId,
+          productId: sub.productId,
+          locationId: dto.locationId ?? user.locationId ?? null,
+          note: dto.note?.trim() || null,
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    return this.checkInStatus(user, id);
+  }
+
+  async checkOut(user: AuthUser, id: string, dto: CheckInSubscriptionDto) {
+    const sub = await this.getSubscriptionForCheckIn(user, id);
+    const state = await this.checkInStatus(user, id);
+    if (!state.isCheckedIn) {
+      throw new BadRequestException('Member is not currently checked in');
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        entityType: 'customer_subscription',
+        entityId: id,
+        action: 'membership.check_out',
+        beforeAfter: {
+          customerId: sub.customerId,
+          productId: sub.productId,
+          locationId: dto.locationId ?? user.locationId ?? null,
+          note: dto.note?.trim() || null,
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    return this.checkInStatus(user, id);
   }
 
   async enroll(user: AuthUser, dto: EnrollSubscriptionDto) {

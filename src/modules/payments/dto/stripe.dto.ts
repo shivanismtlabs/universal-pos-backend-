@@ -35,6 +35,15 @@ export class CreateStripeIntentDto {
   @IsOptional()
   @IsEnum(PaymentMethod)
   method?: PaymentMethod;
+
+  @ApiPropertyOptional({
+    description: 'Stable key for this checkout attempt (retries reuse it)',
+  })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(255)
+  idempotencyKey?: string;
 }
 
 export class VerifyStripePaymentDto {

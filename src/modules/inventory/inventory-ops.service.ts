@@ -15,14 +15,18 @@ import {
   StockMoveLineDto,
   StockMoveDto,
 } from './dto/inventory-ops.dto';
-import { assertLocationAccess } from '../../common/location-access';
+import { assertLocationAccess, locationAccessFilter } from '../../common/location-access';
 import { LowStockAlertService } from '../notify/low-stock-alert.service';
+import { EnterpriseApprovalsService } from '../enterprise/enterprise-approvals.service';
+import { StockMutationEngine } from './stock-mutation.engine';
 
 @Injectable()
 export class InventoryOpsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly lowStock: LowStockAlertService,
+    private readonly approvals: EnterpriseApprovalsService,
+    private readonly stock: StockMutationEngine,
   ) {}
 
   /** Stock In — increases sellable qty */
@@ -52,9 +56,28 @@ export class InventoryOpsService {
       body.stockLevelId,
       body.productId,
     );
-    const updated = await this.applyQtyChange(user, level, {
+    await this.approvals.assertOrQueue(user, {
+      type: 'stock_adjustment',
+      tenantId: user.tenantId,
+      amount: Math.abs(Number(body.delta)),
+      entityType: 'stock_level',
+      entityId: level.id,
+      reason: body.reason,
+      payload: {
+        oldQty: Number(level.qtyOnHand),
+        newQty: Number(level.qtyOnHand) + Number(body.delta),
+        delta: body.delta,
+        locationId: body.locationId,
+        productId: level.productId,
+      },
+    });
+    await this.stock.mutate(this.prisma, {
+      tenantId: user.tenantId,
+      actorUserId: user.userId,
+      locationId: body.locationId,
+      stockLevelId: level.id,
+      qty: Number(body.delta),
       type: StockLedgerType.adjustment,
-      qtyDelta: Number(body.delta),
       reason: body.reason,
       referenceType: 'adjustment',
     });
@@ -63,7 +86,10 @@ export class InventoryOpsService {
       locationId: body.locationId,
       productId: level.productId,
     });
-    return updated;
+    const fresh = await this.prisma.stockLevel.findFirstOrThrow({
+      where: { id: level.id },
+    });
+    return this.mapLevel(fresh);
   }
 
   /** Move qty from sellable → damaged quarantine */
@@ -85,23 +111,19 @@ export class InventoryOpsService {
       );
     }
     return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.stockLevel.update({
-        where: { id: level.id },
-        data: {
-          qtyOnHand: { decrement: qty },
-          qtyDamaged: { increment: qty },
-        },
-      });
-      await this.writeLedger(tx, user, {
-        locationId: level.locationId,
-        productId: level.productId,
+      await this.stock.mutateInTx(tx, {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        locationId: dto.locationId,
         stockLevelId: level.id,
+        qty: -qty,
         type: StockLedgerType.damage,
-        qtyDelta: -qty,
-        qtyAfter: Number(updated.qtyOnHand),
         damageDelta: qty,
         reason: dto.reason,
         referenceType: 'damage',
+      });
+      const updated = await tx.stockLevel.findFirstOrThrow({
+        where: { id: level.id },
       });
       return this.mapLevel(updated);
     }).then((mapped) => {
@@ -133,23 +155,19 @@ export class InventoryOpsService {
       );
     }
     return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.stockLevel.update({
-        where: { id: level.id },
-        data: {
-          qtyOnHand: { increment: qty },
-          qtyDamaged: { decrement: qty },
-        },
-      });
-      await this.writeLedger(tx, user, {
-        locationId: level.locationId,
-        productId: level.productId,
+      await this.stock.mutateInTx(tx, {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        locationId: dto.locationId,
         stockLevelId: level.id,
+        qty,
         type: StockLedgerType.damage_restore,
-        qtyDelta: qty,
-        qtyAfter: Number(updated.qtyOnHand),
         damageDelta: -qty,
         reason: dto.reason,
         referenceType: 'damage_restore',
+      });
+      const updated = await tx.stockLevel.findFirstOrThrow({
+        where: { id: level.id },
       });
       return this.mapLevel(updated);
     });
@@ -201,11 +219,16 @@ export class InventoryOpsService {
       includeZero?: boolean;
     } = {},
   ) {
+    const locFilter = await locationAccessFilter(
+      this.prisma,
+      user,
+      opts.locationId,
+    );
     const term = opts.q?.trim();
     const rows = await this.prisma.stockLevel.findMany({
       where: {
         tenantId: user.tenantId,
-        ...(opts.locationId ? { locationId: opts.locationId } : {}),
+        ...locFilter,
         ...(opts.includeZero ? {} : { OR: [{ qtyOnHand: { gt: 0 } }, { qtyDamaged: { gt: 0 } }] }),
         ...(term
           ? {
@@ -264,10 +287,15 @@ export class InventoryOpsService {
   }
 
   async listLedger(user: AuthUser, query: ListLedgerQueryDto) {
+    const locFilter = await locationAccessFilter(
+      this.prisma,
+      user,
+      query.locationId,
+    );
     const rows = await this.prisma.stockLedgerEntry.findMany({
       where: {
         tenantId: user.tenantId,
-        ...(query.locationId ? { locationId: query.locationId } : {}),
+        ...locFilter,
         ...(query.productId ? { productId: query.productId } : {}),
         ...(query.type ? { type: query.type as StockLedgerType } : {}),
       },
@@ -433,20 +461,17 @@ export class InventoryOpsService {
             where: { id: line.stockLevelId, tenantId: user.tenantId },
           });
           if (!level) continue;
-          const updated = await tx.stockLevel.update({
-            where: { id: level.id },
-            data: { qtyOnHand: Number(line.countedQty) },
-          });
-          await this.writeLedger(tx, user, {
+          await this.stock.mutateInTx(tx, {
+            tenantId: user.tenantId,
+            actorUserId: user.userId,
             locationId: session.locationId,
-            productId: line.productId,
             stockLevelId: level.id,
+            qty: variance,
             type: StockLedgerType.audit,
-            qtyDelta: variance,
-            qtyAfter: Number(updated.qtyOnHand),
             reason: `Physical count ${sessionId}`,
             referenceType: 'stock_count',
             referenceId: sessionId,
+            skipComponentExplosion: true,
           });
         }
         await tx.stockCountSession.update({
@@ -496,17 +521,27 @@ export class InventoryOpsService {
           `Insufficient stock for ${level.sku} (have ${level.qtyOnHand})`,
         );
       }
-      const updated = await this.applyQtyChange(user, level, {
+      const updated = await this.stock.mutate(this.prisma, {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        locationId: dto.locationId,
+        stockLevelId: level.id,
+        qty: delta,
         type:
           direction === 'in'
             ? StockLedgerType.stock_in
             : StockLedgerType.stock_out,
-        qtyDelta: delta,
         reason: line.reason ?? dto.reason,
         referenceType: direction === 'in' ? 'stock_in' : 'stock_out',
         referenceId: dto.referenceId,
+        idempotencyKey: dto.referenceId
+          ? `${direction}:${dto.referenceId}:${level.id}:${qty}`
+          : undefined,
       });
-      results.push(updated);
+      const fresh = await this.prisma.stockLevel.findFirstOrThrow({
+        where: { id: level.id },
+      });
+      results.push(this.mapLevel(fresh));
       void this.lowStock.evaluate({
         tenantId: user.tenantId,
         locationId: dto.locationId,
@@ -726,21 +761,29 @@ export class InventoryOpsService {
     sellUnit: string;
     qtyOnHand: Prisma.Decimal;
     qtyDamaged: Prisma.Decimal;
+    qtyReserved?: Prisma.Decimal | number;
+    qtyInTransit?: Prisma.Decimal | number;
     reorderPoint: Prisma.Decimal | null;
     reorderQty: Prisma.Decimal | null;
     sellPrice: Prisma.Decimal;
   }) {
     const qtyOnHand = Number(r.qtyOnHand);
     const qtyDamaged = Number(r.qtyDamaged);
+    const qtyReserved = Number(r.qtyReserved ?? 0);
+    const qtyInTransit = Number(r.qtyInTransit ?? 0);
     return {
       stockLevelId: r.id,
+      id: r.id,
       productId: r.productId,
       locationId: r.locationId,
       sku: r.sku,
       sellUnit: r.sellUnit,
       qtyOnHand,
       qtyDamaged,
-      sellableQty: qtyOnHand,
+      qtyReserved,
+      qtyInTransit,
+      sellableQty: qtyOnHand - qtyReserved,
+      qtyAvailable: qtyOnHand - qtyReserved,
       reorderPoint:
         r.reorderPoint != null ? Number(r.reorderPoint) : null,
       reorderQty: r.reorderQty != null ? Number(r.reorderQty) : null,

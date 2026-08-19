@@ -11,6 +11,8 @@ coverage/
 *.p12
 *.key
 credentials.json
+scripts/smoke-credentials-*.json
+scripts/qa-results/
 service-account*.json
 firebase-adminsdk.json
 *-firebase-adminsdk*.json

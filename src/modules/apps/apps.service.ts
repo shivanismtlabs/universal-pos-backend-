@@ -40,6 +40,7 @@ import {
 } from '../../common/capabilities';
 import { PLATFORM_MODULES } from '../../common/platform-catalog';
 import { ensurePlatformCatalog } from '../../common/provision-tenant';
+import { ensureBusinessGroupForIdentity } from '../../common/ensure-business-group';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
@@ -337,8 +338,50 @@ export class AppsService {
     const tenantCapabilities = resolveTenantCapabilities(tenant.settings);
     const capabilityScreens = screensForCapabilities(tenantCapabilities);
 
+    let group: {
+      id: string;
+      name: string;
+      role: string;
+      entitlements: unknown;
+      tenantCount: number;
+      hideLayer: boolean;
+    } | null = null;
+    try {
+      const link = await this.prisma.identityTenantMembership.findFirst({
+        where: { userId: user.userId },
+        select: { identityId: true },
+      });
+      if (link) {
+        const wrapped = await ensureBusinessGroupForIdentity(
+          this.prisma,
+          link.identityId,
+        );
+        if (wrapped) {
+          const mem = await this.prisma.businessGroupMembership.findUnique({
+            where: {
+              groupId_identityId: {
+                groupId: wrapped.id,
+                identityId: link.identityId,
+              },
+            },
+          });
+          group = {
+            id: wrapped.id,
+            name: wrapped.name,
+            role: mem?.role ?? 'member',
+            entitlements: wrapped.entitlements,
+            tenantCount: wrapped.tenantIds.length,
+            hideLayer: wrapped.tenantIds.length < 2,
+          };
+        }
+      }
+    } catch {
+      group = null;
+    }
+
     return {
       tenant: { ...tenant, gstin: tenant.taxId },
+      group,
       plan: planSub
         ? {
             code: planSub.plan.code,

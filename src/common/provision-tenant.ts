@@ -115,6 +115,52 @@ export async function ensurePlatformCatalog(tx: Tx) {
       limits: { locations: null, users: 50 },
     },
   });
+
+  await tx.plan.upsert({
+    where: { code: 'enterprise' },
+    create: {
+      code: 'enterprise',
+      name: 'Enterprise',
+      priceAmount: 40000,
+      currencyCode: 'INR',
+      limits: { locations: null, users: null, registers: null },
+      features: {
+        modules: [
+          'core',
+          'iam',
+          'catalog',
+          'inventory',
+          'orders',
+          'pos',
+          'payments',
+          'rental',
+          'appointments',
+          'notify',
+          'reports',
+        ],
+        entitlements: [
+          'GROUP_DASHBOARD',
+          'GROUP_PNL',
+          'GROUP_INVENTORY',
+          'GROUP_PROCUREMENT',
+          'GROUP_CUSTOMERS',
+          'APPROVAL_ENGINE',
+          'ADVANCED_AUDIT',
+          'EXCEPTION_ALERTS',
+          'BUSINESS_COMPARISON',
+          'INTERCOMPANY',
+          'SPIN_OFF',
+          'API_ACCESS',
+          'WEBHOOKS',
+          'SSO',
+        ],
+        pricingModel: 'platform_plus_registers',
+      },
+    },
+    update: {
+      limits: { locations: null, users: null, registers: null },
+    },
+  });
 }
 
 export async function enableTenantModules(

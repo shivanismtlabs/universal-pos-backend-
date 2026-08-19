@@ -8,6 +8,7 @@ import {
   Prisma,
   ProductKind,
   ProductStatus,
+  StockLedgerType,
 } from '@prisma/client';
 import { PrismaService } from '../../database/database.module';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
@@ -18,7 +19,10 @@ import {
   normalizeBarcode,
 } from '../../common/barcode';
 import { validateSku } from '../../common/sell-units';
+import { categoryIdsWithDescendants } from '../../common/category-tree';
+import { seedZeroStockAtOtherLocations } from '../../common/stock-at-location';
 import { resolveProductTaxRatePercent } from '../../common/tax-engine';
+import { StockMutationEngine } from '../inventory/stock-mutation.engine';
 import type { AuthUser } from '../auth/types';
 import {
   CreateBatchDto,
@@ -130,6 +134,7 @@ function mapProduct(p: {
   createdAt: Date;
   updatedAt: Date;
   _count?: { variants?: number; batches?: number; bundleComponents?: number };
+  stockLevels?: Array<{ qtyOnHand: Prisma.Decimal; sellUnit: string }>;
 }) {
   const meta = (p.meta ?? {}) as Record<string, unknown>;
   const images = Array.isArray(meta.images)
@@ -177,6 +182,9 @@ function mapProduct(p: {
       batches: p._count?.batches ?? 0,
       bundleLines: p._count?.bundleComponents ?? 0,
     },
+    stockOnHand:
+      p.stockLevels?.[0] != null ? Number(p.stockLevels[0].qtyOnHand) : null,
+    sellUnit: p.stockLevels?.[0]?.sellUnit ?? p.unitOfMeasure,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
   };
@@ -184,7 +192,10 @@ function mapProduct(p: {
 
 @Injectable()
 export class CatalogService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly stock: StockMutationEngine,
+  ) {}
 
   // ── Brands ──────────────────────────────────────────────────────────────
 
@@ -460,10 +471,17 @@ export class CatalogService {
 
   async listProducts(user: AuthUser, query: ListCatalogQueryDto) {
     const q = query.q?.trim();
+    const categoryIds = query.categoryId
+      ? await categoryIdsWithDescendants(
+          this.prisma,
+          user.tenantId,
+          query.categoryId,
+        )
+      : null;
     const rows = await this.prisma.product.findMany({
       where: {
         tenantId: user.tenantId,
-        ...(query.categoryId ? { categoryId: query.categoryId } : {}),
+        ...(categoryIds ? { categoryId: { in: categoryIds } } : {}),
         ...(query.brandId ? { brandId: query.brandId } : {}),
         ...(query.kind ? { kind: query.kind } : {}),
         ...(query.status ? { status: query.status } : {}),
@@ -498,13 +516,22 @@ export class CatalogService {
             }
           : {}),
       },
-      orderBy: { name: 'asc' },
+      orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
       include: {
         category: { select: { id: true, name: true, parentId: true } },
         brand: { select: { id: true, name: true } },
         _count: {
           select: { variants: true, batches: true, bundleComponents: true },
         },
+        ...(query.locationId
+          ? {
+              stockLevels: {
+                where: { locationId: query.locationId },
+                select: { qtyOnHand: true, sellUnit: true },
+                take: 1,
+              },
+            }
+          : {}),
       },
       take: 500,
     });
@@ -749,7 +776,7 @@ export class CatalogService {
           },
         });
 
-        if (trackQty) {
+        if (trackQty && !trackSerial) {
           const opening = dto.openingQty;
           if (opening == null || !(opening >= 1)) {
             throw new BadRequestException(
@@ -777,10 +804,55 @@ export class CatalogService {
               productId: created.id,
               sku: sku!,
               sellUnit: unit.slice(0, 8),
-              qtyOnHand: opening,
+              qtyOnHand: 0,
               sellPrice: price,
             },
           });
+          await this.stock.mutateInTx(tx, {
+            tenantId: user.tenantId,
+            actorUserId: user.userId,
+            locationId,
+            productId: created.id,
+            qty: opening,
+            type: StockLedgerType.opening,
+            reason: 'Opening stock',
+            referenceType: 'product',
+            referenceId: created.id,
+            skipComponentExplosion: true,
+          });
+          await seedZeroStockAtOtherLocations(tx, {
+            tenantId: user.tenantId,
+            productId: created.id,
+            sku: sku!,
+            sellUnit: unit.slice(0, 8),
+            sellPrice: price,
+            exceptLocationId: locationId,
+          });
+        } else if (trackQty && trackSerial) {
+          // Serialized items: no bulk opening qty — individual serials are added after creation.
+          // Still seed a zero stock-level row so the item is discoverable at POS.
+          const locationId =
+            dto.locationId ??
+            (
+              await tx.location.findFirst({
+                where: { tenantId: user.tenantId, isActive: true },
+                orderBy: { createdAt: 'asc' },
+                select: { id: true },
+              })
+            )?.id;
+          if (locationId) {
+            await tx.stockLevel.create({
+              data: {
+                tenantId: user.tenantId,
+                locationId,
+                productId: created.id,
+                sku: sku!,
+                sellUnit: unit.slice(0, 8),
+                qtyOnHand: 0,
+                sellPrice: price,
+              },
+            });
+          }
         } else if (canSell && availableInPos) {
           // Services / non-tracked items still need a stock row so Counter can find them
           const locationId =
@@ -807,6 +879,14 @@ export class CatalogService {
               qtyOnHand: 0,
               sellPrice: price,
             },
+          });
+          await seedZeroStockAtOtherLocations(tx, {
+            tenantId: user.tenantId,
+            productId: created.id,
+            sku: sku!,
+            sellUnit: unit.slice(0, 8),
+            sellPrice: price,
+            exceptLocationId: locationId,
           });
         }
 
@@ -1219,6 +1299,40 @@ export class CatalogService {
           } as Prisma.InputJsonValue,
         },
       });
+      const parentLevels = await this.prisma.stockLevel.findMany({
+        where: {
+          tenantId: user.tenantId,
+          productId,
+          variantKey: '',
+        },
+      });
+      for (const pl of parentLevels) {
+        await this.prisma.stockLevel.upsert({
+          where: {
+            tenantId_locationId_productId_variantKey: {
+              tenantId: user.tenantId,
+              locationId: pl.locationId,
+              productId,
+              variantKey: v.id,
+            },
+          },
+          create: {
+            tenantId: user.tenantId,
+            locationId: pl.locationId,
+            productId,
+            variantId: v.id,
+            variantKey: v.id,
+            sku: sku.slice(0, 18),
+            sellUnit: pl.sellUnit,
+            sellPrice:
+              dto.basePrice != null
+                ? new Prisma.Decimal(dto.basePrice)
+                : pl.sellPrice,
+            qtyOnHand: 0,
+          },
+          update: {},
+        });
+      }
       return v;
     } catch (e) {
       throwIfUnique(e, 'Variant SKU already exists');
@@ -1268,11 +1382,6 @@ export class CatalogService {
     dto: SetBundleLinesDto,
   ) {
     const product = await this.requireProduct(user.tenantId, productId);
-    if (product.kind !== ProductKind.bundle) {
-      throw new BadRequestException(
-        'Only bundle product type can have components',
-      );
-    }
     for (const line of dto.lines) {
       if (line.componentProductId === productId) {
         throw new BadRequestException('Bundle cannot include itself');
@@ -1291,6 +1400,8 @@ export class CatalogService {
             componentProductId: l.componentProductId,
             componentVariantId: l.componentVariantId ?? null,
             quantity: l.quantity ?? 1,
+            consumeOnSale: l.consumeOnSale ?? product.kind !== ProductKind.bundle,
+            purpose: l.purpose ?? (product.kind === ProductKind.bundle ? 'bundle' : 'recipe'),
           },
         });
       }

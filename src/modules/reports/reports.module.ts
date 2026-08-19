@@ -9,6 +9,9 @@ import { ReportsMonthlyService } from './reports-monthly.service';
 import { ReportsPnlService } from './reports-pnl.service';
 import { ReportsService } from './reports.service';
 import { ReportsTopProductsService } from './reports-top-products.service';
+import { ReportsLocationGuard } from './reports-location.guard';
+import { ReportsModesService } from './reports-modes.service';
+import { ReportsScheduleService } from './reports-schedule.service';
 
 /** Sales / inventory / customer / employee / finance reports — FR-RPT */
 @Module({
@@ -23,6 +26,9 @@ import { ReportsTopProductsService } from './reports-top-products.service';
     ReportsCustomersService,
     ReportsEmployeesService,
     ReportsFinanceService,
+    ReportsModesService,
+    ReportsScheduleService,
+    ReportsLocationGuard,
   ],
 })
 export class ReportsModule {}

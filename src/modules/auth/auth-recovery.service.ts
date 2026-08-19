@@ -11,6 +11,8 @@ import { PrismaService } from '../../database/database.module';
 import { MailService } from '../mail/mail.service';
 import { isPrismaSchemaMismatch } from './auth-db-error';
 import { assertPinAllowed } from './pin.policy';
+import { AuthSessionService } from './auth-session.service';
+import { shouldExposeDevOtp } from '../../common/cors-origins';
 
 const BCRYPT_ROUNDS = 12;
 const OTP_TTL_MS = 10 * 60_000;
@@ -27,6 +29,7 @@ export class AuthRecoveryService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly mail: MailService,
+    private readonly sessions: AuthSessionService,
   ) {}
 
   /**
@@ -112,6 +115,8 @@ export class AuthRecoveryService {
         refreshTokenExpiresAt: null,
       },
     });
+
+    await this.sessions.revokeAllForEmail(email, 'PASSWORD_RESET');
 
     return { ok: true, message: 'Password updated. You can sign in now.' };
   }
@@ -310,9 +315,10 @@ export class AuthRecoveryService {
   }
 
   private publicOtpResponse(email: string, devCode?: string) {
-    const expose =
-      this.config.get<string>('AUTH_OTP_RETURN_CODE') === '1' ||
-      this.config.get<string>('NODE_ENV') !== 'production';
+    const expose = shouldExposeDevOtp({
+      NODE_ENV: this.config.get<string>('NODE_ENV'),
+      AUTH_OTP_RETURN_CODE: this.config.get<string>('AUTH_OTP_RETURN_CODE'),
+    });
 
     return {
       ok: true as const,

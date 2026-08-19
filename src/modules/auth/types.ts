@@ -15,6 +15,9 @@ export type JwtPayload = {
   /** @deprecated alias of locationId for older clients */
   storeId?: string | null;
   typ: JwtTokenTyp;
+  jti?: string;
+  /** AuthSession id — required for shop access/station/pin tokens */
+  sid?: string;
 };
 
 export type AuthUser = {
@@ -30,4 +33,7 @@ export type AuthUser = {
   fullName: string;
   /** JWT typ that authenticated this request */
   tokenTyp?: JwtTokenTyp;
+  /** AuthSession id from access JWT (`sid`) */
+  sessionId?: string;
+  jti?: string;
 };

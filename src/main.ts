@@ -11,6 +11,11 @@ import { join } from 'path';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
+import {
+  isCorsOriginAllowed,
+  resolveCorsAllowlist,
+} from './common/cors-origins';
+import { applyApiSecurityHeaders } from './common/http-security-headers';
 
 async function bootstrap() {
   // bodyParser: false — we register JSON ourselves so empty bodies
@@ -35,14 +40,15 @@ async function bootstrap() {
   const fastify = app.getHttpAdapter().getInstance();
   fastify.addContentTypeParser(
     'application/json',
-    { parseAs: 'string' },
-    (_req, body, done) => {
-      if (body == null || body === '') {
+    { parseAs: 'buffer' },
+    (req, body, done) => {
+      (req as { rawBody?: Buffer }).rawBody = body as Buffer;
+      if (!body || (body as Buffer).length === 0) {
         done(null, {});
         return;
       }
       try {
-        done(null, JSON.parse(body as string));
+        done(null, JSON.parse((body as Buffer).toString('utf8')));
       } catch (err) {
         done(err as Error, undefined);
       }
@@ -61,8 +67,12 @@ async function bootstrap() {
 
   const prefix = process.env.API_PREFIX ?? 'v1';
   app.setGlobalPrefix(prefix);
+
+  const corsAllowlist = resolveCorsAllowlist(process.env);
   app.enableCors({
-    origin: true,
+    origin: (origin, callback) => {
+      callback(null, isCorsOriginAllowed(origin, corsAllowlist));
+    },
     credentials: true,
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
@@ -72,6 +82,11 @@ async function bootstrap() {
       'Origin',
       'X-Requested-With',
     ],
+  });
+
+  fastify.addHook('onSend', (req, reply, _payload, done) => {
+    applyApiSecurityHeaders(reply, req.url);
+    done();
   });
 
   const swaggerConfig = new DocumentBuilder()

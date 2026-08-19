@@ -3,6 +3,7 @@ import {
   ExecutionContext,
   Injectable,
   NestInterceptor,
+  StreamableFile,
 } from '@nestjs/common';
 import { Observable, map } from 'rxjs';
 import { ApiSuccessResponse } from '../interfaces/api-response.interface';
@@ -17,11 +18,25 @@ export class ResponseInterceptor<T> implements NestInterceptor<
   ApiSuccessResponse<T>
 > {
   intercept(
-    _context: ExecutionContext,
+    context: ExecutionContext,
     next: CallHandler,
   ): Observable<ApiSuccessResponse<T>> {
+    const reply = context.switchToHttp().getResponse<{
+      getHeader?: (name: string) => unknown;
+    }>();
     return next.handle().pipe(
       map((payload) => {
+        if (payload instanceof StreamableFile) {
+          return payload as unknown as ApiSuccessResponse<T>;
+        }
+        const contentType = String(
+          reply.getHeader?.('content-type') ??
+            reply.getHeader?.('Content-Type') ??
+            '',
+        );
+        if (typeof payload === 'string' && contentType.includes('text/csv')) {
+          return payload as unknown as ApiSuccessResponse<T>;
+        }
         if (isAlreadyEnveloped(payload)) {
           return payload as ApiSuccessResponse<T>;
         }

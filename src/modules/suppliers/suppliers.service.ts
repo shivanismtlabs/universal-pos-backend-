@@ -3,13 +3,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { PoType, Prisma } from '@prisma/client';
+import { PoType, Prisma, StockLedgerType } from '@prisma/client';
 import {
   buildTaxProfile,
   computeInvoiceTax,
 } from '../../common/tax-engine';
 import { PrismaService } from '../../database/database.module';
 import { AccountingPostingService } from '../accounting/posting.service';
+import { StockMutationEngine } from '../inventory/stock-mutation.engine';
 import type { AuthUser } from '../auth/types';
 import {
   CreatePurchaseOrderDto,
@@ -26,6 +27,7 @@ export class SuppliersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly accounting: AccountingPostingService,
+    private readonly stock: StockMutationEngine,
   ) {}
 
   createSupplier(user: AuthUser, dto: CreateSupplierDto) {
@@ -291,25 +293,21 @@ export class SuppliersService {
           data: { qtyReceived: { increment: incoming.qty } },
         });
 
-        const updated = await tx.stockLevel.update({
-          where: { id: level.id },
-          data: { qtyOnHand: { increment: incoming.qty } },
+        await this.stock.mutateInTx(tx, {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          locationId: level.locationId,
+          stockLevelId: level.id,
+          qty: incoming.qty,
+          type: StockLedgerType.purchase_receive,
+          reason: `PO ${po.poNumber ?? po.id}`,
+          referenceType: 'purchase_order',
+          referenceId: po.id,
+          skipComponentExplosion: true,
+          idempotencyKey: `po-receive:${po.id}:${level.id}:${incoming.qty}`,
         });
-
-        await tx.stockLedgerEntry.create({
-          data: {
-            tenantId: user.tenantId,
-            locationId: level.locationId,
-            productId: level.productId,
-            stockLevelId: level.id,
-            type: 'purchase_receive',
-            qtyDelta: incoming.qty,
-            qtyAfter: Number(updated.qtyOnHand),
-            reason: `PO ${po.poNumber ?? po.id}`,
-            referenceType: 'purchase_order',
-            referenceId: po.id,
-            actorUserId: user.userId,
-          },
+        const updated = await tx.stockLevel.findFirstOrThrow({
+          where: { id: level.id },
         });
 
         results.push({
@@ -361,7 +359,7 @@ export class SuppliersService {
       const allReceived =
         refreshed.length > 0 &&
         refreshed.every((l) => l.qtyReceived >= l.qtyOrdered);
-      const anyReceived = refreshed.some((l) => l.qtyReceived > 0);
+      const anyReceived = refreshed.some((l) => Number(l.qtyReceived) > 0);
 
       const status = allReceived
         ? 'received'
@@ -526,32 +524,19 @@ export class SuppliersService {
           where: { id: poLine.id },
           data: { qtyReceived: { decrement: line.qty } },
         });
-        const updated = await tx.stockLevel.update({
-          where: { id: level.id },
-          data: { qtyOnHand: { decrement: line.qty } },
+        await this.stock.mutateInTx(tx, {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          locationId: level.locationId,
+          stockLevelId: level.id,
+          qty: -line.qty,
+          type: StockLedgerType.purchase_return,
+          referenceType: 'purchase_return',
+          referenceId: po.id,
+          skipComponentExplosion: true,
         });
-        await tx.stockLedgerEntry.create({
-          data: {
-            tenantId: user.tenantId,
-            locationId: level.locationId,
-            productId: level.productId,
-            stockLevelId: level.id,
-            type: 'purchase_return',
-            qtyDelta: -line.qty,
-            qtyAfter: Number(updated.qtyOnHand),
-            reason:
-              dto.reason?.trim() ||
-              dto.reasonCode ||
-              `RTV PO ${po.poNumber}`,
-            referenceType: 'purchase_order',
-            referenceId: po.id,
-            actorUserId: user.userId,
-            meta: {
-              reasonCode: dto.reasonCode ?? null,
-              unitCost,
-              lineValue,
-            },
-          },
+        const updated = await tx.stockLevel.findFirstOrThrow({
+          where: { id: level.id },
         });
         results.push({
           stockLevelId: level.id,

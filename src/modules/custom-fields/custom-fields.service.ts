@@ -27,7 +27,7 @@ export class CustomFieldsService {
       },
       orderBy: [{ entity: 'asc' }, { sortOrder: 'asc' }, { label: 'asc' }],
     });
-    return { data: rows };
+    return rows;
   }
 
   async createDefinition(user: AuthUser, dto: CreateCustomFieldDefinitionDto) {

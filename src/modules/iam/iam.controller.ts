@@ -13,7 +13,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { RoleGroup } from '../../common/roles';
-import { Public, Roles } from '../auth/decorators/auth.decorators';
+import { Public, Roles, Permissions } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
 import {
@@ -107,24 +107,28 @@ export class IamController {
   // ── Attendance ───────────────────────────────────────────────────
   @Post('attendance/clock-in')
   @Roles(...RoleGroup.all)
+  @Permissions('attendance.self', 'attendance.manage')
   clockIn(@CurrentUser() user: AuthUser, @Body() dto: ClockDto) {
     return this.attendance.clockIn(user, dto);
   }
 
   @Post('attendance/clock-out')
   @Roles(...RoleGroup.all)
+  @Permissions('attendance.self', 'attendance.manage')
   clockOut(@CurrentUser() user: AuthUser, @Body() dto: ClockDto) {
     return this.attendance.clockOut(user, dto);
   }
 
   @Get('attendance/open')
   @Roles(...RoleGroup.all)
+  @Permissions('attendance.self', 'attendance.manage')
   openAttendance(@CurrentUser() user: AuthUser) {
     return this.attendance.myOpen(user);
   }
 
   @Get('attendance')
   @Roles(...RoleGroup.all)
+  @Permissions('attendance.self', 'attendance.manage')
   listAttendance(
     @CurrentUser() user: AuthUser,
     @Query() query: ListAttendanceQueryDto,
@@ -134,6 +138,7 @@ export class IamController {
 
   @Post('attendance')
   @Roles(...RoleGroup.lead)
+  @Permissions('attendance.manage')
   @ApiOperation({ summary: 'Create manual attendance entry' })
   createAttendance(
     @CurrentUser() user: AuthUser,
@@ -144,6 +149,7 @@ export class IamController {
 
   @Get('attendance/:id')
   @Roles(...RoleGroup.all)
+  @Permissions('attendance.self', 'attendance.manage')
   @ApiOperation({ summary: 'View attendance entry' })
   getAttendance(
     @CurrentUser() user: AuthUser,
@@ -154,6 +160,7 @@ export class IamController {
 
   @Patch('attendance/:id')
   @Roles(...RoleGroup.lead)
+  @Permissions('attendance.manage')
   @ApiOperation({ summary: 'Update attendance entry' })
   updateAttendance(
     @CurrentUser() user: AuthUser,
@@ -165,6 +172,7 @@ export class IamController {
 
   @Delete('attendance/:id')
   @Roles(...RoleGroup.lead)
+  @Permissions('attendance.manage')
   @ApiOperation({ summary: 'Delete attendance entry' })
   deleteAttendance(
     @CurrentUser() user: AuthUser,

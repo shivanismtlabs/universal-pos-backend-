@@ -334,6 +334,32 @@ export class OrdersService {
       });
     }
 
+    const baseMeta =
+      order.meta && typeof order.meta === 'object' && !Array.isArray(order.meta)
+        ? { ...(order.meta as Record<string, unknown>) }
+        : {};
+    const nextMeta =
+      dto.meta && typeof dto.meta === 'object' && !Array.isArray(dto.meta)
+        ? {
+            ...baseMeta,
+            ...Object.fromEntries(
+              Object.entries(dto.meta).filter(
+                ([key, value]) =>
+                  typeof key === 'string' &&
+                  key.length <= 64 &&
+                  value !== undefined,
+              ),
+            ),
+          }
+        : undefined;
+
+    if (nextMeta) {
+      await this.prisma.order.update({
+        where: { id },
+        data: { meta: nextMeta as Prisma.InputJsonValue },
+      });
+    }
+
     return this.getById(user, id);
   }
 

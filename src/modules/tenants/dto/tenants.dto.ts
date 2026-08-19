@@ -260,12 +260,17 @@ export class CreateLocationDto {
   @MaxLength(3)
   currencyCode?: string;
 
-  @ApiPropertyOptional({
-    description: 'Default warehouse location id for this store',
-  })
+  @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
   defaultWarehouseId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Parent location (HQ / branch hierarchy)',
+  })
+  @IsOptional()
+  @IsUUID()
+  parentLocationId?: string;
 }
 
 /** @deprecated Use CreateLocationDto */
@@ -343,6 +348,13 @@ export class UpdateLocationDto {
   @IsOptional()
   @IsUUID()
   defaultWarehouseId?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Parent location (HQ / branch hierarchy); null clears',
+  })
+  @IsOptional()
+  @IsUUID()
+  parentLocationId?: string | null;
 }
 
 /** @deprecated Use UpdateLocationDto */

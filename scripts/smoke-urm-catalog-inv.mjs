@@ -608,6 +608,31 @@ async function main() {
   let stockLevelId;
   let locB;
 
+  // Create a simple non-serial bulk product for inventory ops
+  let bulkProductId;
+  let bulkStockLevelId;
+  try {
+    const bulkSku = `BULK${stamp}AAAA`.slice(0, 18);
+    const bp = await req('POST', '/catalog/products', {
+      token: adminToken,
+      body: {
+        name: `Bulk Stock ${stamp}`,
+        skuCode: bulkSku,
+        kind: 'physical',
+        basePrice: 100,
+        openingQty: 20,
+        locationId,
+        trackInventory: true,
+      },
+    });
+    bulkProductId = bp.data?.id;
+    const bls = await req('GET', `/inventory/levels?locationId=${locationId}`, { token: adminToken });
+    const bItems = bls.data?.items ?? [];
+    bulkStockLevelId = bItems.find((i) => i.productId === bulkProductId)?.stockLevelId;
+  } catch (e) {
+    // non-fatal, just use existing product
+  }
+
   try {
     const levels = await req(
       'GET',
@@ -615,7 +640,8 @@ async function main() {
       { token: adminToken },
     );
     const items = levels.data.items || [];
-    stockLevelId =
+    stockLevelId = bulkStockLevelId ||
+      items.find((i) => i.productId === bulkProductId)?.stockLevelId ||
       items.find((i) => i.productId === productId)?.stockLevelId ||
       items[0]?.stockLevelId;
     log('INV', 'List stock levels', items.length > 0, `${items.length} rows`);
@@ -623,11 +649,12 @@ async function main() {
     log('INV', 'List stock levels', false, e.message);
   }
 
-  const productRef = stockLevelId
+  const bulkRef = bulkStockLevelId ? { stockLevelId: bulkStockLevelId } : null;
+  const productRef = bulkRef || (stockLevelId
     ? { stockLevelId }
     : productId
       ? { productId }
-      : null;
+      : null);
 
   try {
     if (!productRef) throw new Error('no stock level / product');
@@ -756,14 +783,22 @@ async function main() {
     const locs = await req('GET', '/locations', { token: adminToken });
     const list = Array.isArray(locs.data) ? locs.data : [];
     locB = list.find((l) => l.id !== locationId)?.id;
-    if (locB && productId) {
+    const transferPid = bulkProductId || productId;
+    if (locB && transferPid) {
+      // ensure source has stock for transfer
+      if (bulkStockLevelId) {
+        await req('POST', '/inventory/stock-in', {
+          token: adminToken,
+          body: { locationId, reason: 'Pre-transfer stock', lines: [{ stockLevelId: bulkStockLevelId, qty: 10 }] },
+        });
+      }
       await req('POST', '/stock-transfers', {
         token: adminToken,
         body: {
           fromLocationId: locationId,
           toLocationId: locB,
           notes: 'Smoke transfer',
-          lines: [{ productId, qty: 3 }],
+          lines: [{ productId: transferPid, qty: 3 }],
         },
       });
       log('INV', 'Stock transfer multi-location', true);

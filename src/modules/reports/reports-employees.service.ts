@@ -5,6 +5,12 @@ import {
   PaymentStatus,
   PaymentType,
 } from '@prisma/client';
+import {
+  isKitchenContext,
+  isServiceRevenueContext,
+  reportContextFromSettings,
+  type ReportContext,
+} from '../../common/report-capabilities';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import type { EmployeeSalesQueryDto } from './dto/reports.dto';
@@ -49,6 +55,10 @@ export class ReportsEmployeesService {
           ? settings.businessType
           : 'general'),
     ).toLowerCase();
+    const reportCtx = reportContextFromSettings({
+      ...settings,
+      businessType,
+    });
     const commission = this.parseCommission(settings);
 
     const today = ymdInZone(new Date(), timeZone);
@@ -370,12 +380,9 @@ export class ReportsEmployeesService {
       row.refundAmount += Math.abs(Number(p.amount));
     }
 
-    // Service: appointments / rebooking
+    // Service: appointments / rebooking (capability, not industry pack)
     const appts =
-      businessType === 'service' ||
-      businessType === 'salon' ||
-      businessType === 'spa' ||
-      businessType === 'hybrid'
+      isServiceRevenueContext(reportCtx)
         ? await this.prisma.appointment.findMany({
             where: {
               tenantId: user.tenantId,
@@ -509,7 +516,7 @@ export class ReportsEmployeesService {
       );
     }
 
-    const copy = this.copyFor(businessType);
+    const copy = this.copyFor(reportCtx);
 
     return {
       generatedAt: new Date().toISOString(),
@@ -700,26 +707,22 @@ export class ReportsEmployeesService {
     return 0;
   }
 
-  private copyFor(businessType: string) {
-    if (
-      businessType === 'service' ||
-      businessType === 'salon' ||
-      businessType === 'spa'
-    ) {
-      return {
-        title: 'Staff Performance Report',
-        labels: {
-          sales: 'Service sales',
-          extra: 'Tips · rebooking',
-        },
-      };
-    }
-    if (businessType === 'restaurant') {
+  private copyFor(ctx: ReportContext) {
+    if (isKitchenContext(ctx)) {
       return {
         title: 'Server Sales Report',
         labels: {
           sales: 'Sales',
           extra: 'Tables · tip %',
+        },
+      };
+    }
+    if (isServiceRevenueContext(ctx)) {
+      return {
+        title: 'Staff Performance Report',
+        labels: {
+          sales: 'Service sales',
+          extra: 'Tips · rebooking',
         },
       };
     }

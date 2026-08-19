@@ -38,6 +38,7 @@ import {
 } from './dto/inventory-ops.dto';
 import { InventoryOpsService } from './inventory-ops.service';
 import { InventoryService } from './inventory.service';
+import { InventoryLifecycleService } from './inventory-lifecycle.service';
 
 @ApiTags('inventory')
 @ApiBearerAuth('access-token')
@@ -46,6 +47,7 @@ export class InventoryController {
   constructor(
     private readonly inventoryService: InventoryService,
     private readonly ops: InventoryOpsService,
+    private readonly lifecycle: InventoryLifecycleService,
   ) {}
 
   @Post('categories')
@@ -372,5 +374,95 @@ export class InventoryController {
       id,
       dto.apply !== false && dto.apply !== 'false',
     );
+  }
+
+  @Post('inventory/qty-reservations')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Reserve quantity (does not reduce on-hand)' })
+  reserveQty(@CurrentUser() user: AuthUser, @Body() dto: Record<string, unknown>) {
+    return this.lifecycle.reserveQty(user, dto as never);
+  }
+
+  @Post('inventory/qty-reservations/:id/:action')
+  @Roles(...RoleGroup.catalogWrite)
+  reservationAction(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('action') action: 'release' | 'consume' | 'cancel',
+  ) {
+    return this.lifecycle.releaseOrConsumeReservation(user, id, action);
+  }
+
+  @Post('inventory/transfers')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Create draft stock transfer document' })
+  createTransferDoc(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: Record<string, unknown>,
+  ) {
+    return this.lifecycle.createTransfer(user, dto as never);
+  }
+
+  @Get('inventory/transfers')
+  @Roles(...RoleGroup.catalogRead)
+  listTransferDocs(@CurrentUser() user: AuthUser) {
+    return this.lifecycle.listTransfers(user);
+  }
+
+  @Post('inventory/transfers/:id/issue')
+  @Roles(...RoleGroup.catalogWrite)
+  issueTransfer(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.lifecycle.issueTransfer(user, id);
+  }
+
+  @Post('inventory/transfers/:id/receive')
+  @Roles(...RoleGroup.catalogWrite)
+  receiveTransfer(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: { lines: Array<{ lineId: string; qty: number; damagedQty?: number }> },
+  ) {
+    return this.lifecycle.receiveTransfer(user, id, dto.lines ?? []);
+  }
+
+  @Post('inventory/transfers/:id/cancel')
+  @Roles(...RoleGroup.catalogWrite)
+  cancelTransfer(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.lifecycle.cancelTransfer(user, id);
+  }
+
+  @Post('inventory/production/complete')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Atomic BOM consume + finished goods output' })
+  completeProduction(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: Record<string, unknown>,
+  ) {
+    return this.lifecycle.completeProduction(user, dto as never);
+  }
+
+  @Get('inventory/reconcile')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'Ledger vs on-hand vs batch reconciliation' })
+  reconcile(
+    @CurrentUser() user: AuthUser,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.lifecycle.reconcile(user, locationId);
+  }
+
+  @Post('inventory/unit-conversions')
+  @Roles(...RoleGroup.catalogWrite)
+  upsertConversion(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: { productId?: string; fromUnit: string; toUnit: string; factor: number },
+  ) {
+    return this.lifecycle.upsertConversion(user, dto);
   }
 }

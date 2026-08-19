@@ -120,6 +120,28 @@ export async function assertLocationAccess(
   }
 }
 
+/**
+ * Scope inventory/list queries to authorized branches.
+ * When `locationId` is present it is authorization-checked (404 foreign tenant, 403 unauthorized store).
+ */
+export async function locationAccessFilter(
+  db: Db,
+  user: AuthUser,
+  locationId?: string | null,
+): Promise<{ locationId: string | { in: string[] } } | Record<string, never>> {
+  const id = locationId?.trim();
+  if (id) {
+    await assertLocationAccess(db, user, id, { requireActive: true });
+    return { locationId: id };
+  }
+  const allowed = await resolveAllowedLocationIds(db, user);
+  if (allowed === 'all') return {};
+  if (allowed.length === 0) {
+    return { locationId: '00000000-0000-0000-0000-000000000000' };
+  }
+  return { locationId: { in: allowed } };
+}
+
 /** Prefer JWT location, else primary, else MAIN / first allowed */
 export async function resolveDefaultLocationId(
   db: Db,
@@ -169,6 +191,8 @@ export type LocationBranchSettings = {
   timezone?: string | null;
   currencyCode?: string | null;
   defaultWarehouseId?: string | null;
+  /** HQ / parent branch — tree under Organization → Location */
+  parentLocationId?: string | null;
 };
 
 export function parseLocationSettings(
@@ -190,6 +214,8 @@ export function parseLocationSettings(
       typeof s.defaultWarehouseId === 'string'
         ? s.defaultWarehouseId
         : null,
+    parentLocationId:
+      typeof s.parentLocationId === 'string' ? s.parentLocationId : null,
   };
 }
 

@@ -12,10 +12,18 @@ describe('cors allowlist', () => {
       NODE_ENV: 'production',
       CORS_ALLOWED_ORIGINS: 'https://upos.walit.in',
     });
-    expect(list).toEqual(['https://upos.walit.in']);
+    expect(list).toContain('https://upos.walit.in');
+    expect(list).toContain('http://13.126.105.138:3000');
     expect(isCorsOriginAllowed('https://evil.example', list)).toBe(false);
     expect(isCorsOriginAllowed('https://upos.walit.in', list)).toBe(true);
     expect(isCorsOriginAllowed(undefined, list)).toBe(true);
+  });
+
+  it('falls back to the live frontend origin when production allowlist is empty', () => {
+    const list = resolveCorsAllowlist({ NODE_ENV: 'production' });
+    expect(isCorsOriginAllowed('https://upos.walit.in', list)).toBe(true);
+    expect(isCorsOriginAllowed('http://13.126.105.138:3000', list)).toBe(true);
+    expect(isCorsOriginAllowed('https://evil.example', list)).toBe(false);
   });
 
   it('allows localhost in non-production', () => {

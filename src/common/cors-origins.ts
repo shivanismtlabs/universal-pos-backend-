@@ -26,6 +26,12 @@ export function resolveCorsAllowlist(env: CorsEnv = process.env): string[] {
       'http://localhost:3001',
       'http://127.0.0.1:3001',
     );
+  } else {
+    merged.push(
+      'https://upos.walit.in',
+      'http://upos.walit.in',
+      'http://13.126.105.138:3000',
+    );
   }
   return [...new Set(merged)];
 }

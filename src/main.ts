@@ -1,3 +1,4 @@
+import fastifyCors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import { NestFactory } from '@nestjs/core';
 import {
@@ -69,6 +70,24 @@ async function bootstrap() {
   app.setGlobalPrefix(prefix);
 
   const corsAllowlist = resolveCorsAllowlist(process.env);
+  await app.register(fastifyCors, {
+    origin: (origin, callback) => {
+      callback(null, isCorsOriginAllowed(origin, corsAllowlist));
+    },
+    credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'Accept',
+      'Origin',
+      'X-Requested-With',
+    ],
+    preflight: true,
+    strictPreflight: false,
+    hook: 'onRequest',
+  });
+
   app.enableCors({
     origin: (origin, callback) => {
       callback(null, isCorsOriginAllowed(origin, corsAllowlist));
@@ -136,6 +155,35 @@ async function bootstrap() {
   });
 
   const port = Number(process.env.PORT ?? 3001);
+  fastify.setNotFoundHandler((request, reply) => {
+    const origin = request.headers.origin;
+    if (request.method === 'OPTIONS') {
+      if (origin && isCorsOriginAllowed(origin, corsAllowlist)) {
+        reply.header('Access-Control-Allow-Origin', origin);
+        reply.header('Access-Control-Allow-Credentials', 'true');
+        reply.header(
+          'Access-Control-Allow-Methods',
+          'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+        );
+        reply.header(
+          'Access-Control-Allow-Headers',
+          String(
+            request.headers['access-control-request-headers'] ??
+              'Content-Type,Authorization,Accept,Origin,X-Requested-With',
+          ),
+        );
+        reply.header('Access-Control-Max-Age', '86400');
+        reply.header('Vary', 'Origin');
+      }
+      return reply.code(204).send();
+    }
+    return reply.code(404).send({
+      success: false,
+      statusCode: 404,
+      error: 'Not Found',
+      message: `Cannot ${request.method} ${request.url}`,
+    });
+  });
   await app.listen(port, '0.0.0.0');
 }
 

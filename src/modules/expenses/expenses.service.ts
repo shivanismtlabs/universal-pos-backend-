@@ -10,6 +10,7 @@ import {
   computeLineTax,
 } from '../../common/tax-engine';
 import { PrismaService } from '../../database/database.module';
+import { paginate, pageMeta } from '../../common/dto/pagination.dto';
 import { AccountingPostingService } from '../accounting/posting.service';
 import type { AuthUser } from '../auth/types';
 import {
@@ -235,17 +236,29 @@ export class ExpensesService {
       if (query.to) where.spentAt.lte = new Date(query.to);
     }
 
-    const items = await this.prisma.expense.findMany({
-      where,
-      include: expenseInclude,
-      orderBy: [{ spentAt: 'desc' }, { createdAt: 'desc' }],
-      take: 200,
-    });
+    const { page, limit, skip } = paginate(query.page, query.limit ?? 25);
+    const [totalCount, items] = await this.prisma.$transaction([
+      this.prisma.expense.count({ where }),
+      this.prisma.expense.findMany({
+        where,
+        include: expenseInclude,
+        orderBy: [{ spentAt: 'desc' }, { createdAt: 'desc' }],
+        skip,
+        take: limit,
+      }),
+    ]);
 
-    const total = items
-      .filter((e) => e.status === 'approved')
-      .reduce((s, e) => s + Number(e.amount), 0);
-    return { items, total, count: items.length };
+    const approvedSum = await this.prisma.expense.aggregate({
+      where: { ...where, status: 'approved' },
+      _sum: { amount: true },
+    });
+    const total = Number(approvedSum._sum.amount ?? 0);
+    return {
+      items,
+      total,
+      count: totalCount,
+      meta: pageMeta(totalCount, page, limit),
+    };
   }
 
   async getById(user: AuthUser, id: string) {

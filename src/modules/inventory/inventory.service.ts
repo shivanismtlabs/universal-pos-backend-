@@ -604,18 +604,23 @@ export class InventoryService {
   }
 
   /** Transfer history (Zoho-style list). Source: audit logs + location names. */
-  async listStockTransfers(user: AuthUser, limit = 100) {
-    const take = Math.min(Math.max(Number(limit) || 100, 1), 300);
-    const rows = await this.prisma.auditLog.findMany({
-      where: {
-        tenantId: user.tenantId,
-        entityType: 'stock_transfer',
-        action: 'inventory.stock_transfer',
-      },
-      orderBy: { createdAt: 'desc' },
-      take,
-      include: { actor: { select: { id: true, fullName: true } } },
-    });
+  async listStockTransfers(user: AuthUser, limit = 25, page = 1) {
+    const { page: p, limit: take, skip } = paginate(page, limit);
+    const where = {
+      tenantId: user.tenantId,
+      entityType: 'stock_transfer',
+      action: 'inventory.stock_transfer',
+    };
+    const [total, rows] = await this.prisma.$transaction([
+      this.prisma.auditLog.count({ where }),
+      this.prisma.auditLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take,
+        include: { actor: { select: { id: true, fullName: true } } },
+      }),
+    ]);
 
     const locIds = new Set<string>();
     for (const r of rows) {
@@ -670,6 +675,7 @@ export class InventoryService {
           actorName: r.actor?.fullName ?? 'Staff',
         };
       }),
+      meta: pageMeta(total, p, take),
     };
   }
 

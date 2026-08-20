@@ -16,6 +16,7 @@ import {
   StockMoveDto,
 } from './dto/inventory-ops.dto';
 import { assertLocationAccess, locationAccessFilter } from '../../common/location-access';
+import { paginate, pageMeta } from '../../common/dto/pagination.dto';
 import { LowStockAlertService } from '../notify/low-stock-alert.service';
 import { EnterpriseApprovalsService } from '../enterprise/enterprise-approvals.service';
 import { StockMutationEngine } from './stock-mutation.engine';
@@ -217,6 +218,8 @@ export class InventoryOpsService {
       q?: string;
       lowStockOnly?: boolean;
       includeZero?: boolean;
+      page?: number;
+      limit?: number;
     } = {},
   ) {
     const locFilter = await locationAccessFilter(
@@ -225,53 +228,59 @@ export class InventoryOpsService {
       opts.locationId,
     );
     const term = opts.q?.trim();
-    const rows = await this.prisma.stockLevel.findMany({
-      where: {
-        tenantId: user.tenantId,
-        ...locFilter,
-        ...(opts.includeZero ? {} : { OR: [{ qtyOnHand: { gt: 0 } }, { qtyDamaged: { gt: 0 } }] }),
-        ...(term
-          ? {
-              OR: [
-                { sku: { contains: term, mode: 'insensitive' } },
-                {
-                  product: {
-                    name: { contains: term, mode: 'insensitive' },
-                  },
+    const { page, limit, skip } = paginate(opts.page, opts.limit ?? 25);
+    const where: Prisma.StockLevelWhereInput = {
+      tenantId: user.tenantId,
+      ...locFilter,
+      ...(opts.includeZero
+        ? {}
+        : { OR: [{ qtyOnHand: { gt: 0 } }, { qtyDamaged: { gt: 0 } }] }),
+      ...(opts.lowStockOnly ? { qtyOnHand: { lte: 5 } } : {}),
+      ...(term
+        ? {
+            OR: [
+              { sku: { contains: term, mode: 'insensitive' } },
+              {
+                product: {
+                  name: { contains: term, mode: 'insensitive' },
                 },
-                {
-                  product: {
-                    skuCode: { contains: term, mode: 'insensitive' },
-                  },
+              },
+              {
+                product: {
+                  skuCode: { contains: term, mode: 'insensitive' },
                 },
-              ],
-            }
-          : {}),
-      },
-      orderBy: [{ location: { name: 'asc' } }, { product: { name: 'asc' } }],
-      take: 500,
-      include: {
-        product: {
-          select: {
-            id: true,
-            name: true,
-            skuCode: true,
-            photoUrl: true,
-            trackQty: true,
-            meta: true,
+              },
+            ],
+          }
+        : {}),
+    };
+    const [total, rows] = await this.prisma.$transaction([
+      this.prisma.stockLevel.count({ where }),
+      this.prisma.stockLevel.findMany({
+        where,
+        orderBy: [{ location: { name: 'asc' } }, { product: { name: 'asc' } }],
+        skip,
+        take: limit,
+        include: {
+          product: {
+            select: {
+              id: true,
+              name: true,
+              skuCode: true,
+              photoUrl: true,
+              trackQty: true,
+              meta: true,
+            },
+          },
+          location: {
+            select: { id: true, name: true, code: true, type: true },
           },
         },
-        location: {
-          select: { id: true, name: true, code: true, type: true },
-        },
-      },
-    });
+      }),
+    ]);
 
-    let items = rows.map((r) => this.mapLevelRich(r));
-    if (opts.lowStockOnly) {
-      items = items.filter((i) => i.isLowStock);
-    }
-    return { items };
+    const items = rows.map((r) => this.mapLevelRich(r));
+    return { items, meta: pageMeta(total, page, limit) };
   }
 
   async lowStockAlerts(user: AuthUser, locationId?: string) {
@@ -292,21 +301,30 @@ export class InventoryOpsService {
       user,
       query.locationId,
     );
-    const rows = await this.prisma.stockLedgerEntry.findMany({
-      where: {
-        tenantId: user.tenantId,
-        ...locFilter,
-        ...(query.productId ? { productId: query.productId } : {}),
-        ...(query.type ? { type: query.type as StockLedgerType } : {}),
-      },
-      orderBy: { createdAt: 'desc' },
-      take: Math.min(Number(query.limit) || 100, 300),
-      include: {
-        product: { select: { id: true, name: true, skuCode: true } },
-        location: { select: { id: true, name: true } },
-        actor: { select: { id: true, fullName: true } },
-      },
-    });
+    const { page, limit, skip } = paginate(
+      query.page,
+      Number(query.limit) || 25,
+    );
+    const where: Prisma.StockLedgerEntryWhereInput = {
+      tenantId: user.tenantId,
+      ...locFilter,
+      ...(query.productId ? { productId: query.productId } : {}),
+      ...(query.type ? { type: query.type as StockLedgerType } : {}),
+    };
+    const [total, rows] = await this.prisma.$transaction([
+      this.prisma.stockLedgerEntry.count({ where }),
+      this.prisma.stockLedgerEntry.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        include: {
+          product: { select: { id: true, name: true, skuCode: true } },
+          location: { select: { id: true, name: true } },
+          actor: { select: { id: true, fullName: true } },
+        },
+      }),
+    ]);
     return {
       items: rows.map((r) => ({
         id: r.id,
@@ -322,6 +340,7 @@ export class InventoryOpsService {
         location: r.location,
         actor: r.actor,
       })),
+      meta: pageMeta(total, page, limit),
     };
   }
 

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/database.module';
+import { paginate, pageMeta } from '../../common/dto/pagination.dto';
 import {
   NOTIFICATION_TYPES,
   notificationTypeMeta,
@@ -426,9 +427,10 @@ export class NotificationEngineService {
       type?: string;
       locationId?: string;
       limit?: number;
+      page?: number;
     } = {},
   ) {
-    const take = Math.min(opts.limit ?? 50, 100);
+    const { page, limit, skip } = paginate(opts.page, opts.limit ?? 25);
     const where: Prisma.AppNotificationWhereInput = {
       tenantId: user.tenantId,
       userId: user.userId,
@@ -436,11 +438,12 @@ export class NotificationEngineService {
       ...(opts.type ? { type: opts.type } : {}),
       ...(opts.locationId ? { locationId: opts.locationId } : {}),
     };
-    const [items, unread] = await Promise.all([
+    const [items, unread, total] = await Promise.all([
       this.prisma.appNotification.findMany({
         where,
         orderBy: { createdAt: 'desc' },
-        take,
+        skip,
+        take: limit,
         include: {
           location: { select: { id: true, name: true, code: true } },
         },
@@ -453,6 +456,7 @@ export class NotificationEngineService {
           resolvedAt: null,
         },
       }),
+      this.prisma.appNotification.count({ where }),
     ]);
     return {
       unreadCount: unread,
@@ -471,6 +475,7 @@ export class NotificationEngineService {
         readAt: n.readAt,
         resolvedAt: n.resolvedAt,
       })),
+      meta: pageMeta(total, page, limit),
     };
   }
 

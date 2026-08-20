@@ -20,6 +20,7 @@ import {
 } from '../../common/barcode';
 import { validateSku } from '../../common/sell-units';
 import { categoryIdsWithDescendants } from '../../common/category-tree';
+import { paginate, pageMeta } from '../../common/dto/pagination.dto';
 import { seedZeroStockAtOtherLocations } from '../../common/stock-at-location';
 import { resolveProductTaxRatePercent } from '../../common/tax-engine';
 import { StockMutationEngine } from '../inventory/stock-mutation.engine';
@@ -471,6 +472,8 @@ export class CatalogService {
 
   async listProducts(user: AuthUser, query: ListCatalogQueryDto) {
     const q = query.q?.trim();
+    const { page, limit, skip } = paginate(query.page, query.limit ?? 25);
+    const lowStock = query.lowStock === 'true' || query.lowStock === '1';
     const categoryIds = query.categoryId
       ? await categoryIdsWithDescendants(
           this.prisma,
@@ -478,64 +481,80 @@ export class CatalogService {
           query.categoryId,
         )
       : null;
-    const rows = await this.prisma.product.findMany({
-      where: {
-        tenantId: user.tenantId,
-        ...(categoryIds ? { categoryId: { in: categoryIds } } : {}),
-        ...(query.brandId ? { brandId: query.brandId } : {}),
-        ...(query.kind ? { kind: query.kind } : {}),
-        ...(query.status ? { status: query.status } : {}),
-        ...(query.availableInPos === 'true'
-          ? { availableInPos: true }
-          : query.availableInPos === 'false'
-            ? { availableInPos: false }
-            : {}),
-        ...(q
-          ? {
-              OR: [
-                { name: { contains: q, mode: 'insensitive' } },
-                { shortName: { contains: q, mode: 'insensitive' } },
-                { skuCode: { contains: q, mode: 'insensitive' } },
-                { barcode: { contains: q, mode: 'insensitive' } },
-                { internalCode: { contains: q, mode: 'insensitive' } },
-                { qrCode: { contains: q, mode: 'insensitive' } },
-                { brand: { name: { contains: q, mode: 'insensitive' } } },
-                { category: { name: { contains: q, mode: 'insensitive' } } },
-                {
-                  variants: {
-                    some: {
-                      OR: [
-                        { name: { contains: q, mode: 'insensitive' } },
-                        { skuCode: { contains: q, mode: 'insensitive' } },
-                        { barcode: { contains: q, mode: 'insensitive' } },
-                      ],
-                    },
+    const where: Prisma.ProductWhereInput = {
+      tenantId: user.tenantId,
+      ...(categoryIds ? { categoryId: { in: categoryIds } } : {}),
+      ...(query.brandId ? { brandId: query.brandId } : {}),
+      ...(query.kind ? { kind: query.kind } : {}),
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.availableInPos === 'true'
+        ? { availableInPos: true }
+        : query.availableInPos === 'false'
+          ? { availableInPos: false }
+          : {}),
+      ...(lowStock
+        ? {
+            trackQty: true,
+            stockLevels: {
+              some: {
+                ...(query.locationId ? { locationId: query.locationId } : {}),
+                qtyOnHand: { gt: 0, lte: 5 },
+              },
+            },
+          }
+        : {}),
+      ...(q
+        ? {
+            OR: [
+              { name: { contains: q, mode: 'insensitive' } },
+              { shortName: { contains: q, mode: 'insensitive' } },
+              { skuCode: { contains: q, mode: 'insensitive' } },
+              { barcode: { contains: q, mode: 'insensitive' } },
+              { internalCode: { contains: q, mode: 'insensitive' } },
+              { qrCode: { contains: q, mode: 'insensitive' } },
+              { brand: { name: { contains: q, mode: 'insensitive' } } },
+              { category: { name: { contains: q, mode: 'insensitive' } } },
+              {
+                variants: {
+                  some: {
+                    OR: [
+                      { name: { contains: q, mode: 'insensitive' } },
+                      { skuCode: { contains: q, mode: 'insensitive' } },
+                      { barcode: { contains: q, mode: 'insensitive' } },
+                    ],
                   },
                 },
-              ],
-            }
-          : {}),
-      },
-      orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
-      include: {
-        category: { select: { id: true, name: true, parentId: true } },
-        brand: { select: { id: true, name: true } },
-        _count: {
-          select: { variants: true, batches: true, bundleComponents: true },
-        },
-        ...(query.locationId
-          ? {
-              stockLevels: {
-                where: { locationId: query.locationId },
-                select: { qtyOnHand: true, sellUnit: true },
-                take: 1,
               },
-            }
-          : {}),
-      },
-      take: 500,
-    });
-    return { items: rows.map(mapProduct) };
+            ],
+          }
+        : {}),
+    };
+    const [total, rows] = await this.prisma.$transaction([
+      this.prisma.product.count({ where }),
+      this.prisma.product.findMany({
+        where,
+        orderBy: [{ createdAt: 'desc' }, { name: 'asc' }],
+        skip,
+        take: limit,
+        include: {
+          category: { select: { id: true, name: true, parentId: true } },
+          brand: { select: { id: true, name: true } },
+          _count: {
+            select: { variants: true, batches: true, bundleComponents: true },
+          },
+          ...(query.locationId
+            ? {
+                stockLevels: {
+                  where: { locationId: query.locationId },
+                  select: { qtyOnHand: true, sellUnit: true },
+                  take: 1,
+                },
+              }
+            : {}),
+        },
+      }),
+    ]);
+    return { items: rows.map(mapProduct), meta: pageMeta(total, page, limit) };
   }
 
   async getProduct(user: AuthUser, id: string) {

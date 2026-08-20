@@ -9,6 +9,7 @@ import {
   computeInvoiceTax,
 } from '../../common/tax-engine';
 import { PrismaService } from '../../database/database.module';
+import { paginate, pageMeta } from '../../common/dto/pagination.dto';
 import { AccountingPostingService } from '../accounting/posting.service';
 import { StockMutationEngine } from '../inventory/stock-mutation.engine';
 import { saveProductImage } from '../../common/product-image';
@@ -983,11 +984,16 @@ export class SuppliersService {
 
   // ── GRN / AP invoices / payments / ledger ───────────────────────────────
 
-  listGoodsReceipts(user: AuthUser) {
-    return this.prisma.goodsReceipt
-      .findMany({
-        where: { tenantId: user.tenantId },
+  listGoodsReceipts(user: AuthUser, page = 1, limit = 25) {
+    const p = paginate(page, limit);
+    const where = { tenantId: user.tenantId };
+    return Promise.all([
+      this.prisma.goodsReceipt.count({ where }),
+      this.prisma.goodsReceipt.findMany({
+        where,
         orderBy: { receivedAt: 'desc' },
+        skip: p.skip,
+        take: p.limit,
         include: {
           supplier: { select: { id: true, name: true } },
           purchaseOrder: {
@@ -1005,8 +1011,11 @@ export class SuppliersService {
             },
           },
         },
-      })
-      .then((rows) => rows.map((r) => this.mapGrn(r)));
+      }),
+    ]).then(([total, rows]) => ({
+      items: rows.map((r) => this.mapGrn(r)),
+      meta: pageMeta(total, p.page, p.limit),
+    }));
   }
 
   async getGoodsReceipt(user: AuthUser, id: string) {
@@ -1144,21 +1153,29 @@ export class SuppliersService {
     });
   }
 
-  listInvoices(user: AuthUser, status?: string) {
-    return this.prisma.supplierInvoice
-      .findMany({
-        where: {
-          tenantId: user.tenantId,
-          ...(status ? { status } : {}),
-        },
+  listInvoices(user: AuthUser, status?: string, page = 1, limit = 25) {
+    const p = paginate(page, limit);
+    const where = {
+      tenantId: user.tenantId,
+      ...(status ? { status } : {}),
+    };
+    return Promise.all([
+      this.prisma.supplierInvoice.count({ where }),
+      this.prisma.supplierInvoice.findMany({
+        where,
         orderBy: { invoiceDate: 'desc' },
+        skip: p.skip,
+        take: p.limit,
         include: {
           supplier: { select: { id: true, name: true } },
           purchaseOrder: { select: { id: true, poNumber: true } },
           goodsReceipt: { select: { id: true, grnNumber: true } },
         },
-      })
-      .then((rows) => rows.map((r) => this.mapInvoice(r)));
+      }),
+    ]).then(([total, rows]) => ({
+      items: rows.map((r) => this.mapInvoice(r)),
+      meta: pageMeta(total, p.page, p.limit),
+    }));
   }
 
   listOutstanding(user: AuthUser) {
@@ -1314,22 +1331,30 @@ export class SuppliersService {
     return { payment: this.mapPayment(payment) };
   }
 
-  listPayments(user: AuthUser, supplierId?: string) {
-    return this.prisma.supplierPayment
-      .findMany({
-        where: {
-          tenantId: user.tenantId,
-          ...(supplierId ? { supplierId } : {}),
-        },
+  listPayments(user: AuthUser, supplierId?: string, page = 1, limit = 25) {
+    const p = paginate(page, limit);
+    const where = {
+      tenantId: user.tenantId,
+      ...(supplierId ? { supplierId } : {}),
+    };
+    return Promise.all([
+      this.prisma.supplierPayment.count({ where }),
+      this.prisma.supplierPayment.findMany({
+        where,
         orderBy: { paidAt: 'desc' },
+        skip: p.skip,
+        take: p.limit,
         include: {
           supplier: { select: { id: true, name: true } },
           invoice: {
             select: { id: true, invoiceNumber: true, status: true },
           },
         },
-      })
-      .then((rows) => rows.map((r) => this.mapPayment(r)));
+      }),
+    ]).then(([total, rows]) => ({
+      items: rows.map((r) => this.mapPayment(r)),
+      meta: pageMeta(total, p.page, p.limit),
+    }));
   }
 
   async supplierLedger(user: AuthUser, supplierId: string) {

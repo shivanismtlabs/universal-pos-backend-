@@ -184,8 +184,16 @@ export class SuppliersController {
 
   @Get('goods-receipts')
   @ApiOperation({ summary: 'List goods received notes (GRN)' })
-  listGrns(@CurrentUser() user: AuthUser) {
-    return this.suppliersService.listGoodsReceipts(user);
+  listGrns(
+    @CurrentUser() user: AuthUser,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.suppliersService.listGoodsReceipts(
+      user,
+      page ? Number(page) : 1,
+      limit ? Number(limit) : 25,
+    );
   }
 
   @Get('goods-receipts/:id')
@@ -220,8 +228,15 @@ export class SuppliersController {
   listInvoices(
     @CurrentUser() user: AuthUser,
     @Query('status') status?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
-    return this.suppliersService.listInvoices(user, status);
+    return this.suppliersService.listInvoices(
+      user,
+      status,
+      page ? Number(page) : 1,
+      limit ? Number(limit) : 25,
+    );
   }
 
   @Get('supplier-invoices/outstanding')
@@ -264,7 +279,14 @@ export class SuppliersController {
   listPayments(
     @CurrentUser() user: AuthUser,
     @Query('supplierId') supplierId?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
-    return this.suppliersService.listPayments(user, supplierId);
+    return this.suppliersService.listPayments(
+      user,
+      supplierId,
+      page ? Number(page) : 1,
+      limit ? Number(limit) : 25,
+    );
   }
 }

@@ -217,10 +217,12 @@ export class InventoryController {
   listStockTransfers(
     @CurrentUser() user: AuthUser,
     @Query('limit') limit?: string,
+    @Query('page') page?: string,
   ) {
     return this.inventoryService.listStockTransfers(
       user,
-      limit ? Number(limit) : 100,
+      limit ? Number(limit) : 25,
+      page ? Number(page) : 1,
     );
   }
 
@@ -298,12 +300,16 @@ export class InventoryController {
     @Query('q') q?: string,
     @Query('lowStock') lowStock?: string,
     @Query('includeZero') includeZero?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
     return this.ops.listLevels(user, {
       locationId,
       q,
       lowStockOnly: lowStock === '1' || lowStock === 'true',
       includeZero: includeZero === '1' || includeZero === 'true',
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
     });
   }
 

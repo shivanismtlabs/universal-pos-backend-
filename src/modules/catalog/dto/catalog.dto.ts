@@ -18,6 +18,7 @@ import {
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ProductKind, ProductStatus } from '@prisma/client';
+import { PaginationQueryDto } from '../../../common/dto/pagination.dto';
 
 export class CreateBrandDto {
   @ApiProperty()
@@ -459,7 +460,7 @@ export class UpdateCatalogProductDto {
   extraFields?: Record<string, unknown>;
 }
 
-export class ListCatalogQueryDto {
+export class ListCatalogQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -496,6 +497,11 @@ export class ListCatalogQueryDto {
   @IsOptional()
   @IsUUID()
   locationId?: string;
+
+  @ApiPropertyOptional({ description: 'Filter items at or below default reorder (5)' })
+  @IsOptional()
+  @IsIn(['true', 'false', '1', '0'])
+  lowStock?: string;
 }
 
 export class CreateVariantDto {

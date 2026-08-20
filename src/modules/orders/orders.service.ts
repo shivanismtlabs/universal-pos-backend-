@@ -281,9 +281,36 @@ export class OrdersService {
         location: true,
         items: {
           include: {
-            product: true,
-            stockUnit: true,
-            stockLevel: true,
+            product: {
+              select: {
+                id: true,
+                name: true,
+                skuCode: true,
+                taxCode: true,
+                shortDescription: true,
+              },
+            },
+            stockUnit: {
+              select: {
+                id: true,
+                barcodeSku: true,
+                variantLabel: true,
+              },
+            },
+            stockLevel: {
+              select: {
+                id: true,
+                sku: true,
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                    skuCode: true,
+                    taxCode: true,
+                  },
+                },
+              },
+            },
           },
         },
         payments: { orderBy: { createdAt: 'desc' } },

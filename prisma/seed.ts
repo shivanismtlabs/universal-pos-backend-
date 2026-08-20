@@ -63,115 +63,19 @@ const SALON_MODULES = [
 ] as const;
 
 async function wipeAllBusinessData() {
-  try {
-    await prisma.intercompanyTransferLine.deleteMany();
-    await prisma.intercompanyTransfer.deleteMany();
-    await prisma.approvalStep.deleteMany();
-    await prisma.approvalRequest.deleteMany();
-    await prisma.approvalPolicy.deleteMany();
-    await prisma.exceptionAlertRule.deleteMany();
-    await prisma.groupSupplierLink.deleteMany();
-    await prisma.groupCustomerLink.deleteMany();
-    await prisma.businessSpinOff.deleteMany();
-    await prisma.businessGroupMembership.deleteMany();
-    await prisma.tenant.updateMany({ data: { businessGroupId: null } });
-    await prisma.businessGroup.deleteMany();
-  } catch {
-    /* tables may not exist yet */
-  }
-  await prisma.payment.deleteMany();
-  await prisma.orderFee.deleteMany();
-  await prisma.layawaySchedule.deleteMany();
-  await prisma.invoice.deleteMany();
-  await prisma.returnEvent.deleteMany();
-  await prisma.stockReservation.deleteMany();
-  await prisma.stockMovement.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.modRentalOrder.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.appointment.deleteMany();
-  await prisma.document.deleteMany();
-  await prisma.notificationLog.deleteMany();
-  await prisma.modRentalCleaningJob.deleteMany();
-  await prisma.modRentalDamageRecord.deleteMany();
-  await prisma.modRentalPartyMember.deleteMany();
-  await prisma.modRentalParty.deleteMany();
-  await prisma.modRentalMeasurement.deleteMany();
-  try {
-    await prisma.purchaseOrderLine.deleteMany();
-  } catch {
-    /* */
-  }
-  try {
-    await prisma.customerSubscription.deleteMany();
-  } catch {
-    /* */
-  }
-  try {
-    await prisma.couponRedemption.deleteMany();
-  } catch {
-    /* */
-  }
-  try {
-    await prisma.coupon.deleteMany();
-  } catch {
-    /* */
-  }
-  try {
-    await prisma.expense.deleteMany();
-  } catch {
-    /* */
-  }
-  try {
-    await prisma.expenseCategory.deleteMany();
-  } catch {
-    /* */
-  }
-  await prisma.stockLevel.deleteMany();
-  await prisma.stockUnit.deleteMany();
-  await prisma.purchaseOrder.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.supplier.deleteMany();
-  await prisma.customer.deleteMany();
-  await prisma.registerSession.deleteMany();
-  await prisma.offlineSyncEvent.deleteMany();
-  await prisma.outboxEvent.deleteMany();
-  await prisma.customFieldValue.deleteMany();
-  await prisma.customFieldDefinition.deleteMany();
-  await prisma.apiKey.deleteMany();
-  await prisma.webhookEndpoint.deleteMany();
-  await prisma.membership.deleteMany();
-  await prisma.userRole.deleteMany();
-  await prisma.rolePermission.deleteMany();
-  await prisma.employee.deleteMany();
-  await prisma.auditLog.deleteMany();
-  await prisma.tenantModule.deleteMany();
-  await prisma.featureFlag.deleteMany();
-  await prisma.tenantSubscription.deleteMany();
-  try {
-    await prisma.businessConfig.deleteMany();
-  } catch {
-    /* table may not exist on very old DBs */
-  }
-  try {
-    await prisma.identityTenantMembership.deleteMany();
-    await prisma.identityAccount.deleteMany();
-  } catch {
-    /* optional */
-  }
-  try {
-    await prisma.authOtpChallenge.deleteMany();
-  } catch {
-    /* optional */
-  }
-  await prisma.user.deleteMany();
-  await prisma.role.deleteMany();
-  await prisma.team.deleteMany();
-  await prisma.department.deleteMany();
-  await prisma.location.deleteMany();
-  await prisma.organization.deleteMany();
-  await prisma.tenant.deleteMany();
+  // Full reset — CASCADE avoids chasing every FK as modules grow.
+  const rows = await prisma.$queryRawUnsafe<Array<{ tablename: string }>>(
+    `SELECT tablename
+     FROM pg_tables
+     WHERE schemaname = 'public'
+       AND tablename <> '_prisma_migrations'
+     ORDER BY tablename`,
+  );
+  if (!rows.length) return;
+  const list = rows.map((r) => `"${r.tablename}"`).join(', ');
+  await prisma.$executeRawUnsafe(
+    `TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`,
+  );
 }
 
 async function addStaff(
@@ -310,6 +214,535 @@ async function applyBusinessType(
   });
 }
 
+type OpsProductSpec = {
+  category: string;
+  name: string;
+  sku: string;
+  price: number;
+  qty: number;
+  cost?: number;
+  kind?: 'physical' | 'service';
+  taxCode?: string;
+  brand?: string;
+  meta?: Record<string, unknown>;
+};
+
+/**
+ * Realistic demo pack: more catalog rows, customers, suppliers, POs,
+ * closed sales + GST invoices, expenses, coupons — so every main screen has data.
+ */
+async function seedOpsPack(opts: {
+  tenantId: string;
+  locationId: string;
+  userId: string;
+  currencyCode: string;
+  taxId: string;
+  /** 8-digit base so phones stay unique across shops */
+  phoneBase: string;
+  codePrefix: string;
+  products: OpsProductSpec[];
+  skipOrders?: boolean;
+}) {
+  const {
+    tenantId,
+    locationId,
+    userId,
+    currencyCode,
+    taxId,
+    phoneBase,
+    codePrefix,
+    products,
+  } = opts;
+
+  const tenantRow = await prisma.tenant.findUniqueOrThrow({
+    where: { id: tenantId },
+  });
+  const prevSettings =
+    tenantRow.settings && typeof tenantRow.settings === 'object'
+      ? { ...(tenantRow.settings as Record<string, unknown>) }
+      : {};
+  await prisma.tenant.update({
+    where: { id: tenantId },
+    data: {
+      taxId,
+      settings: {
+        ...prevSettings,
+        organizationProfile: {
+          addressLine1: '12 Market Road',
+          city: 'Ahmedabad',
+          state: 'Gujarat',
+          phone: `+91${phoneBase}00`,
+          email: `hello@${codePrefix.toLowerCase()}.demo`,
+        },
+      } as Prisma.InputJsonValue,
+    },
+  });
+
+  const categoryIds = new Map<string, string>();
+  const brandIds = new Map<string, string>();
+  const stockRows: Array<{
+    productId: string;
+    stockLevelId: string;
+    name: string;
+    sku: string;
+    price: number;
+    taxCode: string | null;
+  }> = [];
+
+  for (const p of products) {
+    if (!categoryIds.has(p.category)) {
+      const existing = await prisma.category.findFirst({
+        where: { tenantId, name: p.category },
+      });
+      if (existing) {
+        categoryIds.set(p.category, existing.id);
+      } else {
+        const cat = await prisma.category.create({
+          data: { tenantId, name: p.category },
+        });
+        categoryIds.set(p.category, cat.id);
+      }
+    }
+    let brandId: string | undefined;
+    if (p.brand) {
+      if (!brandIds.has(p.brand)) {
+        const brand = await prisma.brand.upsert({
+          where: { tenantId_name: { tenantId, name: p.brand } },
+          create: { tenantId, name: p.brand },
+          update: {},
+        });
+        brandIds.set(p.brand, brand.id);
+      }
+      brandId = brandIds.get(p.brand);
+    }
+
+    const existingProduct = await prisma.product.findFirst({
+      where: { tenantId, skuCode: p.sku },
+    });
+    if (existingProduct) {
+      const level = await prisma.stockLevel.findFirst({
+        where: { tenantId, productId: existingProduct.id, locationId },
+      });
+      if (level) {
+        stockRows.push({
+          productId: existingProduct.id,
+          stockLevelId: level.id,
+          name: existingProduct.name,
+          sku: existingProduct.skuCode,
+          price: Number(level.sellPrice),
+          taxCode: existingProduct.taxCode,
+        });
+      }
+      continue;
+    }
+
+    const kind = p.kind ?? 'physical';
+    const trackQty = kind !== 'service';
+    const product = await prisma.product.create({
+      data: {
+        tenantId,
+        categoryId: categoryIds.get(p.category)!,
+        brandId: brandId ?? null,
+        name: p.name,
+        skuCode: p.sku,
+        taxCode: p.taxCode ?? '9983',
+        kind,
+        fulfillmentMode: kind === 'service' ? 'service' : 'sale',
+        basePrice: p.price,
+        costPrice: p.cost ?? Math.round(p.price * 0.55 * 100) / 100,
+        trackQty,
+        trackSerial: false,
+        meta: {
+          sellUnit: trackQty ? 'pcs' : 'job',
+          itemType: kind === 'service' ? 'service' : 'goods',
+          ...(p.meta ?? {}),
+        },
+      },
+    });
+    const level = await prisma.stockLevel.create({
+      data: {
+        tenantId,
+        locationId,
+        productId: product.id,
+        sku: p.sku,
+        sellUnit: trackQty ? 'pcs' : 'job',
+        qtyOnHand: trackQty ? p.qty : 0,
+        sellPrice: p.price,
+      },
+    });
+    stockRows.push({
+      productId: product.id,
+      stockLevelId: level.id,
+      name: product.name,
+      sku: product.skuCode,
+      price: p.price,
+      taxCode: product.taxCode,
+    });
+  }
+
+  // Also include any existing stock at this location (hero product from shop seed)
+  const existingLevels = await prisma.stockLevel.findMany({
+    where: { tenantId, locationId },
+    include: { product: true },
+  });
+  for (const level of existingLevels) {
+    if (stockRows.some((r) => r.stockLevelId === level.id)) continue;
+    stockRows.push({
+      productId: level.productId,
+      stockLevelId: level.id,
+      name: level.product.name,
+      sku: level.product.skuCode,
+      price: Number(level.sellPrice),
+      taxCode: level.product.taxCode,
+    });
+  }
+
+  const customers = await Promise.all(
+    [
+      { name: 'Walk-in Guest', phone: `${phoneBase}01`, email: null as string | null },
+      {
+        name: 'Priya Sharma',
+        phone: `${phoneBase}02`,
+        email: `priya@${codePrefix.toLowerCase()}.demo`,
+      },
+      {
+        name: 'Amit Patel',
+        phone: `${phoneBase}03`,
+        email: `amit@${codePrefix.toLowerCase()}.demo`,
+      },
+      {
+        name: 'Neha Verma',
+        phone: `${phoneBase}04`,
+        email: `neha@${codePrefix.toLowerCase()}.demo`,
+      },
+      {
+        name: 'Rahul Mehta',
+        phone: `${phoneBase}05`,
+        email: `rahul@${codePrefix.toLowerCase()}.demo`,
+      },
+    ].map((c) =>
+      prisma.customer.create({
+        data: {
+          tenantId,
+          fullName: c.name,
+          phone: c.phone,
+          email: c.email,
+          loyaltyPoints: c.name === 'Priya Sharma' ? 120 : 0,
+          marketingOptIn: Boolean(c.email),
+        },
+      }),
+    ),
+  );
+
+  const supplier = await prisma.supplier.create({
+    data: {
+      tenantId,
+      code: `SUP-${codePrefix}-001`,
+      name: `${codePrefix} Wholesale Hub`,
+      legalName: `${codePrefix} Wholesale Hub Pvt Ltd`,
+      supplierType: 'wholesaler',
+      category: 'General merchandise',
+      status: 'active',
+      contact: 'Suresh Kumar',
+      phone: `${phoneBase}88`,
+      email: `supply@${codePrefix.toLowerCase()}.demo`,
+      taxId: taxId,
+      paymentTerm: 'net_30',
+      dueDays: 30,
+      creditLimit: 250000,
+      currencyCode,
+      notes: 'Preferred restock partner for demo',
+    },
+  });
+  await prisma.supplierContact.create({
+    data: {
+      tenantId,
+      supplierId: supplier.id,
+      name: 'Suresh Kumar',
+      email: `supply@${codePrefix.toLowerCase()}.demo`,
+      phone: `${phoneBase}88`,
+      role: 'Account manager',
+      isPrimary: true,
+    },
+  });
+  await prisma.supplierAddress.create({
+    data: {
+      tenantId,
+      supplierId: supplier.id,
+      kind: 'billing',
+      line1: 'Warehouse 4, Ring Road',
+      city: 'Ahmedabad',
+      state: 'Gujarat',
+      postalCode: '380015',
+      country: 'IN',
+      isDefault: true,
+    },
+  });
+  await prisma.supplier.create({
+    data: {
+      tenantId,
+      code: `SUP-${codePrefix}-002`,
+      name: 'Local Services Co',
+      supplierType: 'services',
+      status: 'active',
+      contact: 'Anjali Shah',
+      phone: `${phoneBase}89`,
+      email: `services@${codePrefix.toLowerCase()}.demo`,
+      paymentTerm: 'immediate',
+      currencyCode,
+    },
+  });
+
+  if (stockRows.length) {
+    const poLines = stockRows.slice(0, Math.min(3, stockRows.length));
+    const po = await prisma.purchaseOrder.create({
+      data: {
+        tenantId,
+        supplierId: supplier.id,
+        poNumber: `PO-${codePrefix}-1001`,
+        status: 'ordered',
+        expectedDelivery: new Date(Date.now() + 5 * 86400000),
+        notes: 'Seed purchase order — ready to receive',
+        lines: {
+          create: poLines.map((row) => ({
+            tenantId,
+            stockLevelId: row.stockLevelId,
+            qtyOrdered: 20,
+            unitCost: Math.round(row.price * 0.55 * 100) / 100,
+          })),
+        },
+      },
+    });
+    void po;
+  }
+
+  await prisma.coupon.createMany({
+    data: [
+      {
+        tenantId,
+        code: `${codePrefix}10`,
+        description: '10% off orders over ₹500',
+        discountType: 'percent',
+        discountValue: 10,
+        minOrderAmount: 500,
+        maxRedemptions: 200,
+        isActive: true,
+      },
+      {
+        tenantId,
+        code: `${codePrefix}FLAT50`,
+        description: 'Flat ₹50 off',
+        discountType: 'fixed',
+        discountValue: 50,
+        minOrderAmount: 300,
+        maxRedemptions: 100,
+        isActive: true,
+      },
+    ],
+  });
+
+  const rent = await prisma.expenseCategory.create({
+    data: { tenantId, name: 'Rent & utilities', sortOrder: 1 },
+  });
+  const supplies = await prisma.expenseCategory.create({
+    data: { tenantId, name: 'Store supplies', sortOrder: 2 },
+  });
+  const marketing = await prisma.expenseCategory.create({
+    data: { tenantId, name: 'Marketing', sortOrder: 3 },
+  });
+  const daysAgo = (n: number) => {
+    const d = new Date();
+    d.setDate(d.getDate() - n);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  };
+  await prisma.expense.createMany({
+    data: [
+      {
+        tenantId,
+        locationId,
+        categoryId: rent.id,
+        expenseNumber: `EXP-${codePrefix}-001`,
+        amount: 18000,
+        spentAt: daysAgo(12),
+        paymentMethod: 'bank_transfer',
+        payee: 'Property Manager',
+        status: 'approved',
+        createdById: userId,
+        approvedById: userId,
+        approvedAt: new Date(),
+        notes: 'Monthly shop rent',
+      },
+      {
+        tenantId,
+        locationId,
+        categoryId: supplies.id,
+        expenseNumber: `EXP-${codePrefix}-002`,
+        amount: 2450,
+        spentAt: daysAgo(4),
+        paymentMethod: 'cash',
+        payee: 'Stationery Mart',
+        status: 'approved',
+        createdById: userId,
+        approvedById: userId,
+        approvedAt: new Date(),
+        notes: 'Bags, receipts, cleaning',
+      },
+      {
+        tenantId,
+        locationId,
+        categoryId: marketing.id,
+        expenseNumber: `EXP-${codePrefix}-003`,
+        amount: 3200,
+        spentAt: daysAgo(2),
+        paymentMethod: 'upi',
+        payee: 'Local Ads',
+        status: 'pending',
+        createdById: userId,
+        notes: 'Weekend flyer campaign',
+      },
+    ],
+  });
+
+  if (opts.skipOrders || stockRows.length === 0) {
+    return {
+      productCount: stockRows.length,
+      customerCount: customers.length,
+      orderCount: 0,
+    };
+  }
+
+  const sellable = stockRows.filter((r) => r.price > 0);
+  const taxRate = 0.05; // 5% GST split CGST/SGST for demo
+
+  async function createClosedSale(params: {
+    orderNumber: string;
+    invoiceNumber: string;
+    customerId: string | null;
+    lineIndexes: number[];
+    qty?: number;
+    method: 'cash' | 'upi' | 'card';
+    daysAgo: number;
+  }) {
+    const lines = params.lineIndexes
+      .map((i) => sellable[i % sellable.length])
+      .filter(Boolean);
+    if (!lines.length) return null;
+    const qty = params.qty ?? 1;
+    let subtotal = 0;
+    const built = lines.map((row) => {
+      const lineSub = row.price * qty;
+      const tax = Math.round(lineSub * taxRate * 100) / 100;
+      subtotal += lineSub;
+      return { row, qty, lineSub, tax };
+    });
+    const taxTotal = built.reduce((s, l) => s + l.tax, 0);
+    const grand = Math.round((subtotal + taxTotal) * 100) / 100;
+    const cgst = Math.round((taxTotal / 2) * 100) / 100;
+    const sgst = Math.round((taxTotal - cgst) * 100) / 100;
+    const createdAt = daysAgo(params.daysAgo);
+
+    const order = await prisma.order.create({
+      data: {
+        tenantId,
+        locationId,
+        customerId: params.customerId,
+        orderNumber: params.orderNumber,
+        kind: 'sale',
+        status: 'closed',
+        currencyCode,
+        subtotal,
+        taxTotal,
+        discountTotal: 0,
+        depositTotal: 0,
+        balanceDue: 0,
+        createdById: userId,
+        createdAt,
+        items: {
+          create: built.map((l) => ({
+            tenantId,
+            itemKind: 'product' as const,
+            productId: l.row.productId,
+            stockLevelId: l.row.stockLevelId,
+            description: l.row.name,
+            quantity: l.qty,
+            unitPrice: l.row.price,
+            lineTotal: Math.round((l.lineSub + l.tax) * 100) / 100,
+            taxAmount: l.tax,
+          })),
+        },
+        payments: {
+          create: {
+            tenantId,
+            locationId,
+            type: 'payment',
+            method: params.method,
+            status: 'succeeded',
+            amount: grand,
+            currencyCode,
+            idempotencyKey: `seed-${params.orderNumber}`,
+            takenByUserId: userId,
+            createdAt,
+          },
+        },
+        invoices: {
+          create: {
+            tenantId,
+            invoiceNumber: params.invoiceNumber,
+            taxIdSnapshot: taxId,
+            taxBreakdown: {
+              cgst,
+              sgst,
+              igst: 0,
+              placeOfSupply: 'Gujarat',
+            },
+            cgst,
+            sgst,
+            igst: 0,
+            grandTotal: grand,
+            createdAt,
+          },
+        },
+      },
+    });
+    return order;
+  }
+
+  const orders = [
+    await createClosedSale({
+      orderNumber: `ORD-${codePrefix}-00001`,
+      invoiceNumber: `INV-${codePrefix}-00001`,
+      customerId: customers[1]?.id ?? null,
+      lineIndexes: [0, 1],
+      method: 'upi',
+      daysAgo: 6,
+    }),
+    await createClosedSale({
+      orderNumber: `ORD-${codePrefix}-00002`,
+      invoiceNumber: `INV-${codePrefix}-00002`,
+      customerId: customers[2]?.id ?? null,
+      lineIndexes: [0],
+      qty: 2,
+      method: 'cash',
+      daysAgo: 3,
+    }),
+    await createClosedSale({
+      orderNumber: `ORD-${codePrefix}-00003`,
+      invoiceNumber: `INV-${codePrefix}-00003`,
+      customerId: customers[3]?.id ?? null,
+      lineIndexes: [1, 2, 0],
+      method: 'card',
+      daysAgo: 1,
+    }),
+  ].filter(Boolean);
+
+  return {
+    productCount: stockRows.length,
+    customerCount: customers.length,
+    orderCount: orders.length,
+  };
+}
+
 async function seedSaleShop(opts: {
   passwordHash: string;
   tenantName: string;
@@ -338,6 +771,12 @@ async function seedSaleShop(opts: {
     role: string;
     code: string;
   }>;
+  ops?: {
+    taxId: string;
+    phoneBase: string;
+    codePrefix: string;
+    products: OpsProductSpec[];
+  };
 }) {
   const result = await prisma.$transaction(async (tx) =>
     provisionTenantWithAdmin(tx, {
@@ -458,7 +897,26 @@ async function seedSaleShop(opts: {
     }
   }
 
-  return { ...result, productName: product.name, productSku: product.skuCode };
+  let opsSummary = { productCount: 1, customerCount: 0, orderCount: 0 };
+  if (opts.ops) {
+    opsSummary = await seedOpsPack({
+      tenantId: result.tenant.id,
+      locationId: result.location.id,
+      userId: result.user.id,
+      currencyCode: 'INR',
+      taxId: opts.ops.taxId,
+      phoneBase: opts.ops.phoneBase,
+      codePrefix: opts.ops.codePrefix,
+      products: opts.ops.products,
+    });
+  }
+
+  return {
+    ...result,
+    productName: product.name,
+    productSku: product.skuCode,
+    ops: opsSummary,
+  };
 }
 
 async function seedRentalDemo(passwordHash: string) {
@@ -560,7 +1018,35 @@ async function seedRentalDemo(passwordHash: string) {
     result.user.id,
   );
 
-  return { unitCount, tenant: result.tenant };
+  const ops = await seedOpsPack({
+    tenantId: result.tenant.id,
+    locationId: result.location.id,
+    userId: result.user.id,
+    currencyCode: 'INR',
+    taxId: '29RENTALDEMO1Z5',
+    phoneBase: '98150000',
+    codePrefix: 'RN',
+    products: [
+      {
+        category: 'Retail add-ons',
+        name: 'Garment Steamer Hire',
+        sku: 'RN-STEAM-01',
+        price: 199,
+        qty: 10,
+        taxCode: '9987',
+      },
+      {
+        category: 'Retail add-ons',
+        name: 'Shoe Shine Kit',
+        sku: 'RN-SHINE-01',
+        price: 149,
+        qty: 25,
+        taxCode: '3405',
+      },
+    ],
+  });
+
+  return { unitCount, tenant: result.tenant, ops };
 }
 
 async function seedPoolStoreLight(passwordHash: string) {
@@ -671,7 +1157,18 @@ async function seedPoolStoreLight(passwordHash: string) {
     result.user.id,
   );
 
-  return { productCount: products.length };
+  const ops = await seedOpsPack({
+    tenantId: result.tenant.id,
+    locationId: result.location.id,
+    userId: result.user.id,
+    currencyCode: 'USD',
+    taxId: 'US-POOL-TAX-01',
+    phoneBase: '98765001',
+    codePrefix: 'PL',
+    products: [],
+  });
+
+  return { productCount: products.length, ops };
 }
 
 async function main() {
@@ -718,6 +1215,57 @@ async function main() {
         code: 'RT03',
       },
     ],
+    ops: {
+      taxId: '24AABCU9603R1ZM',
+      phoneBase: '98110000',
+      codePrefix: 'RT',
+      products: [
+        {
+          category: 'Apparel',
+          name: 'Black Jeans 32',
+          sku: 'RET-JEANS-BLK-32',
+          price: 1299,
+          qty: 25,
+          taxCode: '6103',
+          brand: 'UrbanWear',
+        },
+        {
+          category: 'Apparel',
+          name: 'Cotton Cap',
+          sku: 'RET-CAP-NVY',
+          price: 299,
+          qty: 50,
+          taxCode: '6505',
+          brand: 'UrbanWear',
+        },
+        {
+          category: 'Accessories',
+          name: 'Leather Belt',
+          sku: 'RET-BELT-BRN',
+          price: 449,
+          qty: 30,
+          taxCode: '4203',
+          brand: 'UrbanWear',
+        },
+        {
+          category: 'Accessories',
+          name: 'Canvas Tote',
+          sku: 'RET-TOTE-01',
+          price: 399,
+          qty: 35,
+          taxCode: '4202',
+        },
+        {
+          category: 'Footwear',
+          name: 'Sports Sneaker',
+          sku: 'RET-SNKR-WHT',
+          price: 1899,
+          qty: 18,
+          taxCode: '6404',
+          brand: 'Stride',
+        },
+      ],
+    },
   });
 
   const grocery = await seedSaleShop({
@@ -753,6 +1301,54 @@ async function main() {
         code: 'GR02',
       },
     ],
+    ops: {
+      taxId: '24AABCG9603R1ZN',
+      phoneBase: '98120000',
+      codePrefix: 'GR',
+      products: [
+        {
+          category: 'Dairy',
+          name: 'Curd 400g',
+          sku: 'GRC-CURD-400',
+          price: 35,
+          qty: 80,
+          taxCode: '0403',
+          brand: 'FarmFresh',
+        },
+        {
+          category: 'Bakery',
+          name: 'Whole Wheat Bread',
+          sku: 'GRC-BREAD-WW',
+          price: 45,
+          qty: 60,
+          taxCode: '1905',
+        },
+        {
+          category: 'Beverages',
+          name: 'Mineral Water 1L',
+          sku: 'GRC-WTR-1L',
+          price: 20,
+          qty: 200,
+          taxCode: '2201',
+        },
+        {
+          category: 'Snacks',
+          name: 'Namkeen Mix 200g',
+          sku: 'GRC-NMKN-200',
+          price: 55,
+          qty: 90,
+          taxCode: '2106',
+        },
+        {
+          category: 'Staples',
+          name: 'Basmati Rice 1kg',
+          sku: 'GRC-RICE-1K',
+          price: 145,
+          qty: 70,
+          taxCode: '1006',
+        },
+      ],
+    },
   });
 
   const salon = await seedSaleShop({
@@ -795,6 +1391,49 @@ async function main() {
         code: 'SL03',
       },
     ],
+    ops: {
+      taxId: '24AABCS9603R1ZP',
+      phoneBase: '98130000',
+      codePrefix: 'SL',
+      products: [
+        {
+          category: 'Hair',
+          name: 'Haircut – Women',
+          sku: 'SAL-CUT-WMN',
+          price: 550,
+          qty: 0,
+          kind: 'service',
+          taxCode: '9997',
+        },
+        {
+          category: 'Hair',
+          name: 'Hair Colour',
+          sku: 'SAL-COLOR-01',
+          price: 1200,
+          qty: 0,
+          kind: 'service',
+          taxCode: '9997',
+        },
+        {
+          category: 'Retail',
+          name: 'Shampoo 250ml',
+          sku: 'SAL-SHMP-250',
+          price: 399,
+          qty: 40,
+          taxCode: '3305',
+          brand: 'LuxeCare',
+        },
+        {
+          category: 'Retail',
+          name: 'Hair Serum',
+          sku: 'SAL-SERUM-01',
+          price: 649,
+          qty: 25,
+          taxCode: '3305',
+          brand: 'LuxeCare',
+        },
+      ],
+    },
   });
 
   const restaurant = await seedSaleShop({
@@ -829,6 +1468,53 @@ async function main() {
         code: 'RS02',
       },
     ],
+    ops: {
+      taxId: '24AABCR9603R1ZQ',
+      phoneBase: '98140000',
+      codePrefix: 'RS',
+      products: [
+        {
+          category: 'Mains',
+          name: 'Dal Tadka',
+          sku: 'RST-DAL-TDK',
+          price: 180,
+          qty: 999,
+          taxCode: '9963',
+        },
+        {
+          category: 'Breads',
+          name: 'Butter Naan',
+          sku: 'RST-NAAN-BTR',
+          price: 50,
+          qty: 999,
+          taxCode: '9963',
+        },
+        {
+          category: 'Breads',
+          name: 'Garlic Naan',
+          sku: 'RST-NAAN-GRL',
+          price: 70,
+          qty: 999,
+          taxCode: '9963',
+        },
+        {
+          category: 'Drinks',
+          name: 'Masala Chaas',
+          sku: 'RST-CHAAS-01',
+          price: 60,
+          qty: 999,
+          taxCode: '9963',
+        },
+        {
+          category: 'Desserts',
+          name: 'Gulab Jamun (2pc)',
+          sku: 'RST-GJAM-2',
+          price: 90,
+          qty: 999,
+          taxCode: '9963',
+        },
+      ],
+    },
   });
 
   const rental = await seedRentalDemo(passwordHash);
@@ -837,15 +1523,27 @@ async function main() {
   console.log('');
   console.log('=== Seed complete — password for ALL: WalitShop@2026 ===');
   console.log('');
-  console.log('Retail     owner@retail.demo     product:', retail.productName);
-  console.log('Grocery    owner@grocery.demo    product:', grocery.productName);
-  console.log('Salon      owner@salon.demo      product:', salon.productName);
   console.log(
-    'Restaurant owner@restaurant.demo product:',
-    restaurant.productName,
+    `Retail     owner@retail.demo     items~${retail.ops.productCount} customers=${retail.ops.customerCount} orders=${retail.ops.orderCount}`,
   );
-  console.log('Rental     owner@rental.demo     units:', rental.unitCount);
-  console.log('Pool (retail sample) owner@pool.demo SKUs:', pool.productCount);
+  console.log(
+    `Grocery    owner@grocery.demo    items~${grocery.ops.productCount} customers=${grocery.ops.customerCount} orders=${grocery.ops.orderCount}`,
+  );
+  console.log(
+    `Salon      owner@salon.demo      items~${salon.ops.productCount} customers=${salon.ops.customerCount} orders=${salon.ops.orderCount}`,
+  );
+  console.log(
+    `Restaurant owner@restaurant.demo items~${restaurant.ops.productCount} customers=${restaurant.ops.customerCount} orders=${restaurant.ops.orderCount}`,
+  );
+  console.log('Rental     owner@rental.demo     units:', rental.unitCount, 'orders:', rental.ops.orderCount);
+  console.log(
+    'Pool       owner@pool.demo       SKUs:',
+    pool.productCount,
+    'customers:',
+    pool.ops.customerCount,
+    'orders:',
+    pool.ops.orderCount,
+  );
   console.log('');
   console.log('Also staff: cashier@*.demo / manager@retail.demo etc (same password)');
   console.log('Login at /login → pick organization if portal lists multiple.');

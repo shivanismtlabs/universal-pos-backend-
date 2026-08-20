@@ -119,6 +119,7 @@ async function bootstrap() {
     .addTag('payments')
     .addTag('billing')
     .addTag('appointments')
+    .addTag('ai')
     .addTag('returns')
     .addTag('documents')
     .addTag('notify')

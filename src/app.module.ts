@@ -34,6 +34,7 @@ import { ResourcesModule } from './modules/resources/resources.module';
 import { JobsModule } from './modules/jobs/jobs.module';
 import { CustomFieldsModule } from './modules/custom-fields/custom-fields.module';
 import { EnterpriseModule } from './modules/enterprise/enterprise.module';
+import { AiModule } from './modules/ai/ai.module';
 
 const enableQueues = process.env.ENABLE_QUEUES === 'true';
 
@@ -46,6 +47,7 @@ const enableQueues = process.env.ENABLE_QUEUES === 'true';
     HealthModule,
     MailModule,
     AuthModule,
+    AiModule,
     TenantsModule,
     UsersModule,
     AppsModule,

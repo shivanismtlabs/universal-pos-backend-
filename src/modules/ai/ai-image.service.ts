@@ -5,6 +5,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as https from 'https';
 import type { GenerateProductImageDto } from './dto/ai-image.dto';
 
 const MAX_BYTES = 4 * 1024 * 1024;
@@ -17,8 +18,9 @@ export class AiImageService {
 
   /**
    * Free Pollinations image generation.
-   * Tries several URL shapes — production servers sometimes block one host.
-   * Optional POLLINATIONS_API_KEY for gen.pollinations.ai.
+   * Local Windows + antivirus SSL inspection often breaks Node's default
+   * TLS verify (`UNABLE_TO_VERIFY_LEAF_SIGNATURE`). In non-production we
+   * relax TLS for this outbound call only (override with POLLINATIONS_TLS_INSECURE).
    */
   async generateProductImage(dto: GenerateProductImageDto) {
     const name = dto.name.trim();
@@ -29,7 +31,12 @@ export class AiImageService {
     const hint = dto.hint?.trim();
     const prompt = this.buildPrompt(name, hint);
     const width = clampInt(this.config.get('POLLINATIONS_WIDTH'), 768, 256, 1024);
-    const height = clampInt(this.config.get('POLLINATIONS_HEIGHT'), 768, 256, 1024);
+    const height = clampInt(
+      this.config.get('POLLINATIONS_HEIGHT'),
+      768,
+      256,
+      1024,
+    );
     const model =
       this.config.get<string>('POLLINATIONS_MODEL')?.trim() || 'flux';
     const apiKey = this.config.get<string>('POLLINATIONS_API_KEY')?.trim();
@@ -49,22 +56,24 @@ export class AiImageService {
     const errors: string[] = [];
     for (const candidate of candidates) {
       try {
-        const result = await this.fetchImage(candidate.url, candidate.headers);
-        if (result) {
-          return {
-            provider: 'pollinations',
-            prompt,
-            mime: result.mime,
-            bytes: result.buf.length,
-            imageBase64: `data:${result.mime};base64,${result.buf.toString('base64')}`,
-            /** Public URL FE can retry if needed */
-            sourceUrl: candidate.url.split('?')[0],
-          };
-        }
+        const result = await this.fetchImageHttps(
+          candidate.url,
+          candidate.headers,
+        );
+        return {
+          provider: 'pollinations',
+          prompt,
+          mime: result.mime,
+          bytes: result.buf.length,
+          imageBase64: `data:${result.mime};base64,${result.buf.toString('base64')}`,
+          sourceUrl: candidate.url.split('?')[0],
+        };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         errors.push(`${candidate.label}: ${msg}`);
-        this.logger.warn(`Pollinations attempt failed (${candidate.label}): ${msg}`);
+        this.logger.warn(
+          `Pollinations attempt failed (${candidate.label}): ${msg}`,
+        );
       }
     }
 
@@ -74,7 +83,6 @@ export class AiImageService {
     );
   }
 
-  /** Public helper so FE can build the same prompt URL for browser fallback. */
   buildClientFallbackUrl(name: string, hint?: string) {
     const prompt = this.buildPrompt(name.trim(), hint?.trim());
     const seed = Math.floor(Math.random() * 1_000_000_000);
@@ -92,7 +100,6 @@ export class AiImageService {
   }
 
   private buildPrompt(name: string, hint?: string) {
-    // Keep prompt shorter — long prompts timeout more often on free tier
     const parts = [
       'Product photo for online store',
       name.slice(0, 80),
@@ -100,6 +107,13 @@ export class AiImageService {
       'white background, centered, sharp, no text',
     ].filter(Boolean);
     return parts.join(', ');
+  }
+
+  private tlsInsecure(): boolean {
+    const flag = this.config.get<string>('POLLINATIONS_TLS_INSECURE')?.trim();
+    if (flag === 'true' || flag === '1') return true;
+    if (flag === 'false' || flag === '0') return false;
+    return process.env.NODE_ENV !== 'production';
   }
 
   private buildCandidateUrls(opts: {
@@ -127,7 +141,7 @@ export class AiImageService {
 
     const authHeaders: Record<string, string> = {
       Accept: 'image/*,*/*',
-      'User-Agent': 'UniversalPOS/1.0 (+https://upos.walit.in)',
+      'User-Agent': 'UniversalPOS/1.0',
     };
     if (opts.apiKey) {
       authHeaders.Authorization = `Bearer ${opts.apiKey}`;
@@ -144,21 +158,18 @@ export class AiImageService {
       });
     }
 
-    // Primary free endpoint (no key)
     list.push({
       label: 'image.pollinations',
       url: `https://image.pollinations.ai/prompt/${enc}?${qs()}`,
       headers: authHeaders,
     });
 
-    // Same host, turbo model (often faster / less queued)
     list.push({
       label: 'image.pollinations-turbo',
       url: `https://image.pollinations.ai/prompt/${enc}?${qs({ model: 'turbo' })}`,
       headers: authHeaders,
     });
 
-    // Newer gateway (works better with API key; sometimes open)
     list.push({
       label: 'gen.pollinations',
       url: `https://gen.pollinations.ai/image/${enc}?${qs()}`,
@@ -168,32 +179,74 @@ export class AiImageService {
     return list;
   }
 
-  private async fetchImage(
+  private fetchImageHttps(
     url: string,
     headers: Record<string, string>,
-  ): Promise<{ buf: Buffer; mime: string } | null> {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers,
-      redirect: 'follow',
-      // 45s per attempt — free tier can be slow
-      signal: AbortSignal.timeout(45_000),
+  ): Promise<{ buf: Buffer; mime: string }> {
+    const insecure = this.tlsInsecure();
+    return new Promise((resolve, reject) => {
+      const req = https.get(
+        url,
+        {
+          headers,
+          timeout: 60_000,
+          rejectUnauthorized: !insecure,
+        },
+        (res) => {
+          // Follow one redirect manually if needed
+          if (
+            res.statusCode &&
+            res.statusCode >= 300 &&
+            res.statusCode < 400 &&
+            res.headers.location
+          ) {
+            const next = new URL(res.headers.location, url).toString();
+            res.resume();
+            this.fetchImageHttps(next, headers).then(resolve, reject);
+            return;
+          }
+
+          const chunks: Buffer[] = [];
+          res.on('data', (c) => chunks.push(c as Buffer));
+          res.on('end', () => {
+            try {
+              resolve(
+                this.parseImageBuffer(
+                  res.statusCode ?? 0,
+                  res.headers['content-type'] ?? null,
+                  Buffer.concat(chunks),
+                ),
+              );
+            } catch (e) {
+              reject(e);
+            }
+          });
+        },
+      );
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('timeout'));
+      });
     });
+  }
 
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+  private parseImageBuffer(
+    status: number,
+    contentTypeHeader: string | null,
+    buf: Buffer,
+  ): { buf: Buffer; mime: string } {
+    if (status < 200 || status >= 300) {
+      throw new Error(`HTTP ${status}`);
     }
+    if (!buf.length) throw new Error('empty body');
+    if (buf.length > MAX_BYTES) throw new Error(`too large (${buf.length})`);
 
-    const contentType = (res.headers.get('content-type') || '')
+    const contentType = (contentTypeHeader || '')
       .split(';')[0]
       .trim()
       .toLowerCase();
 
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (!buf.length) throw new Error('empty body');
-    if (buf.length > MAX_BYTES) throw new Error(`too large (${buf.length})`);
-
-    // Some gateways return HTML error pages with 200
     if (
       contentType.includes('text/html') ||
       (buf.length < 500 && buf.toString('utf8', 0, 64).includes('<html'))
@@ -202,12 +255,10 @@ export class AiImageService {
     }
 
     if (contentType.startsWith('image/')) {
-      const mime =
-        contentType === 'image/jpg' ? 'image/jpeg' : contentType;
+      const mime = contentType === 'image/jpg' ? 'image/jpeg' : contentType;
       return { buf, mime };
     }
 
-    // Sniff magic bytes when content-type is wrong/missing
     if (buf[0] === 0xff && buf[1] === 0xd8) return { buf, mime: 'image/jpeg' };
     if (buf[0] === 0x89 && buf[1] === 0x50) return { buf, mime: 'image/png' };
     if (buf[0] === 0x52 && buf[1] === 0x49) return { buf, mime: 'image/webp' };

@@ -1182,6 +1182,24 @@ export class SuppliersService {
       );
   }
 
+  async getInvoice(user: AuthUser, id: string) {
+    const inv = await this.prisma.supplierInvoice.findFirst({
+      where: { id, tenantId: user.tenantId },
+      include: {
+        supplier: { select: { id: true, name: true, phone: true, email: true } },
+        purchaseOrder: { select: { id: true, poNumber: true } },
+        goodsReceipt: { select: { id: true, grnNumber: true } },
+        payments: { orderBy: { paidAt: 'desc' } },
+      },
+    });
+    if (!inv) throw new NotFoundException('Supplier invoice not found');
+    const mapped = this.mapInvoice(inv);
+    return {
+      ...mapped,
+      payments: (inv.payments ?? []).map((p) => this.mapPayment(p)),
+    };
+  }
+
   async payInvoice(
     user: AuthUser,
     invoiceId: string,
@@ -1208,6 +1226,18 @@ export class SuppliersService {
       );
     }
 
+    const chequeBits = [
+      dto.chequeNumber?.trim() ? `Cheque ${dto.chequeNumber.trim()}` : '',
+      dto.chequeBank?.trim() || '',
+      dto.chequeDate?.trim() || '',
+      dto.chequePayee?.trim() ? `Payee ${dto.chequePayee.trim()}` : '',
+    ].filter(Boolean);
+    const chequeNote = chequeBits.length ? chequeBits.join(' · ') : '';
+    const notes = [dto.notes?.trim(), chequeNote].filter(Boolean).join(' | ') || null;
+    const method =
+      dto.method?.trim() ||
+      (dto.chequeNumber?.trim() ? 'cheque' : 'bank_transfer');
+
     return this.prisma.$transaction(async (tx) => {
       const payment = await tx.supplierPayment.create({
         data: {
@@ -1215,13 +1245,13 @@ export class SuppliersService {
           supplierId: inv.supplierId,
           supplierInvoiceId: inv.id,
           amount: amount.toFixed(2),
-          method: (dto.method?.trim() || 'bank_transfer').slice(0, 32),
+          method: method.slice(0, 32),
           kind:
             dto.kind === 'refund' || isCredit
               ? 'refund'
               : 'payment',
-          reference: dto.reference?.trim() || null,
-          notes: dto.notes?.trim() || null,
+          reference: dto.reference?.trim() || dto.chequeNumber?.trim() || null,
+          notes,
           actorUserId: user.userId,
         },
       });

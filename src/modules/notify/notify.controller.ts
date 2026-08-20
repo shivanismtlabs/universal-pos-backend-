@@ -31,6 +31,7 @@ import {
 import { NotifyService } from './notify.service';
 import { NotificationEngineService } from './notification-engine.service';
 import { FirebasePushService } from './firebase-push.service';
+import { PaymentDueAlertService } from './payment-due-alert.service';
 
 @ApiTags('notify')
 @ApiBearerAuth('access-token')
@@ -40,6 +41,7 @@ export class NotifyController {
     private readonly notifyService: NotifyService,
     private readonly engine: NotificationEngineService,
     private readonly firebase: FirebasePushService,
+    private readonly dueAlerts: PaymentDueAlertService,
   ) {}
 
   @Get('config')
@@ -52,8 +54,17 @@ export class NotifyController {
   @Get('inbox')
   @Roles(...RoleGroup.all)
   @ApiOperation({ summary: 'In-app notification center for current user' })
-  inbox(@CurrentUser() user: AuthUser, @Query() query: ListInboxQueryDto) {
+  async inbox(@CurrentUser() user: AuthUser, @Query() query: ListInboxQueryDto) {
+    void this.dueAlerts.scanTenant(user.tenantId);
     return this.engine.listForUser(user, query);
+  }
+
+  @Post('due-scan')
+  @Roles(...RoleGroup.all)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Refresh due / EMI payment alerts' })
+  scanDue(@CurrentUser() user: AuthUser) {
+    return this.dueAlerts.scanTenant(user.tenantId);
   }
 
   @Get('inbox/unread-count')

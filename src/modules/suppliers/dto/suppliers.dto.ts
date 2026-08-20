@@ -533,6 +533,29 @@ export class PaySupplierInvoiceDto {
   @IsString()
   @MaxLength(500)
   notes?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  chequeNumber?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  chequeBank?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsDateString()
+  chequeDate?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  chequePayee?: string;
 }
 
 export class CreateSupplierPaymentDto {

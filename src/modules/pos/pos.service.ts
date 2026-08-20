@@ -896,12 +896,26 @@ export class PosService {
     dto: AdjustSaleStockDto,
   ) {
     await this.assertSaleShop(user.tenantId);
-    const level = await this.prisma.stockLevel.findFirst({
+    let level = await this.prisma.stockLevel.findFirst({
       where: { id: stockLevelId, tenantId: user.tenantId },
       include: {
         product: { select: { id: true, name: true, skuCode: true } },
       },
     });
+    if (!level) {
+      const locationId = await this.defaultLocationId(user.tenantId, user);
+      level = await this.prisma.stockLevel.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          productId: stockLevelId,
+          ...(locationId ? { locationId } : {}),
+        },
+        include: {
+          product: { select: { id: true, name: true, skuCode: true } },
+        },
+        orderBy: { updatedAt: 'desc' },
+      });
+    }
     if (!level) throw new NotFoundException('Product not found');
 
     const unit = normalizeSellUnit(level.sellUnit);
@@ -961,6 +975,12 @@ export class PosService {
           reason: dto.reason?.trim() || null,
         },
       },
+    });
+
+    void this.lowStock.evaluate({
+      tenantId: user.tenantId,
+      locationId: level.locationId,
+      productId: level.productId,
     });
 
     return {
@@ -1686,6 +1706,7 @@ export class PosService {
             trackQty: true,
             trackSerial: true,
             trackBatch: true,
+            kind: true,
             category: { select: { id: true, name: true } },
           },
         },
@@ -1760,6 +1781,7 @@ export class PosService {
                 trackQty: true,
                 trackSerial: true,
                 trackBatch: true,
+                kind: true,
                 category: { select: { id: true, name: true } },
               },
             },
@@ -1842,6 +1864,7 @@ export class PosService {
       images,
       taxRatePercent,
       category: row.product.category,
+      kind: row.product.kind,
       requiresVariant: itemStructure === 'variants' || variants.length > 0,
       variantOptions: variants.map((v) => ({
         id: v.id,
@@ -2839,9 +2862,11 @@ export class PosService {
           );
         }
         if (p.method === PaymentMethod.emi) {
-          throw new BadRequestException(
-            `${cap.displayName} provider is not configured`,
-          );
+          if (!p.emiTenureMonths || !p.emiProvider?.trim()) {
+            throw new BadRequestException(
+              'EMI needs tenure (months) and provider / bank name',
+            );
+          }
         }
 
         const status = isInternalImmediate(p.method)
@@ -2945,15 +2970,13 @@ export class PosService {
                   },
                 }
               : {}),
-            ...(p.method === PaymentMethod.bank_transfer
+            ...(p.method === PaymentMethod.emi
               ? {
-                  gatewayRef: p.bankReference?.trim() || null,
+                  gatewayRef: p.emiReference?.trim() || null,
                   gatewayPayload: {
-                    bankReference: p.bankReference?.trim() || null,
-                    bankAccountName: p.bankAccountName?.trim() || null,
-                    bankAccountNumber: p.bankAccountNumber?.trim() || null,
-                    bankIfsc: p.bankIfsc?.trim() || null,
-                    bankName: p.bankName?.trim() || null,
+                    emiTenureMonths: p.emiTenureMonths,
+                    emiProvider: p.emiProvider?.trim() || null,
+                    emiReference: p.emiReference?.trim() || null,
                   },
                 }
               : {}),
@@ -3245,6 +3268,14 @@ export class PosService {
       tagline?: string;
     };
     const meta = (order.meta ?? {}) as Record<string, unknown>;
+    const locSettings =
+      order.location.settings && typeof order.location.settings === 'object'
+        ? (order.location.settings as Record<string, unknown>)
+        : {};
+    const locPhone =
+      typeof locSettings.phone === 'string' ? locSettings.phone.trim() : null;
+    const locEmail =
+      typeof locSettings.email === 'string' ? locSettings.email.trim() : null;
 
     return {
       orderId: order.id,
@@ -3256,6 +3287,8 @@ export class PosService {
         name: order.location.name,
         code: order.location.code,
         address: order.location.address,
+        phone: locPhone,
+        email: locEmail,
         shopName: tenant?.name ?? order.location.name,
         taxId: tenant?.taxId ?? null,
       },
@@ -3291,6 +3324,23 @@ export class PosService {
         unitPrice: item.unitPrice,
         taxAmount: item.taxAmount,
         lineTotal: item.lineTotal,
+        taxCode:
+          typeof itemMeta.taxCode === 'string'
+            ? itemMeta.taxCode
+            : (item.product?.taxCode ?? null),
+        taxRatePercent: (() => {
+          if (typeof itemMeta.taxRate === 'number') {
+            return Number((itemMeta.taxRate * 100).toFixed(4));
+          }
+          if (typeof itemMeta.taxRatePercent === 'number') {
+            return itemMeta.taxRatePercent;
+          }
+          return null;
+        })(),
+        hsnOrSac:
+          typeof itemMeta.hsnOrSac === 'string'
+            ? itemMeta.hsnOrSac
+            : item.product?.taxCode ?? null,
         inventoryUnit: item.stockUnit
           ? {
               barcodeSku: item.stockUnit.barcodeSku,
@@ -3855,7 +3905,13 @@ export class PosService {
           select: { id: true, fullName: true, phone: true, email: true },
         },
         location: {
-          select: { id: true, name: true, code: true, address: true },
+          select: {
+            id: true,
+            name: true,
+            code: true,
+            address: true,
+            settings: true,
+          },
         },
         items: {
           include: {
@@ -3863,7 +3919,9 @@ export class PosService {
               select: { id: true, barcodeSku: true, variantLabel: true },
             },
             stockLevel: { select: { id: true, sku: true } },
-            product: { select: { id: true, name: true, skuCode: true } },
+            product: {
+              select: { id: true, name: true, skuCode: true, taxCode: true },
+            },
           },
         },
         fees: true,

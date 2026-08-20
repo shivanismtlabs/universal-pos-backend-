@@ -230,6 +230,16 @@ export class SuppliersController {
     return this.suppliersService.listOutstanding(user);
   }
 
+  @Get('supplier-invoices/:id')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'Supplier invoice detail with payments' })
+  getInvoice(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.suppliersService.getInvoice(user, id);
+  }
+
   @Post('supplier-invoices/:id/pay')
   @ApiOperation({ summary: 'Record payment against supplier invoice' })
   payInvoice(

@@ -40,7 +40,7 @@ export const NOTIFICATION_TYPES = [
     code: 'payment_due',
     label: 'Payment due reminders',
     description: 'Customer receivables and supplier payables due/overdue',
-    defaultEnabled: false,
+    defaultEnabled: true,
     defaultRoles: ['accountant', 'manager', 'admin'] as string[],
     urgent: false,
   },

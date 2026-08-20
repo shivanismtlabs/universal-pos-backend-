@@ -4,6 +4,7 @@ import { NotifyController } from './notify.controller';
 import { NotifyService } from './notify.service';
 import { NotificationEngineService } from './notification-engine.service';
 import { LowStockAlertService } from './low-stock-alert.service';
+import { PaymentDueAlertService } from './payment-due-alert.service';
 import { FirebasePushService } from './firebase-push.service';
 
 /** Notifications — outbound (WA/SMS/email) + in-app engine + FCM push */
@@ -15,11 +16,13 @@ import { FirebasePushService } from './firebase-push.service';
     FirebasePushService,
     NotificationEngineService,
     LowStockAlertService,
+    PaymentDueAlertService,
   ],
   exports: [
     NotifyService,
     NotificationEngineService,
     LowStockAlertService,
+    PaymentDueAlertService,
     FirebasePushService,
   ],
 })

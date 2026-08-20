@@ -25,6 +25,19 @@ export class AiController {
     return this.images.generateProductImage(dto);
   }
 
+  @Post('product-image/search-real')
+  @Roles(...RoleGroup.catalogWrite)
+  @Throttle({
+    default: { limit: 12, ttl: 60_000 },
+  })
+  @ApiOperation({
+    summary:
+      'Find a real Creative Commons product photo by name (Openverse) — preferred over AI',
+  })
+  searchRealProductImage(@Body() dto: GenerateProductImageDto) {
+    return this.images.searchRealProductImage(dto);
+  }
+
   @Post('product-image/fallback-url')
   @Roles(...RoleGroup.catalogWrite)
   @Throttle({

@@ -246,6 +246,161 @@ export class AiImageService {
     });
   }
 
+  /**
+   * Search Openverse for a real Creative-Commons photo of the product.
+   * Much better than free AI for “looks real” catalog images.
+   */
+  async searchRealProductImage(dto: GenerateProductImageDto) {
+    const name = dto.name.trim();
+    if (name.length < 2) {
+      throw new BadRequestException('Product name is required');
+    }
+
+    const queries = this.buildSearchQueries(name, dto.hint?.trim());
+    let hit:
+      | {
+          title: string;
+          url: string;
+          thumbnail?: string;
+          license?: string;
+          foreign_landing_url?: string;
+        }
+      | undefined;
+
+    for (const q of queries) {
+      hit = await this.searchOpenverse(q);
+      if (hit?.url) break;
+    }
+
+    if (!hit?.url) {
+      throw new BadRequestException(
+        'No real photo found for this name. Try a clearer name (e.g. Malai Kofta) or upload your own photo.',
+      );
+    }
+
+    const imageUrl = hit.url;
+    const result = await this.fetchImageHttps(imageUrl, {
+      Accept: 'image/*,*/*',
+      'User-Agent': 'UniversalPOS/1.0 (catalog; contact@upos.local)',
+    });
+
+    return {
+      provider: 'openverse',
+      prompt: queries[0],
+      mime: result.mime,
+      bytes: result.buf.length,
+      imageBase64: `data:${result.mime};base64,${result.buf.toString('base64')}`,
+      sourceUrl: imageUrl,
+      attribution: {
+        title: hit.title || name,
+        license: hit.license || 'unknown',
+        landingUrl: hit.foreign_landing_url || null,
+      },
+    };
+  }
+
+  private buildSearchQueries(name: string, hint?: string): string[] {
+    const base = name.replace(/\s+/g, ' ').trim();
+    const lower = base.toLowerCase();
+    const out: string[] = [base];
+
+    if (hint) out.push(`${base} ${hint}`.slice(0, 120));
+
+    // Common Indian dish aliases / expansions
+    if (lower.includes('kofta') && !lower.includes('malai')) {
+      out.push('malai kofta');
+      out.push('malai kofta indian food');
+    }
+    if (lower.includes('pani') && lower.includes('kofta')) {
+      out.push('malai kofta');
+      out.push('kofta curry indian');
+    }
+    if (lower.includes('pani puri') || lower === 'pani') {
+      out.push('pani puri');
+      out.push('golgappa');
+    }
+
+    out.push(`${base} food`);
+    out.push(`${base} indian food`);
+
+    // Last token only (e.g. kofta)
+    const parts = lower.split(/\s+/).filter((p) => p.length > 2);
+    if (parts.length > 1) {
+      out.push(parts[parts.length - 1]);
+      out.push(`${parts[parts.length - 1]} indian dish`);
+    }
+
+    return [...new Set(out.map((q) => q.trim()).filter((q) => q.length >= 2))];
+  }
+
+  private async searchOpenverse(query: string): Promise<
+    | {
+        title: string;
+        url: string;
+        thumbnail?: string;
+        license?: string;
+        foreign_landing_url?: string;
+      }
+    | undefined
+  > {
+    const url =
+      `https://api.openverse.org/v1/images/?` +
+      new URLSearchParams({
+        q: query,
+        page_size: '8',
+        format: 'json',
+      }).toString();
+
+    const insecure = this.tlsInsecure();
+    const body = await new Promise<Buffer>((resolve, reject) => {
+      const req = https.get(
+        url,
+        {
+          headers: {
+            Accept: 'application/json',
+            'User-Agent': 'UniversalPOS/1.0',
+          },
+          timeout: 25_000,
+          rejectUnauthorized: !insecure,
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c) => chunks.push(c as Buffer));
+          res.on('end', () => resolve(Buffer.concat(chunks)));
+        },
+      );
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('openverse timeout'));
+      });
+    });
+
+    let json: {
+      results?: Array<{
+        title?: string;
+        url?: string;
+        thumbnail?: string;
+        license?: string;
+        foreign_landing_url?: string;
+      }>;
+    };
+    try {
+      json = JSON.parse(body.toString('utf8')) as typeof json;
+    } catch {
+      throw new Error('Openverse returned invalid JSON');
+    }
+
+    const results = json.results ?? [];
+    // Prefer direct image URLs that look downloadable
+    const preferred = results.find(
+      (r) =>
+        r.url &&
+        /\.(jpe?g|png|webp)(\?|$)/i.test(r.url),
+    );
+    return preferred || results.find((r) => r.url) || undefined;
+  }
+
   private parseImageBuffer(
     status: number,
     contentTypeHeader: string | null,

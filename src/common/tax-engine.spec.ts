@@ -3,6 +3,7 @@ import {
   buildTaxProfile,
   computeInvoiceTax,
   computeLineTax,
+  resolveProductTaxRatePercent,
 } from './tax-engine';
 
 describe('tax-engine', () => {
@@ -51,5 +52,21 @@ describe('tax-engine', () => {
       settings: { tax: { ratePercent: 5 } },
     });
     expect(computeInvoiceTax(profile, 200).totalTax).toBe(10);
+  });
+
+  it('reads GST/VAT tagged tax codes as rates', () => {
+    expect(resolveProductTaxRatePercent({ taxCode: 'GST5' })).toBe(5);
+    expect(resolveProductTaxRatePercent({ taxCode: 'GST18' })).toBe(18);
+    expect(resolveProductTaxRatePercent({ taxCode: 'VAT20' })).toBe(20);
+    expect(resolveProductTaxRatePercent({ taxCode: '18' })).toBe(18);
+  });
+
+  it('does not treat HSN/SAC codes as tax rates', () => {
+    expect(resolveProductTaxRatePercent({ taxCode: '1905' })).toBeNull();
+    expect(resolveProductTaxRatePercent({ taxCode: '9987' })).toBeNull();
+    expect(resolveProductTaxRatePercent({ taxCode: '6103' })).toBeNull();
+    expect(
+      resolveProductTaxRatePercent({ taxCode: '24AABCG9603R1ZN' }),
+    ).toBeNull();
   });
 });

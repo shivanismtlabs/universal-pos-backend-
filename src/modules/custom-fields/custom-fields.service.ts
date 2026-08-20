@@ -32,6 +32,20 @@ export class CustomFieldsService {
 
   async createDefinition(user: AuthUser, dto: CreateCustomFieldDefinitionDto) {
     try {
+      let optionsJson: Prisma.InputJsonValue = [];
+      if (dto.options != null) {
+        if (Array.isArray(dto.options)) {
+          optionsJson = dto.options as Prisma.InputJsonValue;
+        } else if (
+          typeof dto.options === 'object' &&
+          Array.isArray((dto.options as { options?: unknown }).options)
+        ) {
+          optionsJson = (dto.options as { options: unknown[] })
+            .options as Prisma.InputJsonValue;
+        } else {
+          optionsJson = dto.options as Prisma.InputJsonValue;
+        }
+      }
       const row = await this.prisma.customFieldDefinition.create({
         data: {
           tenantId: user.tenantId,
@@ -40,7 +54,7 @@ export class CustomFieldsService {
           label: dto.label.trim(),
           dataType: dto.dataType.trim().toLowerCase(),
           required: dto.required ?? false,
-          options: (dto.options ?? []) as Prisma.InputJsonValue,
+          options: optionsJson,
           moduleCode: dto.moduleCode,
           sortOrder: dto.sortOrder ?? 0,
         },

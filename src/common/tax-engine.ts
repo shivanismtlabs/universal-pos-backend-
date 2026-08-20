@@ -199,16 +199,29 @@ export function resolveProductTaxRatePercent(input: {
     typeof meta.taxRatePercent === 'string' &&
     meta.taxRatePercent.trim() !== ''
   ) {
-    const n = Number(meta.taxRatePercent);
+    const n = Number(meta.taxRatePercent.replace(/%/g, '').trim());
     if (Number.isFinite(n)) return Math.min(40, Math.max(0, n));
   }
   const code = input.taxCode?.trim();
   if (!code) return null;
-  const m = code.match(/(?:GST|VAT|TAX)?\s*(\d+(?:\.\d+)?)\s*%?/i);
-  if (!m) return null;
-  const n = Number(m[1]);
-  if (!Number.isFinite(n)) return null;
-  return Math.min(40, Math.max(0, n));
+
+  // Explicit rate tags only — never treat HSN/SAC (e.g. 1905, 9987) as a %.
+  const tagged = code.match(/^(?:GST|VAT|TAX)\s*(\d+(?:\.\d+)?)\s*%?$/i);
+  if (tagged) {
+    const n = Number(tagged[1]);
+    if (!Number.isFinite(n)) return null;
+    return Math.min(40, Math.max(0, n));
+  }
+
+  // Bare percent like "5" / "18%" — 1–2 digit rates only (HSN is 4+ digits).
+  const bare = code.match(/^(\d{1,2}(?:\.\d+)?)\s*%?$/);
+  if (bare) {
+    const n = Number(bare[1]);
+    if (!Number.isFinite(n) || n > 40) return null;
+    return Math.max(0, n);
+  }
+
+  return null;
 }
 
 /** Invoice breakdown from order subtotal (net) using profile rate. */

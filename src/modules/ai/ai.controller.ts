@@ -24,4 +24,17 @@ export class AiController {
   generateProductImage(@Body() dto: GenerateProductImageDto) {
     return this.images.generateProductImage(dto);
   }
+
+  @Post('product-image/fallback-url')
+  @Roles(...RoleGroup.catalogWrite)
+  @Throttle({
+    default: { limit: 20, ttl: 60_000 },
+  })
+  @ApiOperation({
+    summary:
+      'Build a Pollinations image URL for browser-side fallback when server cannot reach AI',
+  })
+  fallbackUrl(@Body() dto: GenerateProductImageDto) {
+    return this.images.buildClientFallbackUrl(dto.name, dto.hint);
+  }
 }

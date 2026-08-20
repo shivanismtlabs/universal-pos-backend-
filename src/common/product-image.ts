@@ -68,3 +68,93 @@ export async function saveProductImage(
 
   return `/v1/uploads/products/${tenantId}/${filename}`;
 }
+
+function mimeFromMagic(buf: Buffer): string | null {
+  if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50) return 'image/png';
+  if (buf[0] === 0x52 && buf[1] === 0x49) return 'image/webp';
+  if (buf[0] === 0x47 && buf[1] === 0x49) return 'image/gif';
+  return null;
+}
+
+function normalizeRemoteImageUrl(url: string): string {
+  if (/^https:\/\/images\.unsplash\.com\/photo-[^?]+$/i.test(url)) {
+    return `${url}?auto=format&fit=crop&w=800&q=80`;
+  }
+  return url;
+}
+
+/**
+ * Download an http(s) catalog image and store it under uploads/.
+ */
+export async function saveRemoteProductImage(
+  tenantId: string,
+  imageUrl: string,
+): Promise<string> {
+  const url = normalizeRemoteImageUrl(imageUrl.trim());
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20_000);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      redirect: 'follow',
+      headers: {
+        Accept: 'image/avif,image/webp,image/*,*/*;q=0.8',
+        'User-Agent': 'UniversalPOS/1.0 (catalog import)',
+      },
+    });
+    if (!res.ok) {
+      throw new BadRequestException(`Could not download image (${res.status})`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    const headerMime = (res.headers.get('content-type') || '')
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+    const mime = headerMime.startsWith('image/')
+      ? headerMime === 'image/jpg'
+        ? 'image/jpeg'
+        : headerMime
+      : mimeFromMagic(buf);
+    if (!mime) {
+      throw new BadRequestException('Downloaded file is not an image');
+    }
+    return saveProductImage(
+      tenantId,
+      `data:${mime};base64,${buf.toString('base64')}`,
+    );
+  } catch (e) {
+    if (e instanceof BadRequestException) throw e;
+    throw new BadRequestException(
+      e instanceof Error ? e.message : 'Could not download image',
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Persist data-URL images; download http(s) photos; keep local upload paths.
+ * Remote download failures fall back to storing the original URL.
+ */
+export async function resolveProductPhoto(
+  tenantId: string,
+  raw?: string | null,
+): Promise<string | null> {
+  const value = raw?.trim();
+  if (!value) return null;
+  if (value.startsWith('data:')) {
+    return saveProductImage(tenantId, value);
+  }
+  if (value.startsWith('/v1/uploads/')) {
+    return value;
+  }
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      return await saveRemoteProductImage(tenantId, value);
+    } catch {
+      return value;
+    }
+  }
+  return value;
+}

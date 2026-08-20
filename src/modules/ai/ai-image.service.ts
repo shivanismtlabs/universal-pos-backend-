@@ -395,10 +395,18 @@ export class AiImageService {
     // Prefer direct image URLs that look downloadable
     const preferred = results.find(
       (r) =>
-        r.url &&
-        /\.(jpe?g|png|webp)(\?|$)/i.test(r.url),
+        Boolean(r.url) &&
+        /\.(jpe?g|png|webp)(\?|$)/i.test(r.url ?? ''),
     );
-    return preferred || results.find((r) => r.url) || undefined;
+    const hit = preferred ?? results.find((r) => Boolean(r.url));
+    if (!hit?.url) return undefined;
+    return {
+      title: hit.title || query,
+      url: hit.url,
+      thumbnail: hit.thumbnail,
+      license: hit.license,
+      foreign_landing_url: hit.foreign_landing_url,
+    };
   }
 
   private parseImageBuffer(

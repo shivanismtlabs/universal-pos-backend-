@@ -29,7 +29,6 @@ import {
   CheckoutDto,
   CloseRegisterDto,
   RegisterCashMovementDto,
-  ImportSaleProductsDto,
   OpenRegisterDto,
   ParkSaleDto,
   PrepareSaleCheckoutDto,
@@ -48,6 +47,7 @@ import {
   UpdateSaleProductDto,
   UploadSaleImageDto,
 } from './dto/pos.dto';
+import { ImportSaleProductsDto } from './dto/import-sale-products.dto';
 import { PosService } from './pos.service';
 import { RentalPosService } from './rental-pos.service';
 import { SaleReturnsService } from './sale-returns.service';

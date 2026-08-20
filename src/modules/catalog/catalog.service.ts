@@ -42,24 +42,19 @@ import {
   UpdateVariantDto,
 } from './dto/catalog.dto';
 import { randomBytes } from 'crypto';
-import { saveProductImage } from '../../common/product-image';
+import { resolveProductPhoto, saveProductImage } from '../../common/product-image';
 
 function dec(n: number | null | undefined) {
   if (n == null || !Number.isFinite(n)) return null;
   return new Prisma.Decimal(n);
 }
 
-/** Persist data-URL / base64 images; keep http(s) and /v1/uploads paths as-is. */
+/** Persist data-URL / remote http(s) photos; keep /v1/uploads paths. */
 async function resolveImageRef(
   tenantId: string,
   raw?: string | null,
 ): Promise<string | null> {
-  const value = raw?.trim();
-  if (!value) return null;
-  if (value.startsWith('data:')) {
-    return saveProductImage(tenantId, value);
-  }
-  return value;
+  return resolveProductPhoto(tenantId, raw);
 }
 
 async function resolveImageList(

@@ -32,7 +32,10 @@ import {
   validateSku,
 } from '../../common/sell-units';
 import { parseMeasureUnits } from '../../common/measure-units';
-import { saveProductImage } from '../../common/product-image';
+import {
+  resolveProductPhoto,
+  saveProductImage,
+} from '../../common/product-image';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import { nextInternalCode128Candidate } from '../../common/barcode';
 import { resolveDefaultLocationId } from '../../common/location-access';
@@ -121,7 +124,6 @@ import {
   AdjustSaleStockDto,
   CheckoutDto,
   CloseRegisterDto,
-  ImportSaleProductsDto,
   OpenRegisterDto,
   ParkSaleDto,
   PrepareSaleCheckoutDto,
@@ -130,6 +132,7 @@ import {
   UpdateSaleProductDto,
   UploadSaleImageDto,
 } from './dto/pos.dto';
+import { ImportSaleProductsDto } from './dto/import-sale-products.dto';
 
 const READY_FROM: OrderStatus[] = [
   OrderStatus.confirmed,
@@ -334,13 +337,10 @@ export class PosService {
     }
 
     try {
-      let photoUrl: string | null = null;
-      const rawImage = (dto.image ?? dto.photoUrl)?.trim();
-      if (rawImage) {
-        photoUrl = rawImage.startsWith('data:')
-          ? await saveProductImage(user.tenantId, rawImage)
-          : rawImage;
-      }
+      const photoUrl = await resolveProductPhoto(
+        user.tenantId,
+        dto.image ?? dto.photoUrl,
+      );
 
       const product = await this.prisma.product.create({
         data: {
@@ -658,6 +658,7 @@ export class PosService {
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i]!;
+      const image = row.image ?? row.photoUrl;
       try {
         let cat: { id: string; name: string };
         if (
@@ -685,6 +686,7 @@ export class PosService {
           reorderPoint: row.reorderPoint,
           hsnOrSac: row.hsnOrSac,
           trackInventory: row.trackInventory,
+          image,
         });
         created.push({
           sku: res.product.sku ?? row.sku,
@@ -701,10 +703,27 @@ export class PosService {
             : e instanceof Error
               ? e.message
               : 'Import failed';
+        const text = Array.isArray(message) ? message.join(', ') : message;
+        if (/SKU already exists/i.test(text) && image?.trim()) {
+          const attached = await this.attachSaleProductImageBySku(
+            user,
+            locationId,
+            row.sku,
+            image,
+          );
+          if (attached) {
+            created.push({
+              sku: row.sku,
+              title: row.title,
+              id: attached,
+            });
+            continue;
+          }
+        }
         errors.push({
           row: i + 1,
           sku: row.sku,
-          message: Array.isArray(message) ? message.join(', ') : message,
+          message: text,
         });
       }
     }
@@ -716,6 +735,45 @@ export class PosService {
       created,
       errors,
     };
+  }
+
+  /** If SKU already exists, attach CSV image_url onto that item. */
+  private async attachSaleProductImageBySku(
+    user: AuthUser,
+    locationId: string,
+    sku: string,
+    image: string,
+  ): Promise<string | null> {
+    const code = sku.trim().toUpperCase();
+    const level = await this.prisma.stockLevel.findFirst({
+      where: {
+        tenantId: user.tenantId,
+        locationId,
+        sku: code,
+        product: { fulfillmentMode: FulfillmentMode.sale },
+      },
+      include: { product: true },
+    });
+    if (!level) return null;
+    const photoUrl = await resolveProductPhoto(user.tenantId, image);
+    if (!photoUrl) return null;
+    const existing = productImageList(
+      level.product.photoUrl,
+      level.product.meta,
+    );
+    const images = [photoUrl, ...existing.filter((u) => u !== photoUrl)].slice(
+      0,
+      MAX_PRODUCT_IMAGES,
+    );
+    const meta = asMeta(level.product.meta);
+    await this.prisma.product.update({
+      where: { id: level.productId },
+      data: {
+        photoUrl,
+        meta: { ...meta, images } as Prisma.InputJsonValue,
+      },
+    });
+    return level.id;
   }
 
   /** All sale products (incl. zero stock) — manage + sell */

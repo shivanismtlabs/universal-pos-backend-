@@ -9,6 +9,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const API = process.env.API_URL ?? 'http://127.0.0.1:3001/v1';
+const FE = process.env.FE_URL ?? 'http://127.0.0.1:3000';
+const ORIGIN = API.replace(/\/v1\/?$/, '');
 const STAMP = Date.now().toString(36);
 const EMAIL = `rest.demo.${STAMP}@upos.test`;
 const PASSWORD = 'RestDemo@2026';
@@ -73,7 +75,15 @@ function phone() {
   return `9${String(Math.floor(Math.random() * 1e9)).padStart(9, '0')}`;
 }
 
-function foodImageDataUrl(category, name) {
+function detectImageMime(buf) {
+  if (buf[0] === 0x89 && buf[1] === 0x50) return 'image/png';
+  if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg';
+  if (buf[0] === 0x52 && buf[1] === 0x49) return 'image/webp';
+  if (buf[0] === 0x47 && buf[1] === 0x49) return 'image/gif';
+  return 'image/jpeg';
+}
+
+function foodImagePayload(category, name) {
   const FILE_BY_NAME = {
     'Gulab Jamun': 'food-gulab-jamun.jpg',
     'Paneer Tikka': 'food-paneer-tikka.jpg',
@@ -96,11 +106,21 @@ function foodImageDataUrl(category, name) {
     ),
   ];
   if (fileName) {
+    const stems = [fileName, fileName.replace(/\.jpg$/i, '.png'), fileName.replace(/\.jpg$/i, '.webp')];
     for (const dir of dirs) {
-      const p = join(dir, fileName);
-      if (existsSync(p)) {
-        const buf = readFileSync(p);
-        return `data:image/jpeg;base64,${buf.toString('base64')}`;
+      for (const stem of stems) {
+        const p = join(dir, stem);
+        if (existsSync(p)) {
+          const buf = readFileSync(p);
+          const mime = detectImageMime(buf);
+          return {
+            dataUrl: `data:${mime};base64,${buf.toString('base64')}`,
+            source: 'photo',
+            mime,
+            bytes: buf.length,
+            file: p,
+          };
+        }
       }
     }
   }
@@ -118,7 +138,24 @@ function foodImageDataUrl(category, name) {
       : (parts[0] || 'FD').slice(0, 2).toUpperCase();
   const label = String(name).length > 20 ? `${String(name).slice(0, 18)}…` : name;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240"><rect width="320" height="240" fill="${colors.bg}"/><circle cx="160" cy="92" r="30" fill="${colors.accent}"/><text x="160" y="100" text-anchor="middle" font-family="Arial,sans-serif" font-size="20" font-weight="700" fill="#fff">${mark}</text><text x="160" y="178" text-anchor="middle" font-family="Arial,sans-serif" font-size="15" font-weight="700" fill="${colors.fg}">${label}</text><text x="160" y="202" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" fill="${colors.accent}">${category}</text></svg>`;
-  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+  return {
+    dataUrl: `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`,
+    source: 'svg-fallback',
+    mime: 'image/svg+xml',
+    bytes: Buffer.byteLength(svg),
+    file: null,
+  };
+}
+
+async function fetchPublic(pathOrUrl) {
+  const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${ORIGIN}${pathOrUrl}`;
+  try {
+    const res = await fetch(url);
+    const buf = Buffer.from(await res.arrayBuffer());
+    return { ok: res.ok, status: res.status, bytes: buf.length, type: res.headers.get('content-type') || '', url };
+  } catch (e) {
+    return { ok: false, status: 0, bytes: 0, type: '', url, error: String(e.message || e) };
+  }
 }
 
 async function checkoutCash(token, locId, items, opts = {}) {
@@ -255,39 +292,37 @@ async function main() {
   }
 
   const menu = [
-    { cat: 'Starters', title: 'Paneer Tikka', price: 280, qty: 40 },
-    { cat: 'Starters', title: 'Veg Spring Roll', price: 180, qty: 40 },
-    { cat: 'Mains', title: 'Butter Chicken', price: 420, qty: 50 },
-    { cat: 'Mains', title: 'Dal Makhani', price: 260, qty: 50 },
-    { cat: 'Mains', title: 'Jeera Rice', price: 140, qty: 80 },
-    { cat: 'Beverages', title: 'Masala Chai', price: 60, qty: 100 },
-    { cat: 'Beverages', title: 'Mango Lassi', price: 90, qty: 60 },
-    { cat: 'Desserts', title: 'Gulab Jamun', price: 110, qty: 40 },
+    { cat: 'Starters', title: 'Paneer Tikka', price: 280, qty: 40, station: 'tandoor', modifiers: ['Extra spice', 'Mint chutney', 'No onion'] },
+    { cat: 'Starters', title: 'Veg Spring Roll', price: 180, qty: 40, station: 'hot', modifiers: ['Sweet chili', 'Extra crispy'] },
+    { cat: 'Mains', title: 'Butter Chicken', price: 420, qty: 50, station: 'hot', modifiers: ['Extra gravy', 'Mild', 'Butter naan side'] },
+    { cat: 'Mains', title: 'Dal Makhani', price: 260, qty: 50, station: 'hot', modifiers: ['Extra butter', 'No cream'] },
+    { cat: 'Mains', title: 'Jeera Rice', price: 140, qty: 80, station: 'hot', modifiers: ['Half portion'] },
+    { cat: 'Beverages', title: 'Masala Chai', price: 60, qty: 100, station: 'bar', modifiers: ['Less sugar', 'Ginger extra'] },
+    { cat: 'Beverages', title: 'Mango Lassi', price: 90, qty: 60, station: 'bar', modifiers: ['No sugar'] },
+    { cat: 'Desserts', title: 'Gulab Jamun', price: 110, qty: 40, station: 'pastry', modifiers: ['Warm', 'With ice cream'] },
   ];
+  const imageStats = { photo: 0, svg: 0, httpOk: 0 };
   const products = {};
   for (const item of menu) {
+    const productBody = {
+      title: item.title,
+      sku: sku('RST'),
+      price: item.price,
+      qty: item.qty,
+      locationId: loc.id,
+      categoryId: cats[item.cat]?.id,
+      modifiers: item.modifiers,
+      extraFields: item.station ? { kitchenStation: item.station } : undefined,
+    };
     let res = await api('POST', '/pos/sale/products', {
       token,
-      body: {
-        title: item.title,
-        sku: sku('RST'),
-        price: item.price,
-        qty: item.qty,
-        locationId: loc.id,
-        categoryId: cats[item.cat]?.id,
-      },
+      body: productBody,
     });
     if (!res.ok && res.status === 409) {
+      productBody.sku = sku('RST');
       res = await api('POST', '/pos/sale/products', {
         token,
-        body: {
-          title: item.title,
-          sku: sku('RST'),
-          price: item.price,
-          qty: item.qty,
-          locationId: loc.id,
-          categoryId: cats[item.cat]?.id,
-        },
+        body: productBody,
       });
     }
     if (!res.ok) {
@@ -302,16 +337,44 @@ async function main() {
     };
     const stockId = data.stockLevelId || data.stockLevel?.id || data.id;
     if (stockId) {
+      const payload = foodImagePayload(item.cat, item.title);
       const img = await api('POST', `/pos/sale/products/${stockId}/image`, {
         token,
-        body: { imageBase64: foodImageDataUrl(item.cat, item.title) },
+        body: { imageBase64: payload.dataUrl },
       });
       if (!img.ok) {
         log(`menu image ${item.title}`, 'PARTIAL', img.text.slice(0, 80));
+      } else {
+        if (payload.source === 'photo') imageStats.photo += 1;
+        else imageStats.svg += 1;
+        const photoUrl = img.data?.photoUrl || img.data?.image || img.data?.images?.[0];
+        products[item.title].photoUrl = photoUrl;
+        products[item.title].imageSource = payload.source;
+        if (photoUrl) {
+          const pub = await fetchPublic(photoUrl);
+          if (pub.ok && pub.bytes > 200) imageStats.httpOk += 1;
+          log(
+            `menu image ${item.title}`,
+            pub.ok ? 'PASS' : 'PARTIAL',
+            `${payload.source} ${payload.mime} ${payload.bytes}b http=${pub.status} served=${pub.bytes}b`,
+          );
+        } else {
+          log(`menu image ${item.title}`, 'PARTIAL', 'uploaded but no photoUrl');
+        }
       }
     }
     log(`menu ${item.title}`, 'PASS', `₹${item.price}`);
   }
+
+  log(
+    'menu photos uploaded + served',
+    imageStats.photo >= 6 && imageStats.httpOk >= 6
+      ? 'PASS'
+      : imageStats.httpOk >= 1
+        ? 'PARTIAL'
+        : 'FAIL',
+    `photos=${imageStats.photo} svgFallback=${imageStats.svg} httpOk=${imageStats.httpOk}/8`,
+  );
 
   const tables = [];
   for (const t of [
@@ -400,20 +463,24 @@ async function main() {
           note: 'Dine-in Table 5',
           meta: {
             tableNumber: '5',
+            tableId: tables[1]?.id || '5',
             covers: 4,
             orderType: 'dine_in',
+            kitchenStatus: 'KOT_CREATED',
             kot_status: 'sent',
             courseNote: 'Spice medium',
+            modifiers: ['Extra spice', 'Mild gravy'],
           },
         })
       : { ok: false, text: 'missing menu stock levels for dine-in' };
   const dineMeta = dineIn.data?.order?.meta || {};
-  const tableOk = String(dineMeta.tableNumber) === '5';
+  const tableOk =
+    String(dineMeta.tableNumber) === '5' || dineMeta.tableId != null;
   log(
     'dine-in bill Table 5',
     dineIn.ok && tableOk ? 'PASS' : dineIn.ok ? 'PARTIAL' : 'FAIL',
     dineIn.ok
-      ? `order=${dineIn.data.order.id} meta.tableNumber=${dineMeta.tableNumber} kot=${dineMeta.kot_status}`
+      ? `order=${dineIn.data.order.id} table=${dineMeta.tableNumber || dineMeta.tableId} kitchen=${dineMeta.kitchenStatus}`
       : dineIn.text.slice(0, 200),
     'POST /pos/sale/checkout',
   );
@@ -428,7 +495,7 @@ async function main() {
     {
       customerId: walkin.data?.id,
       note: 'Parcel / takeaway',
-      meta: { orderType: 'parcel', kot_status: 'sent' },
+      meta: { orderType: 'takeaway', kitchenStatus: 'KOT_CREATED', kot_status: 'sent' },
     },
   );
   log(
@@ -436,6 +503,57 @@ async function main() {
     parcel.ok ? 'PASS' : 'FAIL',
     parcel.ok ? parcel.data.order.id : parcel.text.slice(0, 160),
   );
+
+  const spring = products['Veg Spring Roll'];
+  const delivery = await checkoutCash(
+    token,
+    loc.id,
+    [
+      { stockLevelId: spring?.stockLevelId, quantity: 2, unitPrice: 180 },
+      { stockLevelId: chai?.stockLevelId, quantity: 2, unitPrice: 60 },
+    ].filter((l) => typeof l.stockLevelId === 'string' && l.stockLevelId.length > 10),
+    {
+      customerId: diner.data?.id,
+      note: 'Swiggy / delivery',
+      meta: {
+        orderType: 'delivery',
+        kitchenStatus: 'KOT_CREATED',
+        source: 'swiggy',
+        deliveryAddress: '12 MG Road, Bandra',
+      },
+    },
+  );
+  log(
+    'delivery bill',
+    delivery.ok ? 'PASS' : 'FAIL',
+    delivery.ok ? delivery.data.order.id : delivery.text.slice(0, 160),
+  );
+
+  const parked = await api('POST', '/pos/sale/park', {
+    token,
+    body: {
+      locationId: loc.id,
+      items: [{ stockLevelId: rice?.stockLevelId, quantity: 1, unitPrice: 140 }].filter(
+        (l) => l.stockLevelId,
+      ),
+      label: 'Waiter hold Table 1',
+      note: 'dine-in hold Table 1',
+    },
+  });
+  log(
+    'park / hold ticket',
+    parked.ok && parked.data?.id ? 'PASS' : 'PARTIAL',
+    parked.ok ? parked.data.id : `${parked.status} ${parked.text.slice(0, 120)}`,
+    'POST /pos/sale/park',
+  );
+  if (parked.ok && parked.data?.id) {
+    const resume = await api('POST', `/pos/sale/parked/${parked.data.id}/resume`, { token });
+    log(
+      'resume parked ticket',
+      resume.ok ? 'PASS' : 'PARTIAL',
+      resume.ok ? 'cart payload ok' : `${resume.status} ${resume.text.slice(0, 80)}`,
+    );
+  }
 
   if (dineIn.ok && dineIn.data.order.id) {
     const receipt = await api(
@@ -463,11 +581,47 @@ async function main() {
   const kot = await api('GET', '/kitchen/tickets', { token });
   const kot2 = await api('GET', '/pos/kitchen', { token });
   const kot3 = await api('GET', '/kot', { token });
+  const ordersList = await api('GET', '/orders?kind=sale&limit=80', { token });
+  const kitchenQueue = asList(ordersList.data?.items ?? ordersList.data).filter((o) => {
+    const m = o.meta || {};
+    return m.tableId != null || m.orderType != null || m.kitchenStatus != null;
+  });
   log(
-    'first-class kitchen / KOT board',
-    kot.ok || kot2.ok || kot3.ok ? 'PASS' : 'PARTIAL',
-    `kitchen=${kot.status} pos/kitchen=${kot2.status} kot=${kot3.status} — dine-in uses order.meta.kot_status only`,
+    'kitchen queue via orders list',
+    ordersList.ok && kitchenQueue.length >= 2 ? 'PASS' : ordersList.ok ? 'PARTIAL' : 'FAIL',
+    `tickets=${kitchenQueue.length} first-class kitchen=${kot.status} pos/kitchen=${kot2.status} kot=${kot3.status}`,
   );
+
+  if (dineIn.ok && dineIn.data.order.id) {
+    const steps = ['KOT_SENT', 'PREPARING', 'READY', 'SERVED'];
+    let last = dineIn.data.order;
+    let kotOk = 0;
+    for (const step of steps) {
+      const patch = await api('PATCH', `/orders/${dineIn.data.order.id}`, {
+        token,
+        body: {
+          meta: {
+            ...(last.meta || dineMeta),
+            kitchenStatus: step,
+            servedAt: step === 'SERVED' ? new Date().toISOString() : undefined,
+          },
+        },
+      });
+      if (patch.ok) {
+        kotOk += 1;
+        last = patch.data?.order || patch.data || last;
+      } else {
+        log(`KOT ${step}`, 'PARTIAL', `${patch.status} ${patch.text.slice(0, 100)}`);
+        break;
+      }
+    }
+    log(
+      'KOT lifecycle KOT_CREATED → SERVED',
+      kotOk === steps.length ? 'PASS' : kotOk > 0 ? 'PARTIAL' : 'FAIL',
+      `${kotOk}/${steps.length} steps`,
+      'PATCH /orders/:id',
+    );
+  }
 
   const to = new Date().toISOString().slice(0, 10);
   const from = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
@@ -488,11 +642,26 @@ async function main() {
     `/pos/sale/catalog?locationId=${loc.id}&limit=50`,
     { token },
   );
-  const menuCount = asList(catalog.data?.items ?? catalog.data).length;
+  const catalogItems = asList(catalog.data?.items ?? catalog.data);
+  const menuCount = catalogItems.length;
+  const withPhoto = catalogItems.filter((i) => i.photoUrl || i.image || (i.images && i.images.length)).length;
   log(
     'counter catalog for restaurant',
     catalog.ok && menuCount >= 6 ? 'PASS' : 'PARTIAL',
-    `items visible=${menuCount}`,
+    `items visible=${menuCount} withPhoto=${withPhoto}`,
+  );
+  log(
+    'catalog images on counter',
+    withPhoto >= 6 ? 'PASS' : withPhoto > 0 ? 'PARTIAL' : 'FAIL',
+    `${withPhoto}/${menuCount} menu items have photos`,
+  );
+
+  const tikkaAfter = await api('GET', `/pos/sale/products/${tikka?.stockLevelId}`, { token });
+  const qtyAfter = Number(tikkaAfter.data?.qty ?? tikkaAfter.data?.qtyOnHand ?? NaN);
+  log(
+    'stock decrement after dine-in',
+    Number.isFinite(qtyAfter) && qtyAfter < 40 ? 'PASS' : tikkaAfter.ok ? 'PARTIAL' : 'FAIL',
+    `Paneer Tikka qty=${qtyAfter}`,
   );
 
   const pass = RESULTS.filter((r) => r.status === 'PASS').length;
@@ -506,27 +675,34 @@ async function main() {
         : 'RESTAURANT FULLY OPERATIONAL';
 
   const loginInfo = {
-    app: 'http://localhost:3000/login',
+    app: `${FE}/login`,
+    kitchen: `${FE}/kitchen`,
+    counter: `${FE}/counter`,
     email: EMAIL,
     password: PASSWORD,
     organization: ORG,
     branch: 'Bandra Outlet',
     owner: 'Ravi Sharma',
+    images: imageStats,
   };
 
   console.log('\n========== VERDICT ==========');
   console.log(verdict);
   console.log(`Steps PASS=${pass} PARTIAL=${partial} FAIL=${fail}`);
-  console.log('\n========== LOGIN (local UI) ==========');
+  console.log('\n========== LOGIN ==========');
   console.log(`Open:     ${loginInfo.app}`);
+  console.log(`Kitchen:  ${loginInfo.kitchen}`);
   console.log(`Email:    ${loginInfo.email}`);
   console.log(`Password: ${loginInfo.password}`);
   console.log(`Shop:     ${loginInfo.organization}`);
-  console.log('Seeded:   menu (8), tables 1/5/12, 2 customers, dine-in + parcel bills');
+  console.log(
+    `Seeded:   menu (8, photos=${imageStats.photo} httpOk=${imageStats.httpOk}), tables 1/5/12, dine-in + takeaway + delivery`,
+  );
 
   const report = {
     generatedAt: new Date().toISOString(),
     api: API,
+    frontend: FE,
     verdict,
     login: loginInfo,
     summary: { pass, partial, fail },

@@ -30,10 +30,10 @@ export class AiImageService {
 
     const hint = dto.hint?.trim();
     const prompt = this.buildPrompt(name, hint);
-    const width = clampInt(this.config.get('POLLINATIONS_WIDTH'), 768, 256, 1024);
+    const width = clampInt(this.config.get('POLLINATIONS_WIDTH'), 1024, 256, 1024);
     const height = clampInt(
       this.config.get('POLLINATIONS_HEIGHT'),
-      768,
+      1024,
       256,
       1024,
     );
@@ -87,10 +87,11 @@ export class AiImageService {
     const prompt = this.buildPrompt(name.trim(), hint?.trim());
     const seed = Math.floor(Math.random() * 1_000_000_000);
     const qs = new URLSearchParams({
-      width: '768',
-      height: '768',
+      width: '1024',
+      height: '1024',
       model: 'flux',
       nologo: 'true',
+      enhance: 'true',
       seed: String(seed),
     });
     return {
@@ -100,13 +101,26 @@ export class AiImageService {
   }
 
   private buildPrompt(name: string, hint?: string) {
-    const parts = [
-      'Product photo for online store',
-      name.slice(0, 80),
-      hint ? hint.slice(0, 100) : null,
-      'white background, centered, sharp, no text',
-    ].filter(Boolean);
-    return parts.join(', ');
+    // Strong photorealism — free models otherwise invent surreal food-art
+    const product = name.slice(0, 100).replace(/[",]/g, ' ').trim();
+    const extra = hint
+      ? hint.slice(0, 120).replace(/[",]/g, ' ').trim()
+      : '';
+    return [
+      `Photorealistic food and product photograph of ${product}`,
+      'authentic Indian restaurant style plating if it is a dish',
+      extra || null,
+      'real edible food on a clean white or marble surface',
+      'natural colors appetizing look professional food photography',
+      'soft studio lighting shallow depth of field',
+      'shot on DSLR 50mm sharp detail high resolution',
+      'menu catalog / Swiggy Zomato listing style',
+      'true-to-life texture steam or garnish when natural',
+      'no text no watermark no logo no price tag',
+      'no illustration no cartoon no 3d render no surreal fantasy art no collage',
+    ]
+      .filter(Boolean)
+      .join(', ');
   }
 
   private tlsInsecure(): boolean {
@@ -132,6 +146,7 @@ export class AiImageService {
         height: String(opts.height),
         model: opts.model,
         nologo: 'true',
+        enhance: 'true',
         seed: String(opts.seed),
         ...extra,
       });

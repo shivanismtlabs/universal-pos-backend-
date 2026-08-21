@@ -33,6 +33,7 @@ import {
 } from '../../common/sell-units';
 import { parseMeasureUnits } from '../../common/measure-units';
 import {
+  listSafeImageUrl,
   resolveProductPhoto,
   saveProductImage,
 } from '../../common/product-image';
@@ -46,6 +47,7 @@ import {
 } from '../../common/stock-at-location';
 import { LowStockAlertService } from '../notify/low-stock-alert.service';
 import { StockMutationEngine } from '../inventory/stock-mutation.engine';
+import { RestaurantService } from '../restaurant/restaurant.service';
 
 const MAX_PRODUCT_IMAGES = 8;
 
@@ -171,6 +173,7 @@ export class PosService {
     private readonly accounting: AccountingPostingService,
     private readonly approvals: EnterpriseApprovalsService,
     private readonly stock: StockMutationEngine,
+    private readonly restaurant: RestaurantService,
   ) {}
 
   /**
@@ -843,8 +846,11 @@ export class PosService {
       items: rows
         .filter((r) => r.product.availableInPos !== false)
         .map((r) => {
-        const images = productImageList(r.product.photoUrl, r.product.meta);
-        const cover = images[0] ?? r.product.photoUrl ?? null;
+        const cover =
+          listSafeImageUrl(
+            productImageList(r.product.photoUrl, r.product.meta)[0] ??
+              r.product.photoUrl,
+          ) ?? null;
         return {
         id: r.id,
         productId: r.productId,
@@ -853,7 +859,7 @@ export class PosService {
         description: r.product.description,
           image: cover,
           photoUrl: cover,
-          images,
+          images: cover ? [cover] : [],
         price: r.sellPrice,
           qty: Number(r.qtyOnHand),
           sellUnit: r.sellUnit,
@@ -1640,8 +1646,11 @@ export class PosService {
           rowVariants.length > 0
             ? Number(variantQtyByProduct.get(row.productId) ?? 0)
             : Number(row.qtyOnHand);
-        const images = productImageList(row.product.photoUrl, row.product.meta);
-        const cover = images[0] ?? row.product.photoUrl ?? null;
+        const images = productImageList(row.product.photoUrl, row.product.meta)
+          .map((u) => listSafeImageUrl(u))
+          .filter((u): u is string => Boolean(u));
+        const cover =
+          listSafeImageUrl(images[0] ?? row.product.photoUrl) ?? null;
         const taxRatePercent = resolveProductTaxRatePercent({
           taxCode: row.product.taxCode,
           meta: row.product.meta,
@@ -1673,7 +1682,7 @@ export class PosService {
         description: row.product.description,
           image: cover,
           photoUrl: cover,
-          images,
+          images: cover ? [cover] : [],
           taxCode: row.product.taxCode,
           taxRatePercent,
         category: row.product.category,
@@ -1695,6 +1704,30 @@ export class PosService {
             expiresAt: b.expiresAt?.toISOString() ?? null,
           })),
           requiresSerial: row.product.trackSerial === true,
+          recipeTracked: meta.recipeTracked === true,
+          channelPrices: (() => {
+            const nested =
+              meta.channelPrices && typeof meta.channelPrices === 'object'
+                ? (meta.channelPrices as Record<string, unknown>)
+                : {};
+            const num = (v: unknown) => {
+              const n = Number(v);
+              return Number.isFinite(n) && n > 0 ? n : undefined;
+            };
+            return {
+              dine_in: num(nested.dine_in ?? meta.dineInPrice),
+              takeaway: num(nested.takeaway ?? meta.takeawayPrice),
+              delivery: num(nested.delivery ?? meta.deliveryPrice),
+              online: num(nested.online ?? meta.onlinePrice),
+            };
+          })(),
+          modifierGroups: Array.isArray(meta.modifierGroups)
+            ? meta.modifierGroups
+            : undefined,
+          soldOut:
+            meta.soldOut === true ||
+            meta.soldOut === 'true' ||
+            meta.soldOut === 'yes',
           location: row.location,
         };
       }),
@@ -2404,34 +2437,61 @@ export class PosService {
           throw new NotFoundException(`Stock level missing for line ${item.id}`);
         }
         if (level.product.trackQty !== false) {
-          if (Number(level.qtyOnHand) < qty) {
-            throw new BadRequestException(
-              `Insufficient stock for ${level.sku} after payment (have ${level.qtyOnHand})`,
-            );
+          const recipe = await this.stock.hasRecipeExplosion(
+            tx,
+            user.tenantId,
+            level.productId,
+          );
+          if (recipe) {
+            await this.stock.consumeForParent(tx, {
+              tenantId: user.tenantId,
+              actorUserId: user.userId,
+              locationId: order.locationId,
+              productId: level.productId,
+              parentQty: qty,
+              referenceType: 'order',
+              referenceId: orderId,
+            });
+          } else {
+            if (Number(level.qtyOnHand) < qty) {
+              throw new BadRequestException(
+                `Insufficient stock for ${level.sku} after payment (have ${level.qtyOnHand})`,
+              );
+            }
+            const itemMeta =
+              item.meta && typeof item.meta === 'object'
+                ? (item.meta as Record<string, unknown>)
+                : {};
+            await this.stock.mutateInTx(tx, {
+              tenantId: user.tenantId,
+              actorUserId: user.userId,
+              locationId: order.locationId,
+              stockLevelId: level.id,
+              productId: level.productId,
+              variantId:
+                typeof itemMeta.variantId === 'string' ? itemMeta.variantId : undefined,
+              batchId:
+                typeof itemMeta.batchId === 'string' ? itemMeta.batchId : undefined,
+              serialNumber:
+                typeof itemMeta.serialNumber === 'string'
+                  ? itemMeta.serialNumber
+                  : undefined,
+              qty: -qty,
+              type: StockLedgerType.sale,
+              referenceType: 'order',
+              referenceId: orderId,
+              idempotencyKey: `sale:${orderId}:${level.id}:${qty}`,
+            });
           }
-          const itemMeta =
-            item.meta && typeof item.meta === 'object'
-              ? (item.meta as Record<string, unknown>)
-              : {};
-          await this.stock.mutateInTx(tx, {
+        } else {
+          await this.stock.consumeForParent(tx, {
             tenantId: user.tenantId,
             actorUserId: user.userId,
             locationId: order.locationId,
-            stockLevelId: level.id,
             productId: level.productId,
-            variantId:
-              typeof itemMeta.variantId === 'string' ? itemMeta.variantId : undefined,
-            batchId:
-              typeof itemMeta.batchId === 'string' ? itemMeta.batchId : undefined,
-            serialNumber:
-              typeof itemMeta.serialNumber === 'string'
-                ? itemMeta.serialNumber
-                : undefined,
-            qty: -qty,
-            type: StockLedgerType.sale,
+            parentQty: qty,
             referenceType: 'order',
             referenceId: orderId,
-            idempotencyKey: `sale:${orderId}:${level.id}:${qty}`,
           });
         }
       }
@@ -2491,6 +2551,8 @@ export class PosService {
         },
       });
     });
+
+    await this.releaseDiningIfAny(user.tenantId, orderId, user.userId);
 
     return this.getReceipt(user, orderId);
   }
@@ -2656,23 +2718,40 @@ export class PosService {
         };
 
         if (tracks) {
-          const mut = await this.stock.mutateInTx(tx, {
-            tenantId: user.tenantId,
-            actorUserId: user.userId,
-            locationId: dto.locationId,
-            stockLevelId: level.id,
-            productId: level.productId,
-            variantId: line.variantId,
-            batchId: line.batchId,
-            serialNumber: line.serialNumber,
-            qty: -qty,
-            type: StockLedgerType.sale,
-            referenceType: 'order',
-            referenceId: created.id,
-            idempotencyKey: `sale:${created.id}:${level.id}:${qty}:${line.variantId ?? ''}:${line.batchId ?? ''}:${line.serialNumber ?? ''}`,
-          });
-          if (mut.batchId) lineMeta.batchId = mut.batchId;
-          if (mut.stockUnitId) lineMeta.stockUnitId = mut.stockUnitId;
+          const recipe = await this.stock.hasRecipeExplosion(
+            tx,
+            user.tenantId,
+            level.productId,
+          );
+          if (recipe) {
+            await this.stock.consumeForParent(tx, {
+              tenantId: user.tenantId,
+              actorUserId: user.userId,
+              locationId: dto.locationId,
+              productId: level.productId,
+              parentQty: qty,
+              referenceType: 'order',
+              referenceId: created.id,
+            });
+          } else {
+            const mut = await this.stock.mutateInTx(tx, {
+              tenantId: user.tenantId,
+              actorUserId: user.userId,
+              locationId: dto.locationId,
+              stockLevelId: level.id,
+              productId: level.productId,
+              variantId: line.variantId,
+              batchId: line.batchId,
+              serialNumber: line.serialNumber,
+              qty: -qty,
+              type: StockLedgerType.sale,
+              referenceType: 'order',
+              referenceId: created.id,
+              idempotencyKey: `sale:${created.id}:${level.id}:${qty}:${line.variantId ?? ''}:${line.batchId ?? ''}:${line.serialNumber ?? ''}`,
+            });
+            if (mut.batchId) lineMeta.batchId = mut.batchId;
+            if (mut.stockUnitId) lineMeta.stockUnitId = mut.stockUnitId;
+          }
         } else {
           await this.stock.consumeForParent(tx, {
             tenantId: user.tenantId,
@@ -3214,6 +3293,8 @@ export class PosService {
       }
     }
 
+    await this.releaseDiningIfAny(user.tenantId, result.orderId, user.userId);
+
     return {
       order,
       payments: result.payments,
@@ -3228,6 +3309,22 @@ export class PosService {
       pointsEarned: result.pointsEarned,
       receiptNotifications,
     };
+  }
+
+  private async releaseDiningIfAny(
+    tenantId: string,
+    orderId: string,
+    actorUserId?: string,
+  ) {
+    try {
+      await this.restaurant.onOrderFinalized({
+        tenantId,
+        orderId,
+        actorUserId,
+      });
+    } catch {
+      // Retail / rental / service checkout must not fail if dining overlay is absent
+    }
   }
 
   async checkout(user: AuthUser, dto: CheckoutDto) {

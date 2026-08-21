@@ -5,6 +5,7 @@ import {
   StockUnitStatus,
 } from '@prisma/client';
 import { PrismaService } from '../../database/database.module';
+import { isRecipePurpose, recipeConsumeQty } from '../restaurant/restaurant-policy';
 
 export type InvTx = Prisma.TransactionClient;
 
@@ -128,6 +129,41 @@ export class StockMutationEngine {
     }
 
     const level = await this.lockLevel(tx, input);
+    const recipeParent =
+      !input.skipComponentExplosion &&
+      qty < 0 &&
+      (await this.hasRecipeExplosion(tx, input.tenantId, level.productId));
+    if (recipeParent) {
+      await this.consumeComponents(tx, input, level, Math.abs(qty));
+      const result: MutationResult = {
+        stockLevelId: level.id,
+        productId: level.productId,
+        locationId: level.locationId,
+        variantId: level.variantId,
+        qtyBefore: Number(level.qtyOnHand),
+        qtyDelta: 0,
+        qtyAfter: Number(level.qtyOnHand),
+        qtyReserved: Number(level.qtyReserved),
+        qtyAvailable:
+          Number(level.qtyOnHand) - Number(level.qtyReserved),
+        batchId: null,
+        stockUnitId: null,
+        ledgerId: '',
+      };
+      if (input.idempotencyKey) {
+        await tx.inventoryIdempotency.update({
+          where: {
+            tenantId_key: {
+              tenantId: input.tenantId,
+              key: input.idempotencyKey,
+            },
+          },
+          data: { result: result as unknown as Prisma.InputJsonValue },
+        });
+      }
+      return result;
+    }
+
     const baseQty = await this.toBaseQty(tx, input, level, qty);
     const available = Number(level.qtyOnHand) - Number(level.qtyReserved);
     const nextOnHand = Number(level.qtyOnHand) + baseQty;
@@ -578,6 +614,23 @@ export class StockMutationEngine {
     return unit.id;
   }
 
+  async hasRecipeExplosion(
+    tx: InvTx,
+    tenantId: string,
+    productId: string,
+  ): Promise<boolean> {
+    const lines = await tx.productBundleLine.findMany({
+      where: {
+        tenantId,
+        bundleProductId: productId,
+        consumeOnSale: true,
+      },
+      select: { purpose: true },
+      take: 20,
+    });
+    return lines.some((l) => isRecipePurpose(l.purpose));
+  }
+
   private async consumeComponents(
     tx: InvTx,
     input: MutateStockInput,
@@ -592,7 +645,12 @@ export class StockMutationEngine {
       },
     });
     for (const line of lines) {
-      const need = Number(line.quantity) * parentQty;
+      const need = recipeConsumeQty({
+        componentQty: Number(line.quantity),
+        parentQty,
+        wastagePercent: Number(line.wastagePercent ?? 0),
+      });
+      if (need < EPS) continue;
       await this.mutateInTx(tx, {
         tenantId: input.tenantId,
         actorUserId: input.actorUserId,
@@ -605,6 +663,7 @@ export class StockMutationEngine {
         referenceType: input.referenceType ?? 'consumption',
         referenceId: input.referenceId,
         skipComponentExplosion: true,
+        inputUnit: line.unit,
       });
     }
   }
@@ -620,8 +679,56 @@ export class StockMutationEngine {
       parentQty: number;
       referenceType?: string | null;
       referenceId?: string | null;
+      stageId?: string | null;
     },
   ) {
+    const parentLevel: LockedLevel = {
+      id: '00000000-0000-0000-0000-000000000000',
+      tenantId: input.tenantId,
+      locationId: input.locationId,
+      productId: input.productId,
+      variantId: null,
+      sku: input.productId,
+      sellUnit: 'pcs',
+      qtyOnHand: new Prisma.Decimal(0),
+      qtyReserved: new Prisma.Decimal(0),
+      qtyInTransit: new Prisma.Decimal(0),
+      qtyDamaged: new Prisma.Decimal(0),
+      version: 0,
+    };
+    if (input.stageId) {
+      const lines = await tx.productBundleLine.findMany({
+        where: {
+          tenantId: input.tenantId,
+          bundleProductId: input.productId,
+          consumeOnSale: true,
+          stageId: input.stageId,
+        },
+      });
+      for (const line of lines) {
+        const need = recipeConsumeQty({
+          componentQty: Number(line.quantity),
+          parentQty: input.parentQty,
+          wastagePercent: Number(line.wastagePercent ?? 0),
+        });
+        if (need < EPS) continue;
+        await this.mutateInTx(tx, {
+          tenantId: input.tenantId,
+          actorUserId: input.actorUserId,
+          locationId: input.locationId,
+          productId: line.componentProductId,
+          variantId: line.componentVariantId,
+          qty: -need,
+          type: StockLedgerType.consumption,
+          reason: `Stage consume ${input.productId}`,
+          referenceType: input.referenceType ?? 'consumption',
+          referenceId: input.referenceId,
+          skipComponentExplosion: true,
+          inputUnit: line.unit,
+        });
+      }
+      return;
+    }
     await this.consumeComponents(
       tx,
       {
@@ -635,22 +742,52 @@ export class StockMutationEngine {
         referenceId: input.referenceId,
         skipComponentExplosion: true,
       },
-      {
-        id: '00000000-0000-0000-0000-000000000000',
-        tenantId: input.tenantId,
-        locationId: input.locationId,
-        productId: input.productId,
-        variantId: null,
-        sku: input.productId,
-        sellUnit: 'pcs',
-        qtyOnHand: new Prisma.Decimal(0),
-        qtyReserved: new Prisma.Decimal(0),
-        qtyInTransit: new Prisma.Decimal(0),
-        qtyDamaged: new Prisma.Decimal(0),
-        version: 0,
-      },
+      parentLevel,
       input.parentQty,
     );
+  }
+
+  async restoreForParent(
+    tx: InvTx,
+    input: {
+      tenantId: string;
+      actorUserId?: string | null;
+      locationId: string;
+      productId: string;
+      parentQty: number;
+      referenceType?: string | null;
+      referenceId?: string | null;
+    },
+  ) {
+    const lines = await tx.productBundleLine.findMany({
+      where: {
+        tenantId: input.tenantId,
+        bundleProductId: input.productId,
+        consumeOnSale: true,
+      },
+    });
+    for (const line of lines) {
+      const need = recipeConsumeQty({
+        componentQty: Number(line.quantity),
+        parentQty: input.parentQty,
+        wastagePercent: Number(line.wastagePercent ?? 0),
+      });
+      if (need < EPS) continue;
+      await this.mutateInTx(tx, {
+        tenantId: input.tenantId,
+        actorUserId: input.actorUserId,
+        locationId: input.locationId,
+        productId: line.componentProductId,
+        variantId: line.componentVariantId,
+        qty: need,
+        type: StockLedgerType.customer_return,
+        reason: `Restored recipe for ${input.productId}`,
+        referenceType: input.referenceType ?? 'customer_return',
+        referenceId: input.referenceId,
+        skipComponentExplosion: true,
+        inputUnit: line.unit,
+      });
+    }
   }
 
   async adjustReserved(

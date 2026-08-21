@@ -29,7 +29,7 @@ export class CustomFieldsController {
   }
 
   @Post('definitions')
-  @Roles(...RoleGroup.ownerOnly)
+  @Roles(...RoleGroup.lead)
   @ApiOperation({ summary: 'Create a custom field definition' })
   createDefinition(
     @CurrentUser() user: AuthUser,

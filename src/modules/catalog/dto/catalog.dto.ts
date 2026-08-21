@@ -605,6 +605,23 @@ export class BundleLineDto {
   @IsOptional()
   @IsString()
   purpose?: string;
+
+  @ApiPropertyOptional({ description: 'Consumption unit (g, ml) if different from stock UOM' })
+  @IsOptional()
+  @IsString()
+  unit?: string;
+
+  @ApiPropertyOptional({ description: 'Extra % consumed on top of BOM qty' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  wastagePercent?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  stageId?: string;
 }
 
 export class SetBundleLinesDto {

@@ -6,6 +6,8 @@ export const Role = {
   fitter: 'fitter',
   inventory: 'inventory',
   accountant: 'accountant',
+  captain: 'captain',
+  kitchen: 'kitchen',
 } as const;
 
 export type RoleCode = (typeof Role)[keyof typeof Role];
@@ -19,11 +21,27 @@ export const RoleGroup = {
     Role.fitter,
     Role.inventory,
     Role.accountant,
+    Role.captain,
+    Role.kitchen,
   ] as string[],
 
   lead: [Role.admin, Role.manager] as string[],
 
-  pos: [Role.admin, Role.manager, Role.cashier] as string[],
+  pos: [Role.admin, Role.manager, Role.cashier, Role.captain] as string[],
+
+  diningFloor: [
+    Role.admin,
+    Role.manager,
+    Role.cashier,
+    Role.captain,
+  ] as string[],
+
+  kitchenOps: [
+    Role.admin,
+    Role.manager,
+    Role.captain,
+    Role.kitchen,
+  ] as string[],
 
   returns: [
     Role.admin,
@@ -46,6 +64,8 @@ export const RoleGroup = {
     Role.fitter,
     Role.inventory,
     Role.accountant,
+    Role.captain,
+    Role.kitchen,
   ] as string[],
 
   fittings: [
@@ -62,6 +82,8 @@ export const RoleGroup = {
     Role.fitter,
     Role.inventory,
     Role.accountant,
+    Role.captain,
+    Role.kitchen,
   ] as string[],
 
   catalogWrite: [Role.admin, Role.manager, Role.inventory] as string[],
@@ -79,5 +101,6 @@ export const RoleGroup = {
     Role.manager,
     Role.cashier,
     Role.fitter,
+    Role.captain,
   ] as string[],
 } as const;

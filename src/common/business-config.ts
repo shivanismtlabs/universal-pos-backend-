@@ -57,6 +57,7 @@ export type ScreenId =
   | 'memberships'
   | 'jobs'
   | 'kitchen'
+  | 'restaurant'
   | 'check_in'
   | 'reports'
   | 'settings';
@@ -282,6 +283,9 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
       'orders',
       'customers',
       'inventory',
+      'resources',
+      'kitchen',
+      'restaurant',
       'reports',
       'settings',
     ],
@@ -298,6 +302,56 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
           { value: 'bar', label: 'Bar' },
           { value: 'none', label: 'No kitchen ticket' },
         ],
+      },
+      {
+        entity: 'item',
+        key: 'stockClass',
+        label: 'Stock class',
+        type: 'select',
+        required: false,
+        options: [
+          { value: 'finished', label: 'Finished / menu item' },
+          { value: 'ingredient', label: 'Ingredient' },
+          { value: 'raw_material', label: 'Raw material' },
+          { value: 'semi_finished', label: 'Semi-finished' },
+          { value: 'packaging', label: 'Packaging' },
+          { value: 'consumable', label: 'Consumable' },
+        ],
+      },
+      {
+        entity: 'item',
+        key: 'dineInPrice',
+        label: 'Dine-in price',
+        type: 'number',
+        required: false,
+      },
+      {
+        entity: 'item',
+        key: 'takeawayPrice',
+        label: 'Takeaway price',
+        type: 'number',
+        required: false,
+      },
+      {
+        entity: 'item',
+        key: 'deliveryPrice',
+        label: 'Delivery price',
+        type: 'number',
+        required: false,
+      },
+      {
+        entity: 'item',
+        key: 'prepNotes',
+        label: 'Prep notes',
+        type: 'text',
+        required: false,
+      },
+      {
+        entity: 'item',
+        key: 'soldOut',
+        label: '86 / sold out',
+        type: 'boolean',
+        required: false,
       },
       {
         entity: 'order',
@@ -324,7 +378,7 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
     ],
     gettingStartedHints: [
       'Build menu Items (same catalog engine)',
-      'Use table number on orders via meta — no separate restaurant codebase',
+      'Enable Tables + KOT in Capabilities, then open Dining floor',
     ],
     defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.restaurant,
   },
@@ -905,19 +959,35 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
   },
 };
 
+const FOOD_SETUP_ALIASES: Record<string, string> = {
+  cafe: 'restaurant',
+  bakery: 'restaurant',
+  qsr: 'restaurant',
+  cloud_kitchen: 'restaurant',
+  food_truck: 'restaurant',
+};
+
 export function listBusinessConfigs(): BusinessConfig[] {
   return Object.values(BUSINESS_CONFIG_REGISTRY);
 }
 
 export function getBusinessConfig(id: string | null | undefined): BusinessConfig {
-  if (id && BUSINESS_CONFIG_REGISTRY[id]) {
-    return BUSINESS_CONFIG_REGISTRY[id];
+  const raw = id?.trim().toLowerCase() ?? '';
+  const mapped = FOOD_SETUP_ALIASES[raw] ?? raw;
+  if (mapped && BUSINESS_CONFIG_REGISTRY[mapped]) {
+    const base = BUSINESS_CONFIG_REGISTRY[mapped];
+    if (mapped !== raw && raw) {
+      return { ...base, id: raw, label: raw.replaceAll('_', ' ') };
+    }
+    return base;
   }
   return BUSINESS_CONFIG_REGISTRY.general;
 }
 
 export function isBusinessTypeId(value: unknown): value is string {
-  return typeof value === 'string' && value in BUSINESS_CONFIG_REGISTRY;
+  if (typeof value !== 'string') return false;
+  const key = value.trim().toLowerCase();
+  return key in BUSINESS_CONFIG_REGISTRY || key in FOOD_SETUP_ALIASES;
 }
 
 /**

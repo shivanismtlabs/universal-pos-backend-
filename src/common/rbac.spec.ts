@@ -18,10 +18,23 @@ describe('granular ACL atoms', () => {
     expect(manager).toContain('refund.approve');
   });
 
-  it('accountant can read group finance', () => {
-    const acc = SYSTEM_ROLE_PERMISSIONS.accountant as string[];
-    expect(acc).toContain('reports.profit.read');
-    expect(acc).toContain('reports.finance.read');
-    expect(acc).toContain('catalog.cost.read');
+  it('captain can order on the floor but cannot refund, profit, or adjust stock', () => {
+    const captain = SYSTEM_ROLE_PERMISSIONS.captain as string[];
+    expect(captain).toContain('dining.floor');
+    expect(captain).toContain('pos.checkout');
+    expect(captain).not.toContain('refund.approve');
+    expect(captain).not.toContain('reports.profit.read');
+    expect(captain).not.toContain('catalog.cost.read');
+    expect(captain).not.toContain('inventory.adjust');
+  });
+
+  it('kitchen can update KOT but cannot bill or see profit', () => {
+    const kitchen = SYSTEM_ROLE_PERMISSIONS.kitchen as string[];
+    expect(kitchen).toContain('kitchen.view');
+    expect(kitchen).toContain('kitchen.update');
+    expect(kitchen).not.toContain('pos.checkout');
+    expect(kitchen).not.toContain('payments.take');
+    expect(kitchen).not.toContain('reports.profit.read');
+    expect(kitchen).not.toContain('refund.approve');
   });
 });

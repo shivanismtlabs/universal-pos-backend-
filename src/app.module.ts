@@ -14,6 +14,7 @@ import { DocumentsModule } from './modules/documents/documents.module';
 import { ExpensesModule } from './modules/expenses/expenses.module';
 import { IamModule } from './modules/iam/iam.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
+import { RestaurantModule } from './modules/restaurant/restaurant.module';
 import { LoyaltyModule } from './modules/loyalty/loyalty.module';
 import { MailModule } from './modules/mail/mail.module';
 import { NotifyModule } from './modules/notify/notify.module';
@@ -53,6 +54,7 @@ const enableQueues = process.env.ENABLE_QUEUES === 'true';
     AppsModule,
     CustomersModule,
     InventoryModule,
+    RestaurantModule,
     OrdersModule,
     PaymentsModule,
     BillingModule,

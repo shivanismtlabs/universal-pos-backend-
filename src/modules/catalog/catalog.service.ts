@@ -23,7 +23,9 @@ import { categoryIdsWithDescendants } from '../../common/category-tree';
 import { paginate, pageMeta } from '../../common/dto/pagination.dto';
 import { seedZeroStockAtOtherLocations } from '../../common/stock-at-location';
 import { resolveProductTaxRatePercent } from '../../common/tax-engine';
+import { listSafeImageUrl } from '../../common/product-image';
 import { StockMutationEngine } from '../inventory/stock-mutation.engine';
+import { isRecipePurpose } from '../restaurant/restaurant-policy';
 import type { AuthUser } from '../auth/types';
 import {
   CreateBatchDto,
@@ -133,11 +135,16 @@ function mapProduct(p: {
   stockLevels?: Array<{ qtyOnHand: Prisma.Decimal; sellUnit: string }>;
 }) {
   const meta = (p.meta ?? {}) as Record<string, unknown>;
-  const images = Array.isArray(meta.images)
+  const rawImages = Array.isArray(meta.images)
     ? (meta.images as string[]).filter(Boolean)
     : p.photoUrl
       ? [p.photoUrl]
       : [];
+  const images = rawImages
+    .map((u) => listSafeImageUrl(u))
+    .filter((u): u is string => Boolean(u));
+  const cover = listSafeImageUrl(p.photoUrl) ?? images[0] ?? null;
+  const metaOut = { ...meta, images };
   return {
     id: p.id,
     name: p.name,
@@ -153,7 +160,7 @@ function mapProduct(p: {
     status: p.status,
     shortDescription: p.shortDescription,
     description: p.description,
-    photoUrl: p.photoUrl ?? images[0] ?? null,
+    photoUrl: cover,
     images,
     taxCode: p.taxCode,
     basePrice: Number(p.basePrice),
@@ -172,7 +179,7 @@ function mapProduct(p: {
     brandId: p.brandId,
     category: p.category ?? null,
     brand: p.brand ?? null,
-    meta,
+    meta: metaOut,
     counts: {
       variants: p._count?.variants ?? 0,
       batches: p._count?.batches ?? 0,
@@ -569,7 +576,14 @@ export class CatalogService {
         bundleComponents: {
           include: {
             componentProduct: {
-              select: { id: true, name: true, skuCode: true, kind: true },
+              select: {
+                id: true,
+                name: true,
+                skuCode: true,
+                kind: true,
+                costPrice: true,
+                unitOfMeasure: true,
+              },
             },
           },
           orderBy: { createdAt: 'asc' },
@@ -635,6 +649,12 @@ export class CatalogService {
         componentProductId: l.componentProductId,
         componentVariantId: l.componentVariantId,
         quantity: Number(l.quantity),
+        consumeOnSale: l.consumeOnSale,
+        purpose: l.purpose,
+        unit: l.unit,
+        wastagePercent: Number(l.wastagePercent ?? 0),
+        stageId: l.stageId,
+        stageKey: l.stageKey,
         component: l.componentProduct,
       })),
       batches: p.batches.map((b) => ({
@@ -1406,7 +1426,14 @@ export class CatalogService {
       await tx.productBundleLine.deleteMany({
         where: { tenantId: user.tenantId, bundleProductId: productId },
       });
+      let hasRecipe = false;
       for (const l of dto.lines) {
+        const purpose =
+          l.purpose ??
+          (product.kind === ProductKind.bundle ? 'bundle' : 'recipe');
+        const consumeOnSale =
+          l.consumeOnSale ?? product.kind !== ProductKind.bundle;
+        if (consumeOnSale && isRecipePurpose(purpose)) hasRecipe = true;
         await tx.productBundleLine.create({
           data: {
             tenantId: user.tenantId,
@@ -1414,8 +1441,25 @@ export class CatalogService {
             componentProductId: l.componentProductId,
             componentVariantId: l.componentVariantId ?? null,
             quantity: l.quantity ?? 1,
-            consumeOnSale: l.consumeOnSale ?? product.kind !== ProductKind.bundle,
-            purpose: l.purpose ?? (product.kind === ProductKind.bundle ? 'bundle' : 'recipe'),
+            consumeOnSale,
+            purpose,
+            unit: l.unit?.trim() || null,
+            wastagePercent: l.wastagePercent ?? 0,
+            stageId: l.stageId ?? null,
+            stageKey: l.stageId ?? '',
+          },
+        });
+      }
+      if (hasRecipe && product.trackQty) {
+        const meta =
+          product.meta && typeof product.meta === 'object'
+            ? (product.meta as Record<string, unknown>)
+            : {};
+        await tx.product.update({
+          where: { id: productId },
+          data: {
+            trackQty: false,
+            meta: { ...meta, recipeTracked: true } as Prisma.InputJsonValue,
           },
         });
       }

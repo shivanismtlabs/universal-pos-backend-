@@ -4,7 +4,6 @@ import {
   IsBoolean,
   IsEnum,
   IsInt,
-  IsObject,
   IsOptional,
   IsString,
   IsUUID,
@@ -30,9 +29,8 @@ export class CreateCustomFieldDefinitionDto {
   @MaxLength(120)
   label!: string;
 
-  @ApiProperty({
-    example: 'text',
-    description: 'text | number | boolean | date | datetime | select | multi_select | email | phone | file',
+  @ApiPropertyOptional({
+    description: 'text | number | boolean | date | select | multi_select | email | phone | currency',
   })
   @IsString()
   @MinLength(2)
@@ -44,9 +42,10 @@ export class CreateCustomFieldDefinitionDto {
   @IsBoolean()
   required?: boolean;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({
+    description: 'Select options: string[] or { options: string[] }',
+  })
   @IsOptional()
-  @IsObject()
   options?: unknown;
 
   @ApiPropertyOptional()

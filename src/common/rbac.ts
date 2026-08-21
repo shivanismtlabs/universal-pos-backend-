@@ -11,6 +11,8 @@ export const SYSTEM_ROLE_CODES = [
   'inventory',
   'accountant',
   'staff',
+  'captain',
+  'kitchen',
 ] as const;
 
 export type SystemRoleCode = (typeof SYSTEM_ROLE_CODES)[number];
@@ -70,7 +72,9 @@ export const PERMISSION_CATALOG: Array<{
   { code: 'accounting.close_period', moduleCode: 'accounting', description: 'Close or reopen accounting periods' },
   { code: 'accounting.export', moduleCode: 'accounting', description: 'Export accounting data' },
   { code: 'accounting.integrations.manage', moduleCode: 'accounting', description: 'Connect external accounting systems' },
-  { code: 'accounting.sync', moduleCode: 'accounting', description: 'Trigger external accounting sync' },
+  { code: 'kitchen.view', moduleCode: 'restaurant', description: 'View kitchen tickets' },
+  { code: 'kitchen.update', moduleCode: 'restaurant', description: 'Update KOT / KDS status' },
+  { code: 'dining.floor', moduleCode: 'restaurant', description: 'Open tables and send KOT' },
 ];
 
 export const DEFAULT_PERMISSION_CODES = PERMISSION_CATALOG.map((p) => p.code);
@@ -123,6 +127,9 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<string, string[] | ['*']> = {
     'accounting.export',
     'accounting.integrations.manage',
     'accounting.sync',
+    'kitchen.view',
+    'kitchen.update',
+    'dining.floor',
   ],
   cashier: [
     'attendance.self',
@@ -135,6 +142,8 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<string, string[] | ['*']> = {
     'refund.create',
     'appointments.manage',
     'notify.send',
+    'kitchen.view',
+    'dining.floor',
   ],
   fitter: [
     'attendance.self',
@@ -179,6 +188,24 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<string, string[] | ['*']> = {
     'accounting.sync',
   ],
   staff: ['attendance.self', 'catalog.read', 'orders.read'],
+  captain: [
+    'attendance.self',
+    'catalog.read',
+    'orders.read',
+    'orders.write',
+    'pos.checkout',
+    'payments.take',
+    'discount.create',
+    'kitchen.view',
+    'dining.floor',
+  ],
+  kitchen: [
+    'attendance.self',
+    'catalog.read',
+    'orders.read',
+    'kitchen.view',
+    'kitchen.update',
+  ],
 };
 
 /**
@@ -199,6 +226,8 @@ export const ROLE_PERMISSION_FALLBACK: Record<string, string[]> = {
   inventory: ['inventory.write', 'catalog.write'],
   accountant: ['reports.read', 'expenses.manage', 'accounting.view'],
   staff: ['attendance.self', 'attendance.manage'],
+  captain: ['dining.floor', 'pos.checkout'],
+  kitchen: ['kitchen.view', 'kitchen.update'],
 };
 
 export function expandPermissions(roleCodes: string[], fromDb: string[]): string[] {

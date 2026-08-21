@@ -158,3 +158,11 @@ export async function resolveProductPhoto(
   }
   return value;
 }
+
+/** Never put data-URLs in catalog JSON — they freeze the POS grid. */
+export function listSafeImageUrl(url?: string | null): string | null {
+  if (!url?.trim()) return null;
+  const u = url.trim();
+  if (u.startsWith('data:') || u.startsWith('blob:')) return null;
+  return u;
+}

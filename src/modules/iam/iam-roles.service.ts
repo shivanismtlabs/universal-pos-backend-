@@ -283,6 +283,8 @@ export class IamRolesService {
       inventory: 'Inventory Manager',
       accountant: 'Accountant',
       staff: 'Staff',
+      captain: 'Captain / waiter',
+      kitchen: 'Kitchen staff',
     };
     return map[code] ?? code;
   }

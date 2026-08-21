@@ -43,6 +43,9 @@ export class CustomersService {
     const marketingOptIn = dto.marketingOptIn ?? false;
     const meta: Record<string, unknown> = {};
     if (dto.eventDate) meta.eventDate = dto.eventDate;
+    if (dto.extraFields && typeof dto.extraFields === 'object') {
+      meta.customFields = dto.extraFields;
+    }
 
     try {
       return await this.prisma.customer.create({
@@ -208,6 +211,10 @@ export class CustomersService {
       creditLimit,
       eventDate:
         typeof meta.eventDate === 'string' ? meta.eventDate : null,
+      extraFields:
+        meta.customFields && typeof meta.customFields === 'object'
+          ? (meta.customFields as Record<string, unknown>)
+          : {},
       measurements: rentalMeasurements,
       partyMemberships: rentalPartyMemberships,
       summary: {
@@ -674,6 +681,9 @@ export class CustomersService {
     if (dto.eventDate !== undefined) {
       if (dto.eventDate) meta.eventDate = dto.eventDate;
       else delete meta.eventDate;
+    }
+    if (dto.extraFields && typeof dto.extraFields === 'object') {
+      meta.customFields = dto.extraFields;
     }
 
     const data: Prisma.CustomerUpdateInput = {

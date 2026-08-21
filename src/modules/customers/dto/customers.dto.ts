@@ -78,6 +78,10 @@ export class CreateCustomerDto {
   @IsNumber()
   @Min(0)
   creditLimit?: number | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  extraFields?: Record<string, unknown>;
 }
 
 export class UpdateCustomerDto {
@@ -131,6 +135,10 @@ export class UpdateCustomerDto {
   @IsNumber()
   @Min(0)
   creditLimit?: number | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  extraFields?: Record<string, unknown>;
 }
 
 export class ListCustomersQueryDto {

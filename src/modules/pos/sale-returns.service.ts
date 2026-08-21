@@ -1456,6 +1456,25 @@ export class SaleReturnsService {
       );
     }
     const resellable = RESELLABLE.has(line.condition || 'good');
+    const recipe = await this.stock.hasRecipeExplosion(
+      tx,
+      user.tenantId,
+      level.productId,
+    );
+    if (recipe) {
+      if (resellable) {
+        await this.stock.restoreForParent(tx, {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          locationId: level.locationId,
+          productId: level.productId,
+          parentQty: line.quantity,
+          referenceType: 'customer_return',
+          referenceId: order.id,
+        });
+      }
+      return;
+    }
     if (resellable) {
       await this.stock.mutateInTx(tx, {
         tenantId: user.tenantId,

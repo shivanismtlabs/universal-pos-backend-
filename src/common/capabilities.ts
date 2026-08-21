@@ -25,8 +25,15 @@ export const CAPABILITY_CODES = [
   'CUSTOM_FIELDS',
   'KITCHEN',
   'KOT',
+  'KDS',
   'TABLE',
   'DELIVERY',
+  'RECIPE',
+  'QR_ORDER',
+  'TOKEN',
+  'DINING_RESERVATION',
+  'CAPTAIN',
+  'WASTAGE',
   'REPAIR_JOB',
   'ASSET',
   'PACKAGE',
@@ -154,6 +161,11 @@ export const CAPABILITY_REGISTRY: Record<CapabilityCode, CapabilityDef> = {
     label: 'KOT',
     description: 'Kitchen order tickets',
   },
+  KDS: {
+    code: 'KDS',
+    label: 'Kitchen display',
+    description: 'Live kitchen display for ticket status',
+  },
   TABLE: {
     code: 'TABLE',
     label: 'Tables',
@@ -163,6 +175,36 @@ export const CAPABILITY_REGISTRY: Record<CapabilityCode, CapabilityDef> = {
     code: 'DELIVERY',
     label: 'Delivery',
     description: 'Delivery order type and tracking',
+  },
+  RECIPE: {
+    code: 'RECIPE',
+    label: 'Recipes / BOM',
+    description: 'Ingredient recipes for menu items (Phase 2)',
+  },
+  QR_ORDER: {
+    code: 'QR_ORDER',
+    label: 'QR ordering',
+    description: 'Guest QR menu ordering (Phase 3)',
+  },
+  TOKEN: {
+    code: 'TOKEN',
+    label: 'Token / QSR',
+    description: 'Token numbers for counter / QSR queues (Phase 3)',
+  },
+  DINING_RESERVATION: {
+    code: 'DINING_RESERVATION',
+    label: 'Dining reservations',
+    description: 'Table reservations for dine-in (Phase 3)',
+  },
+  CAPTAIN: {
+    code: 'CAPTAIN',
+    label: 'Captain ordering',
+    description: 'Waiter/captain floor ordering without finance access',
+  },
+  WASTAGE: {
+    code: 'WASTAGE',
+    label: 'Wastage',
+    description: 'Spoilage / complimentary / staff meal write-offs (Phase 2)',
   },
   REPAIR_JOB: {
     code: 'REPAIR_JOB',
@@ -281,9 +323,65 @@ export const BUSINESS_TYPE_CAPABILITY_DEFAULTS: Record<
     'TABLE',
     'KITCHEN',
     'KOT',
+    'KDS',
     'MODIFIERS',
+    'RECIPE',
+    'WASTAGE',
     'STAFF_ASSIGNMENT',
     'DELIVERY',
+    'CAPTAIN',
+    'QR_ORDER',
+    'TOKEN',
+    'DINING_RESERVATION',
+  ],
+  cafe: [
+    'INVENTORY',
+    'TABLE',
+    'KITCHEN',
+    'KOT',
+    'MODIFIERS',
+    'RECIPE',
+    'WASTAGE',
+    'DELIVERY',
+  ],
+  bakery: [
+    'INVENTORY',
+    'BARCODE',
+    'BATCH',
+    'KITCHEN',
+    'KOT',
+    'MODIFIERS',
+    'RECIPE',
+    'WASTAGE',
+  ],
+  qsr: [
+    'INVENTORY',
+    'KITCHEN',
+    'KOT',
+    'KDS',
+    'TOKEN',
+    'MODIFIERS',
+    'RECIPE',
+    'WASTAGE',
+  ],
+  cloud_kitchen: [
+    'INVENTORY',
+    'KITCHEN',
+    'KOT',
+    'KDS',
+    'DELIVERY',
+    'MODIFIERS',
+    'RECIPE',
+    'WASTAGE',
+  ],
+  food_truck: [
+    'INVENTORY',
+    'KITCHEN',
+    'KOT',
+    'TOKEN',
+    'MODIFIERS',
+    'RECIPE',
+    'WASTAGE',
   ],
   salon: [
     'BOOKING',
@@ -522,8 +620,11 @@ export function screensForCapabilities(
   if (caps.includes('REPAIR_JOB') || caps.includes('ASSET')) {
     screens.add('jobs');
   }
-  if (caps.includes('KITCHEN') || caps.includes('KOT')) {
+  if (caps.includes('KITCHEN') || caps.includes('KOT') || caps.includes('KDS')) {
     screens.add('kitchen');
+  }
+  if (caps.includes('TABLE') || caps.includes('KOT') || caps.includes('CAPTAIN') || caps.includes('RECIPE') || caps.includes('WASTAGE') || caps.includes('QR_ORDER') || caps.includes('TOKEN') || caps.includes('DINING_RESERVATION') || caps.includes('KDS')) {
+    screens.add('restaurant');
   }
   if (caps.includes('CHECK_IN')) screens.add('check_in');
   return [...screens];

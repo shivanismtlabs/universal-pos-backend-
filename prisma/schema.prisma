@@ -439,6 +439,19 @@ model Tenant {
   spinOffs                BusinessSpinOff[]
   groupSupplierLinks      GroupSupplierLink[]
   groupCustomerLinks      GroupCustomerLink[]
+  restaurantConfigs       RestaurantConfig[]
+  restaurantFloors        RestaurantFloor[]
+  restaurantTables        RestaurantTable[]
+  kitchenStations         KitchenStation[]
+  kitchenTickets          KitchenTicket[]
+  kitchenTicketLines      KitchenTicketLine[]
+  restaurantOrders        RestaurantOrder[]
+  diningReservations      DiningReservation[]
+  recipeStages            RecipeStage[]
+  modifierGroups          ModifierGroup[]
+  modifierOptions         ModifierOption[]
+  productModifierGroups   ProductModifierGroup[]
+  wastageEvents           WastageEvent[]
   glAccounts              GlAccount[]
   journalEntries          JournalEntry[]
   journalEntryLines       JournalEntryLine[]
@@ -609,6 +622,14 @@ model Location {
   accountMappings   AccountMapping[]
   accountingTaxFacts AccountingTaxFact[]
   payments          Payment[]
+  restaurantConfigs RestaurantConfig[]
+  restaurantFloors  RestaurantFloor[]
+  restaurantTables  RestaurantTable[]
+  kitchenStations   KitchenStation[]
+  kitchenTickets    KitchenTicket[]
+  restaurantOrders  RestaurantOrder[]
+  diningReservations DiningReservation[]
+  wastageEvents     WastageEvent[]
 
   @@unique([tenantId, code])
   @@map("locations")
@@ -808,6 +829,9 @@ model User {
   approvalStepsActed       ApprovalStep[]    @relation("ApprovalStepActor")
   intercompanyCreated      IntercompanyTransfer[] @relation("IcCreatedBy")
   intercompanyApproved     IntercompanyTransfer[] @relation("IcApprovedBy")
+  kitchenTicketsCreated    KitchenTicket[]        @relation("KitchenTicketCreatedBy")
+  kitchenTicketsCancelled  KitchenTicket[]        @relation("KitchenTicketCancelledBy")
+  wastageEvents            WastageEvent[]
 
   @@unique([tenantId, email])
   @@map("users")
@@ -1253,6 +1277,9 @@ model Product {
   qtyReservations       QtyReservation[]
   unitConversions       UnitConversion[]
   productionOrders      ProductionOrder[]
+  recipeStages          RecipeStage[]
+  modifierLinks         ProductModifierGroup[]
+  modifierIngredientOf  ModifierOption[] @relation("ModifierIngredient")
 
   @@unique([tenantId, skuCode])
   @@index([tenantId, status])
@@ -1303,14 +1330,20 @@ model ProductBundleLine {
   consumeOnSale        Boolean  @default(false) @map("consume_on_sale")
   /// bundle | recipe | production
   purpose              String   @default("bundle") @db.VarChar(24)
+  /// Consumption unit (g, ml, pcs) — converted via UnitConversion when set
+  unit                 String?  @db.VarChar(16)
+  wastagePercent       Decimal  @default(0) @map("wastage_percent") @db.Decimal(6, 3)
+  stageId              String?  @map("stage_id") @db.Uuid
+  stageKey             String   @default("") @map("stage_key") @db.VarChar(64)
   createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant           Tenant  @relation(fields: [tenantId], references: [id])
-  bundleProduct    Product @relation("BundleParent", fields: [bundleProductId], references: [id], onDelete: Cascade)
-  componentProduct Product @relation("BundleComponent", fields: [componentProductId], references: [id])
+  tenant           Tenant       @relation(fields: [tenantId], references: [id])
+  bundleProduct    Product      @relation("BundleParent", fields: [bundleProductId], references: [id], onDelete: Cascade)
+  componentProduct Product      @relation("BundleComponent", fields: [componentProductId], references: [id])
+  stage            RecipeStage? @relation(fields: [stageId], references: [id])
 
-  @@unique([bundleProductId, componentProductId, componentVariantId])
+  @@unique([bundleProductId, componentProductId, componentVariantId, stageKey])
   @@index([tenantId, bundleProductId])
   @@map("product_bundle_lines")
 }
@@ -2063,8 +2096,11 @@ model Order {
   invoices     Invoice[]
   returnEvents ReturnEvent[]
   documents    Document[]
-  rentalExt    ModRentalOrder?
-  layaways     LayawaySchedule[]
+  rentalExt       ModRentalOrder?
+  restaurantExt   RestaurantOrder?
+  layaways        LayawaySchedule[]
+  kitchenTickets  KitchenTicket[]
+  restaurantTables RestaurantTable[]
 
   @@unique([tenantId, orderNumber])
   @@index([tenantId, status, kind])
@@ -2095,7 +2131,8 @@ model OrderItem {
   stockUnit   StockUnit?         @relation(fields: [stockUnitId], references: [id])
   stockLevel  StockLevel?        @relation(fields: [stockLevelId], references: [id])
   wearer      Customer?          @relation("ItemWearer", fields: [wearerCustomerId], references: [id])
-  reservations StockReservation[]
+  reservations       StockReservation[]
+  kitchenTicketLines KitchenTicketLine[]
 
   @@index([orderId])
   @@map("order_items")
@@ -2351,10 +2388,11 @@ model Resource {
   createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt  DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant       Tenant        @relation(fields: [tenantId], references: [id])
-  location     Location?     @relation(fields: [locationId], references: [id])
-  appointments Appointment[]
-  workJobs     WorkJob[]
+  tenant          Tenant           @relation(fields: [tenantId], references: [id])
+  location        Location?        @relation(fields: [locationId], references: [id])
+  appointments    Appointment[]
+  workJobs        WorkJob[]
+  restaurantTable RestaurantTable?
 
   @@index([tenantId, type, status])
   @@index([tenantId, locationId])
@@ -3542,4 +3580,373 @@ model GroupCustomerLink {
   @@unique([businessGroupId, tenantId, customerId])
   @@index([businessGroupId, matchKey])
   @@map("group_customer_links")
+}
+
+// ─── Restaurant pack (optional) ─────────────────────────────────────────────
+// Overlay on Universal Core. Does not replace Order / Payment / Inventory.
+// Runtime gate: capabilities TABLE | KOT | KITCHEN — never if (businessType === 'restaurant').
+
+enum DiningMode {
+  dine_in
+  takeaway
+  delivery
+  pickup
+  online
+}
+
+enum DiningTableStatus {
+  available
+  occupied
+  reserved
+  cleaning
+  blocked
+}
+
+enum KitchenTicketStatus {
+  new
+  accepted
+  preparing
+  ready
+  served
+  cancelled
+}
+
+enum RestaurantOrderChannel {
+  pos
+  qr
+  website
+  aggregator
+  phone
+  manual
+}
+
+/// Tenant restaurant-pack settings. One row per shop (optional location default).
+model RestaurantConfig {
+  id                     String   @id @default(uuid()) @db.Uuid
+  tenantId               String   @unique @map("tenant_id") @db.Uuid
+  locationId             String?  @map("location_id") @db.Uuid
+  enabledDiningModes     Json     @default("[\"dine_in\", \"takeaway\"]") @map("enabled_dining_modes")
+  tableManagement        Boolean  @default(true) @map("table_management")
+  kotEnabled             Boolean  @default(true) @map("kot_enabled")
+  kdsEnabled             Boolean  @default(false) @map("kds_enabled")
+  captainOrdering        Boolean  @default(false) @map("captain_ordering")
+  qrOrdering             Boolean  @default(false) @map("qr_ordering")
+  onlineOrdering         Boolean  @default(false) @map("online_ordering")
+  recipesEnabled         Boolean  @default(false) @map("recipes_enabled")
+  reservationsEnabled    Boolean  @default(false) @map("reservations_enabled")
+  tokenManagement        Boolean  @default(false) @map("token_management")
+  /// order_finalize (default) | kot_confirm — never both
+  consumptionPolicy      String   @default("order_finalize") @map("consumption_policy") @db.VarChar(32)
+  serviceChargePercent   Decimal? @map("service_charge_percent") @db.Decimal(6, 3)
+  packagingCharge        Decimal? @map("packaging_charge") @db.Decimal(12, 2)
+  deliveryCharge         Decimal? @map("delivery_charge") @db.Decimal(12, 2)
+  prepWarnMinutes        Int      @default(10) @map("prep_warn_minutes")
+  prepCriticalMinutes    Int      @default(20) @map("prep_critical_minutes")
+  otpOnQrOrder           Boolean  @default(false) @map("otp_on_qr_order")
+  meta                   Json     @default("{}")
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  location Location? @relation(fields: [locationId], references: [id])
+
+  @@map("restaurant_configs")
+}
+
+model RestaurantFloor {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  locationId String   @map("location_id") @db.Uuid
+  name       String
+  sortOrder  Int      @default(0) @map("sort_order")
+  isActive   Boolean  @default(true) @map("is_active")
+  meta       Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id])
+  location Location          @relation(fields: [locationId], references: [id])
+  tables   RestaurantTable[]
+
+  @@index([tenantId, locationId])
+  @@map("restaurant_floors")
+}
+
+/// Dining table overlay on generic Resource (type=table). Status lives here so salon rooms stay untouched.
+model RestaurantTable {
+  id             String             @id @default(uuid()) @db.Uuid
+  tenantId       String             @map("tenant_id") @db.Uuid
+  locationId     String             @map("location_id") @db.Uuid
+  floorId        String?            @map("floor_id") @db.Uuid
+  resourceId     String             @unique @map("resource_id") @db.Uuid
+  name           String
+  capacity       Int                @default(2)
+  status         DiningTableStatus  @default(available)
+  currentOrderId String?            @map("current_order_id") @db.Uuid
+  sortOrder      Int                @default(0) @map("sort_order")
+  qrToken        String?            @unique @map("qr_token")
+  meta           Json               @default("{}")
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant       Tenant            @relation(fields: [tenantId], references: [id])
+  location     Location          @relation(fields: [locationId], references: [id])
+  floor        RestaurantFloor?  @relation(fields: [floorId], references: [id])
+  resource     Resource          @relation(fields: [resourceId], references: [id])
+  currentOrder Order?            @relation(fields: [currentOrderId], references: [id])
+  tickets      KitchenTicket[]
+  diningOrders RestaurantOrder[]
+  reservations DiningReservation[]
+
+  @@index([tenantId, locationId, status])
+  @@index([tenantId, currentOrderId])
+  @@map("restaurant_tables")
+}
+
+model KitchenStation {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  locationId String?  @map("location_id") @db.Uuid
+  name       String
+  code       String   @db.VarChar(40)
+  sortOrder  Int      @default(0) @map("sort_order")
+  isActive   Boolean  @default(true) @map("is_active")
+  meta       Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant              @relation(fields: [tenantId], references: [id])
+  location Location?           @relation(fields: [locationId], references: [id])
+  tickets  KitchenTicket[]
+  lines    KitchenTicketLine[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, locationId])
+  @@map("kitchen_stations")
+}
+
+model KitchenTicket {
+  id                    String               @id @default(uuid()) @db.Uuid
+  tenantId              String               @map("tenant_id") @db.Uuid
+  locationId            String               @map("location_id") @db.Uuid
+  orderId               String               @map("order_id") @db.Uuid
+  tableId               String?              @map("table_id") @db.Uuid
+  stationId             String?              @map("station_id") @db.Uuid
+  kotNumber             String               @map("kot_number")
+  diningMode            DiningMode           @default(dine_in) @map("dining_mode")
+  status                KitchenTicketStatus  @default(new)
+  priority              Int                  @default(0)
+  specialInstructions   String?              @map("special_instructions")
+  createdById           String?              @map("created_by_id") @db.Uuid
+  cancelledAt           DateTime?            @map("cancelled_at") @db.Timestamptz(6)
+  cancelReason          String?              @map("cancel_reason")
+  cancelledById         String?              @map("cancelled_by_id") @db.Uuid
+  acceptedAt            DateTime?            @map("accepted_at") @db.Timestamptz(6)
+  preparingAt           DateTime?            @map("preparing_at") @db.Timestamptz(6)
+  readyAt               DateTime?            @map("ready_at") @db.Timestamptz(6)
+  servedAt              DateTime?            @map("served_at") @db.Timestamptz(6)
+  recalledAt            DateTime?            @map("recalled_at") @db.Timestamptz(6)
+  idempotencyKey        String?              @map("idempotency_key") @db.VarChar(160)
+  meta                  Json                 @default("{}")
+  createdAt             DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant      Tenant               @relation(fields: [tenantId], references: [id])
+  location    Location             @relation(fields: [locationId], references: [id])
+  order       Order                @relation(fields: [orderId], references: [id])
+  table       RestaurantTable?     @relation(fields: [tableId], references: [id])
+  station     KitchenStation?      @relation(fields: [stationId], references: [id])
+  createdBy   User?                @relation("KitchenTicketCreatedBy", fields: [createdById], references: [id])
+  cancelledBy User?                @relation("KitchenTicketCancelledBy", fields: [cancelledById], references: [id])
+  lines       KitchenTicketLine[]
+
+  @@unique([tenantId, kotNumber])
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, locationId, status])
+  @@index([tenantId, orderId])
+  @@index([tenantId, createdAt])
+  @@map("kitchen_tickets")
+}
+
+model KitchenTicketLine {
+  id          String              @id @default(uuid()) @db.Uuid
+  tenantId    String              @map("tenant_id") @db.Uuid
+  ticketId    String              @map("ticket_id") @db.Uuid
+  orderItemId String?             @map("order_item_id") @db.Uuid
+  stationId   String?             @map("station_id") @db.Uuid
+  name        String
+  quantity    Decimal             @default(1) @db.Decimal(12, 3)
+  notes       String?
+  modifiers   Json                @default("[]")
+  status      KitchenTicketStatus @default(new)
+  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant    Tenant              @relation(fields: [tenantId], references: [id])
+  ticket    KitchenTicket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  orderItem OrderItem?          @relation(fields: [orderItemId], references: [id])
+  station   KitchenStation?     @relation(fields: [stationId], references: [id])
+
+  @@index([ticketId])
+  @@index([tenantId, orderItemId])
+  @@map("kitchen_ticket_lines")
+}
+
+/// 1:1 dining overlay on core Order. Inventory consumption is posted once via POS checkout.
+model RestaurantOrder {
+  id                  String                 @id @default(uuid()) @db.Uuid
+  tenantId            String                 @map("tenant_id") @db.Uuid
+  locationId          String                 @map("location_id") @db.Uuid
+  orderId             String                 @unique @map("order_id") @db.Uuid
+  tableId             String?                @map("table_id") @db.Uuid
+  diningMode          DiningMode             @default(dine_in) @map("dining_mode")
+  channel             RestaurantOrderChannel @default(pos)
+  covers              Int                    @default(1)
+  tokenNumber         Int?                   @map("token_number")
+  kitchenPhase        String?                @map("kitchen_phase") @db.VarChar(40)
+  guestName           String?                @map("guest_name")
+  deliveryAddress     String?                @map("delivery_address")
+  mergedFromTableIds  Json                   @default("[]") @map("merged_from_table_ids")
+  parentOrderId       String?                @map("parent_order_id") @db.Uuid
+  /// true after checkout posts inventory — prevents KOT + bill double-deduct
+  consumptionPosted   Boolean                @default(false) @map("consumption_posted")
+  billedAt            DateTime?              @map("billed_at") @db.Timestamptz(6)
+  meta                Json                   @default("{}")
+  createdAt           DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime               @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant           @relation(fields: [tenantId], references: [id])
+  location Location         @relation(fields: [locationId], references: [id])
+  order    Order            @relation(fields: [orderId], references: [id])
+  table    RestaurantTable? @relation(fields: [tableId], references: [id])
+
+  @@index([tenantId, locationId, diningMode])
+  @@index([tenantId, tableId])
+  @@map("restaurant_orders")
+}
+
+model DiningReservation {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  locationId String   @map("location_id") @db.Uuid
+  tableId    String?  @map("table_id") @db.Uuid
+  guestName  String   @map("guest_name")
+  guestPhone String?  @map("guest_phone")
+  covers     Int      @default(2)
+  startAt    DateTime @map("start_at") @db.Timestamptz(6)
+  status     String   @default("booked") @db.VarChar(20)
+  notes      String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant           @relation(fields: [tenantId], references: [id])
+  location Location         @relation(fields: [locationId], references: [id])
+  table    RestaurantTable? @relation(fields: [tableId], references: [id])
+
+  @@index([tenantId, locationId, startAt])
+  @@map("dining_reservations")
+}
+
+/// Optional production stages on a recipe (dough → sauce → assemble).
+model RecipeStage {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenantId         String   @map("tenant_id") @db.Uuid
+  productId        String   @map("product_id") @db.Uuid
+  name             String
+  sortOrder        Int      @default(0) @map("sort_order")
+  outputProductId  String?  @map("output_product_id") @db.Uuid
+  outputQty        Decimal  @default(1) @map("output_qty") @db.Decimal(12, 3)
+  meta             Json     @default("{}")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant              @relation(fields: [tenantId], references: [id])
+  product  Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
+  lines    ProductBundleLine[]
+
+  @@index([tenantId, productId])
+  @@map("recipe_stages")
+}
+
+model ModifierGroup {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  name       String
+  minSelect  Int      @default(0) @map("min_select")
+  maxSelect  Int      @default(1) @map("max_select")
+  required   Boolean  @default(false)
+  sortOrder  Int      @default(0) @map("sort_order")
+  isActive   Boolean  @default(true) @map("is_active")
+  meta       Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant                 @relation(fields: [tenantId], references: [id])
+  options  ModifierOption[]
+  products ProductModifierGroup[]
+
+  @@index([tenantId, name])
+  @@map("modifier_groups")
+}
+
+model ModifierOption {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenantId         String   @map("tenant_id") @db.Uuid
+  groupId          String   @map("group_id") @db.Uuid
+  name             String
+  priceDelta       Decimal  @default(0) @map("price_delta") @db.Decimal(12, 2)
+  linkedProductId  String?  @map("linked_product_id") @db.Uuid
+  consumeQty       Decimal? @map("consume_qty") @db.Decimal(12, 3)
+  isActive         Boolean  @default(true) @map("is_active")
+  sortOrder        Int      @default(0) @map("sort_order")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant         Tenant        @relation(fields: [tenantId], references: [id])
+  group          ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  linkedProduct  Product?      @relation("ModifierIngredient", fields: [linkedProductId], references: [id])
+
+  @@index([tenantId, groupId])
+  @@map("modifier_options")
+}
+
+model ProductModifierGroup {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  productId  String   @map("product_id") @db.Uuid
+  groupId    String   @map("group_id") @db.Uuid
+  sortOrder  Int      @default(0) @map("sort_order")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant  Tenant        @relation(fields: [tenantId], references: [id])
+  product Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  group   ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, groupId])
+  @@index([tenantId, productId])
+  @@map("product_modifier_groups")
+}
+
+/// Auditable dining/ops write-off — stock still moves via StockLedgerEntry.
+model WastageEvent {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  locationId      String   @map("location_id") @db.Uuid
+  productId       String   @map("product_id") @db.Uuid
+  stockLevelId    String?  @map("stock_level_id") @db.Uuid
+  qty             Decimal  @db.Decimal(12, 3)
+  unit            String?  @db.VarChar(16)
+  reason          String   @db.VarChar(40)
+  notes           String?
+  actorUserId     String?  @map("actor_user_id") @db.Uuid
+  ledgerEntryId   String?  @map("ledger_entry_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  location Location  @relation(fields: [locationId], references: [id])
+  actor    User?     @relation(fields: [actorUserId], references: [id])
+
+  @@index([tenantId, locationId, createdAt])
+  @@index([tenantId, productId, createdAt])
+  @@map("wastage_events")
 }

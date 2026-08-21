@@ -380,6 +380,28 @@ export class RestaurantService {
     return updated;
   }
 
+  async deleteTable(user: AuthUser, id: string) {
+    const table = await this.requireTable(user, id);
+    if (table.currentOrderId) {
+      throw new BadRequestException('Cannot delete table with an open order');
+    }
+    
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.restaurantTable.delete({ where: { id: table.id } });
+        await tx.resource.delete({ where: { id: table.resourceId } });
+      });
+      return { success: true };
+    } catch (e: any) {
+      if (e.code === 'P2003') {
+        throw new BadRequestException(
+          'Cannot delete table because it has historical orders. Please edit its status to Blocked instead.',
+        );
+      }
+      throw e;
+    }
+  }
+
   async openTable(user: AuthUser, tableId: string, dto: OpenTableDto) {
     const table = await this.requireTable(user, tableId);
     if (!canOpenTable(table.status)) {

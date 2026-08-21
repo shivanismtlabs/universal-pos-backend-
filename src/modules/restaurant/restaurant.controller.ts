@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -139,6 +140,15 @@ export class RestaurantController {
     @Body() dto: UpdateDiningTableDto,
   ) {
     return this.restaurant.updateTable(user, id, dto);
+  }
+
+  @Delete('tables/:id')
+  @Roles(...RoleGroup.lead)
+  deleteTable(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.restaurant.deleteTable(user, id);
   }
 
   @Post('tables/:id/open')

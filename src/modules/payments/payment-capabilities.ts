@@ -28,13 +28,12 @@ const INTERNAL_IMMEDIATE: PaymentMethod[] = [
   PaymentMethod.store_credit,
   PaymentMethod.qr,
   PaymentMethod.wallet,
-  PaymentMethod.emi,
 ];
 
 const STRIPE_METHODS: PaymentMethod[] = [PaymentMethod.card, PaymentMethod.upi];
 
 /** EMI still needs a finance provider; QR/Wallet are cashier-confirmed in-store. */
-const UNCONFIGURED_EXTERNAL: PaymentMethod[] = [];
+const UNCONFIGURED_EXTERNAL: PaymentMethod[] = [PaymentMethod.emi];
 
 const CAPABILITIES: Record<PaymentMethod, PaymentMethodCapability> = {
   [PaymentMethod.cash]: {
@@ -136,8 +135,8 @@ const CAPABILITIES: Record<PaymentMethod, PaymentMethodCapability> = {
   [PaymentMethod.emi]: {
     method: PaymentMethod.emi,
     displayName: 'EMI',
-    requiresProvider: false,
-    requiresConfirmation: false,
+    requiresProvider: true,
+    requiresConfirmation: true,
     supportsRefund: true,
     supportsPartialPayment: false,
     supportsOffline: false,

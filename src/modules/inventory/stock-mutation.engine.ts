@@ -522,6 +522,9 @@ export class StockMutationEngine {
       left -= take;
     }
     if (left > EPS) {
+      if (!out.length) {
+        return [];
+      }
       throw new BadRequestException(
         `Insufficient batch stock (need ${args.need}, short ${left})`,
       );

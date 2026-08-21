@@ -159,11 +159,9 @@ export class PosController {
 
   @Post('sale/products/import')
   @Roles(...RoleGroup.catalogWrite)
-  @UseGuards(CommerceModeGuard)
-  @RequireCommerceModes('sale')
   @ApiOperation({
     summary:
-      'Bulk import sale items (CSV upload rows) — universal catalog, any industry',
+      'Bulk import catalog items (CSV/Excel rows) — any commerce mode, any industry',
   })
   importSaleProducts(
     @CurrentUser() user: AuthUser,

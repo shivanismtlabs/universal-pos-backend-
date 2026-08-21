@@ -16,6 +16,7 @@ import {
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../../database/database.module';
 import { assertLocationAccess } from '../../common/location-access';
+import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import type { AuthUser } from '../auth/types';
 import {
   canMergeTables,
@@ -236,15 +237,33 @@ export class RestaurantService {
       await assertLocationAccess(this.prisma, user, dto.locationId);
     }
     const code = dto.code.trim().toLowerCase().replace(/\s+/g, '_');
-    return this.prisma.kitchenStation.create({
-      data: {
-        tenantId: user.tenantId,
-        locationId: dto.locationId,
-        name: dto.name.trim(),
-        code,
-        sortOrder: dto.sortOrder ?? 0,
-      },
+    const existing = await this.prisma.kitchenStation.findUnique({
+      where: { tenantId_code: { tenantId: user.tenantId, code } },
     });
+    if (existing) {
+      return this.prisma.kitchenStation.update({
+        where: { id: existing.id },
+        data: {
+          name: dto.name.trim(),
+          ...(dto.locationId !== undefined ? { locationId: dto.locationId } : {}),
+          ...(dto.sortOrder !== undefined ? { sortOrder: dto.sortOrder } : {}),
+          isActive: true,
+        },
+      });
+    }
+    try {
+      return await this.prisma.kitchenStation.create({
+        data: {
+          tenantId: user.tenantId,
+          locationId: dto.locationId,
+          name: dto.name.trim(),
+          code,
+          sortOrder: dto.sortOrder ?? 0,
+        },
+      });
+    } catch (error) {
+      throwIfUnique(error, `Kitchen station “${code}” already exists`);
+    }
   }
 
   async listTables(user: AuthUser, locationId?: string) {

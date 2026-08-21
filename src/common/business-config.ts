@@ -486,8 +486,9 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
   gym: {
     id: 'gym',
     label: 'Gym / fitness',
-    description: 'Memberships + optional personal training (subscription mode)',
-    defaultCommerceModes: ['subscription', 'service'],
+    description:
+      'Retail items + training services + memberships (sale, service, subscription)',
+    defaultCommerceModes: ['sale', 'service', 'subscription'],
     billing: {
       style: 'appointment',
       allowSplitTender: true,

@@ -399,6 +399,7 @@ export const BUSINESS_TYPE_CAPABILITY_DEFAULTS: Record<
     'ATTENDANCE',
     'STAFF_ASSIGNMENT',
     'BOOKING',
+    'INVENTORY',
   ],
   rental: [
     'INVENTORY',

@@ -580,8 +580,6 @@ export class PosService {
    * Creates missing categories by name when allowed.
    */
   async importSaleProducts(user: AuthUser, dto: ImportSaleProductsDto) {
-    await this.assertSaleShop(user.tenantId);
-
     const rows = dto.items ?? [];
     if (!rows.length) {
       throw new BadRequestException('No items to import');

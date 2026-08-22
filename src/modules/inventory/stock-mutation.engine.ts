@@ -704,7 +704,6 @@ export class StockMutationEngine {
         where: {
           tenantId: input.tenantId,
           bundleProductId: input.productId,
-          consumeOnSale: true,
           stageId: input.stageId,
         },
       });

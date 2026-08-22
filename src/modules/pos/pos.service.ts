@@ -1295,6 +1295,8 @@ export class PosService {
         orderNumber: true,
         status: true,
         subtotal: true,
+        taxTotal: true,
+        discountTotal: true,
         balanceDue: true,
         createdAt: true,
         customer: { select: { fullName: true, phone: true } },
@@ -1307,7 +1309,13 @@ export class PosService {
         orderNumber: o.orderNumber,
         status: o.status,
         subtotal: o.subtotal,
+        taxTotal: o.taxTotal,
+        discountTotal: o.discountTotal,
         balanceDue: o.balanceDue,
+        total: Math.max(
+          0,
+          Number(o.subtotal) + Number(o.taxTotal) - Number(o.discountTotal),
+        ),
         createdAt: o.createdAt,
         customerName: o.customer?.fullName ?? 'Walk-in',
         itemCount: o._count.items,
@@ -2274,6 +2282,22 @@ export class PosService {
         }
       }
 
+      const merchAfterDisc = Math.max(
+        0,
+        merchandise - Number(dto.discountAmount ?? 0),
+      );
+      await this.restaurant.attachCounterDining(tx, {
+        tenantId: user.tenantId,
+        userId: user.userId,
+        orderId: created.id,
+        locationId: dto.locationId,
+        meta: {
+          ...(dto.meta && typeof dto.meta === 'object' ? dto.meta : {}),
+          ...(dto.note ? { note: dto.note } : {}),
+        },
+        merchandiseAfterDiscount: merchAfterDisc,
+      });
+
       await this.ordersService.recalculateTotals(
         tx,
         user.tenantId,
@@ -2551,6 +2575,11 @@ export class PosService {
     });
 
     await this.releaseDiningIfAny(user.tenantId, orderId, user.userId);
+    try {
+      await this.restaurant.ensureKotAfterSale(user, orderId);
+    } catch {
+      /* dining overlay optional */
+    }
 
     return this.getReceipt(user, orderId);
   }
@@ -2840,6 +2869,22 @@ export class PosService {
           },
         });
       }
+
+      const merchAfterDisc = Math.max(
+        0,
+        merchandise - Number(dto.discountAmount ?? 0),
+      );
+      await this.restaurant.attachCounterDining(tx, {
+        tenantId: user.tenantId,
+        userId: user.userId,
+        orderId: created.id,
+        locationId: dto.locationId,
+        meta: {
+          ...(dto.meta && typeof dto.meta === 'object' ? dto.meta : {}),
+          ...(dto.note ? { note: dto.note } : {}),
+        },
+        merchandiseAfterDiscount: merchAfterDisc,
+      });
 
       await this.ordersService.recalculateTotals(
         tx,
@@ -3292,6 +3337,11 @@ export class PosService {
     }
 
     await this.releaseDiningIfAny(user.tenantId, result.orderId, user.userId);
+    try {
+      await this.restaurant.ensureKotAfterSale(user, result.orderId);
+    } catch {
+      /* dining overlay optional */
+    }
 
     return {
       order,
@@ -3538,7 +3588,16 @@ export class PosService {
         discountTotal: order.discountTotal,
         depositTotal: order.depositTotal,
         balanceDue: order.balanceDue,
+        feesTotal: (order.fees ?? []).reduce(
+          (s, f) => s + Number(f.amount),
+          0,
+        ),
       },
+      fees: (order.fees ?? []).map((f) => ({
+        feeCode: f.feeCode,
+        reason: f.reason,
+        amount: f.amount,
+      })),
       payments: order.payments.map((p) => ({
         id: p.id,
         type: p.type,

@@ -33,12 +33,15 @@ import {
   MoveTableDto,
   OpenDiningOrderDto,
   OpenTableDto,
+  PatchGuestSpecialsDto,
   RecordWastageDto,
   SendKotDto,
   SplitItemsDto,
   UpdateDiningTableDto,
   UpdateFloorDto,
   UpdateKotStatusDto,
+  UpdateStationDto,
+  VoidDiningOrderDto,
   UpsertRecipeDto,
   UpsertRestaurantConfigDto,
   CreateReservationDto,
@@ -112,6 +115,16 @@ export class RestaurantController {
   @Roles(...RoleGroup.lead)
   createStation(@CurrentUser() user: AuthUser, @Body() dto: CreateStationDto) {
     return this.restaurant.createStation(user, dto);
+  }
+
+  @Patch('stations/:id')
+  @Roles(...RoleGroup.lead)
+  updateStation(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateStationDto,
+  ) {
+    return this.restaurant.updateStation(user, id, dto);
   }
 
   @Get('tables')
@@ -193,6 +206,19 @@ export class RestaurantController {
     return this.restaurant.getDiningOrder(user, id);
   }
 
+  @Patch('orders/:id/specials')
+  @Roles(...RoleGroup.diningFloor)
+  @ApiOperation({
+    summary: 'Guest specials — water, cake, décor, occasion (prints on KOT)',
+  })
+  patchGuestSpecials(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: PatchGuestSpecialsDto,
+  ) {
+    return this.restaurant.patchGuestSpecials(user, id, dto);
+  }
+
   @Post('orders/:id/split')
   @Roles(...RoleGroup.diningFloor)
   split(
@@ -228,6 +254,29 @@ export class RestaurantController {
     @Body() dto: UpdateKotStatusDto,
   ) {
     return this.restaurant.updateKotStatus(user, id, dto);
+  }
+
+  @Post('kots/:id/reprint')
+  @Roles(...RoleGroup.kitchenOps, ...RoleGroup.diningFloor)
+  @ApiOperation({ summary: 'Reprint a kitchen ticket (does not create a new KOT)' })
+  reprintKot(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.restaurant.reprintKot(user, id);
+  }
+
+  @Post('orders/:id/void')
+  @Roles(...RoleGroup.diningFloor)
+  @ApiOperation({
+    summary: 'Cancel an unpaid dining bill and recall KOTs',
+  })
+  voidOrder(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: VoidDiningOrderDto,
+  ) {
+    return this.restaurant.voidDiningOrder(user, id, dto.reason);
   }
 
   @Get('recipes')

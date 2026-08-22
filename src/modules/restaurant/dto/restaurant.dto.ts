@@ -1,4 +1,4 @@
-import { DINING_MODES } from '../restaurant-policy';
+import { DINING_MODES, GUEST_OCCASIONS, GUEST_REQUESTS } from '../restaurant-policy';
 import {
   ArrayNotEmpty,
   IsArray,
@@ -14,8 +14,9 @@ import {
   Min,
   MinLength,
   ValidateNested,
+  ValidateIf,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   DiningMode,
@@ -113,6 +114,11 @@ export class UpsertRestaurantConfigDto {
   @IsOptional()
   @IsBoolean()
   otpOnQrOrder?: boolean;
+
+  /** Named selling lists (POS / QR / outlet). Stored on config meta — not a restaurant-only catalog. */
+  @IsOptional()
+  @IsArray()
+  sellingMenus?: unknown[];
 }
 
 export class CreateFloorDto {
@@ -145,6 +151,33 @@ export class UpdateFloorDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  categoryIds?: string[];
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === null || value === '' ? null : value,
+  )
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  taxRatePercent?: number | null;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === null || value === '' ? null : value,
+  )
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  serviceChargePercent?: number | null;
 }
 
 export class CreateStationDto {
@@ -166,6 +199,39 @@ export class CreateStationDto {
   @Type(() => Number)
   @IsInt()
   sortOrder?: number;
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  categoryIds?: string[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  printerName?: string;
+}
+
+export class UpdateStationDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  name?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  categoryIds?: string[];
+
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @IsString()
+  @MaxLength(80)
+  printerName?: string | null;
 }
 
 export class CreateDiningTableDto {
@@ -202,6 +268,7 @@ export class UpdateDiningTableDto {
   name?: string;
 
   @IsOptional()
+  @ValidateIf((_, v) => v !== null && v !== undefined && v !== '')
   @IsUUID()
   floorId?: string | null;
 
@@ -220,6 +287,20 @@ export class UpdateDiningTableDto {
   @Type(() => Number)
   @IsInt()
   sortOrder?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  layoutX?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  layoutY?: number;
 }
 
 export class OpenTableDto {
@@ -318,6 +399,22 @@ export class OpenDiningOrderDto {
   skipTableRequirement?: boolean;
 }
 
+export class PatchGuestSpecialsDto {
+  @IsOptional()
+  @IsIn([...GUEST_OCCASIONS])
+  occasion?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsIn([...GUEST_REQUESTS], { each: true })
+  requests?: string[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(240)
+  note?: string;
+}
+
 export class SendKotDto {
   @IsOptional()
   @IsUUID()
@@ -342,13 +439,37 @@ export class SendKotDto {
 }
 
 export class UpdateKotStatusDto {
+  @IsOptional()
   @IsIn(['new', 'accepted', 'preparing', 'ready', 'served', 'cancelled'])
-  status!: KitchenTicketStatus;
+  status?: KitchenTicketStatus;
 
   @IsOptional()
   @IsString()
   @MaxLength(240)
   cancelReason?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(400)
+  specialInstructions?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(9)
+  priority?: number;
+
+  @IsOptional()
+  @IsUUID()
+  lineId?: string;
+}
+
+export class VoidDiningOrderDto {
+  @IsString()
+  @MinLength(3)
+  @MaxLength(240)
+  reason!: string;
 }
 
 export class ListKotQueryDto {
@@ -393,6 +514,10 @@ export class RecipeLineDto {
   @IsOptional()
   @IsUUID()
   stageId?: string;
+
+  @IsOptional()
+  @IsIn(['recipe', 'production'])
+  purpose?: string;
 }
 
 export class UpsertRecipeDto {
@@ -530,6 +655,16 @@ export class QrOrderLineDto {
   @IsNumber()
   @Min(0.001)
   quantity!: number;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  modifiers?: string[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  note?: string;
 }
 
 export class QrPlaceOrderDto {

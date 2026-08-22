@@ -105,6 +105,7 @@ describe('CSV Catalog Import Authorization & Commerce Mode Guard', () => {
         {} as any,
         {} as any,
         {} as any,
+        {} as any,
       );
     });
 

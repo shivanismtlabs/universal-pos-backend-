@@ -37,6 +37,7 @@ import {
   GenerateSkuDto,
   ListCatalogQueryDto,
   SetBundleLinesDto,
+  BulkDeleteProductsDto,
   UpdateBatchDto,
   UpdateBrandDto,
   UpdateCatalogProductDto,
@@ -488,7 +489,9 @@ export class CatalogService {
       ...(categoryIds ? { categoryId: { in: categoryIds } } : {}),
       ...(query.brandId ? { brandId: query.brandId } : {}),
       ...(query.kind ? { kind: query.kind } : {}),
-      ...(query.status ? { status: query.status } : {}),
+      ...(query.status
+        ? { status: query.status }
+        : { status: { not: ProductStatus.archived } }),
       ...(query.availableInPos === 'true'
         ? { availableInPos: true }
         : query.availableInPos === 'false'
@@ -1199,80 +1202,66 @@ export class CatalogService {
   async deleteProduct(user: AuthUser, id: string) {
     await this.requireProduct(user.tenantId, id);
 
-    const [orderUsed, subUsed, bundleUsed, units] = await Promise.all([
-      this.prisma.orderItem.count({
-        where: { tenantId: user.tenantId, productId: id },
-      }),
-      this.prisma.customerSubscription.count({
-        where: { tenantId: user.tenantId, productId: id },
-      }),
-      this.prisma.productBundleLine.count({
-        where: { tenantId: user.tenantId, componentProductId: id },
-      }),
-      this.prisma.stockUnit.count({
-        where: { tenantId: user.tenantId, productId: id },
-      }),
-    ]);
-
     const levels = await this.prisma.stockLevel.findMany({
       where: { tenantId: user.tenantId, productId: id },
       select: { id: true },
     });
     const levelIds = levels.map((l) => l.id);
 
-    let stockHistory = 0;
-    if (levelIds.length) {
-      const [ledger, poLines, grnLines, countLines, orderOnLevel] =
-        await Promise.all([
-          this.prisma.stockLedgerEntry.count({
-            where: { tenantId: user.tenantId, productId: id },
-          }),
-          this.prisma.purchaseOrderLine.count({
-            where: { tenantId: user.tenantId, stockLevelId: { in: levelIds } },
-          }),
-          this.prisma.goodsReceiptLine.count({
-            where: { tenantId: user.tenantId, stockLevelId: { in: levelIds } },
-          }),
-          this.prisma.stockCountLine.count({
-            where: { productId: id },
-          }),
-          this.prisma.orderItem.count({
-            where: {
-              tenantId: user.tenantId,
-              stockLevelId: { in: levelIds },
-            },
-          }),
-        ]);
-      stockHistory = ledger + poLines + grnLines + countLines + orderOnLevel;
-    }
-
-    // Prefer archive when the item has sales / purchases / stock history
-    if (
-      orderUsed > 0 ||
-      subUsed > 0 ||
-      bundleUsed > 0 ||
-      units > 0 ||
-      stockHistory > 0
-    ) {
-      const row = await this.setStatus(user, id, ProductStatus.archived);
-      return { ok: true, deleted: false, softDeleted: true, product: row };
-    }
-
     try {
       await this.prisma.$transaction(async (tx) => {
+        // Detach product reference from historical order items so invoices & receipts stay intact
+        await tx.orderItem.updateMany({
+          where: { tenantId: user.tenantId, productId: id },
+          data: { productId: null, stockLevelId: null },
+        });
         if (levelIds.length) {
-          await tx.stockLedgerEntry.deleteMany({
-            where: { tenantId: user.tenantId, productId: id },
+          await tx.orderItem.updateMany({
+            where: { tenantId: user.tenantId, stockLevelId: { in: levelIds } },
+            data: { productId: null, stockLevelId: null },
           });
-          await tx.stockCountLine.deleteMany({
-            where: { productId: id },
+        }
+
+        // Clean up customer subscriptions if any
+        await tx.customerSubscription.deleteMany({
+          where: { tenantId: user.tenantId, productId: id },
+        });
+
+        // Clean up stock ledger & counts
+        await tx.stockLedgerEntry.deleteMany({
+          where: { tenantId: user.tenantId, productId: id },
+        });
+        await tx.stockCountLine.deleteMany({
+          where: { productId: id },
+        });
+        await tx.qtyReservation.deleteMany({
+          where: { tenantId: user.tenantId, productId: id },
+        });
+        await tx.unitConversion.deleteMany({
+          where: { tenantId: user.tenantId, productId: id },
+        });
+        await tx.productBundleLine.deleteMany({
+          where: { tenantId: user.tenantId, componentProductId: id },
+        });
+        await tx.stockUnit.deleteMany({
+          where: { tenantId: user.tenantId, productId: id },
+        });
+
+        if (levelIds.length) {
+          await tx.purchaseOrderLine.deleteMany({
+            where: { tenantId: user.tenantId, stockLevelId: { in: levelIds } },
+          });
+          await tx.goodsReceiptLine.deleteMany({
+            where: { tenantId: user.tenantId, stockLevelId: { in: levelIds } },
           });
           await tx.stockLevel.deleteMany({
             where: { tenantId: user.tenantId, productId: id },
           });
         }
-        // Variants / batches cascade via schema
+
+        // Product variants, batches, bundle parent lines cascade via schema
         await tx.product.delete({ where: { id } });
+
         await tx.auditLog.create({
           data: {
             tenantId: user.tenantId,
@@ -1289,6 +1278,43 @@ export class CatalogService {
       const row = await this.setStatus(user, id, ProductStatus.archived);
       return { ok: true, deleted: false, softDeleted: true, product: row };
     }
+  }
+
+  async bulkDeleteProducts(user: AuthUser, dto: BulkDeleteProductsDto) {
+    const where: Prisma.ProductWhereInput = {
+      tenantId: user.tenantId,
+    };
+
+    if (dto.ids?.length) {
+      where.id = { in: dto.ids };
+    } else if (dto.skus?.length) {
+      where.skuCode = { in: dto.skus.map((s) => s.trim().toUpperCase()) };
+    } else if (!dto.all) {
+      throw new BadRequestException(
+        'Specify ids, skus, or all: true to delete products',
+      );
+    }
+
+    const products = await this.prisma.product.findMany({
+      where,
+      select: { id: true, name: true, skuCode: true },
+    });
+
+    let deleted = 0;
+    let archived = 0;
+
+    for (const p of products) {
+      const res = await this.deleteProduct(user, p.id);
+      if (res.deleted) deleted++;
+      else if (res.softDeleted) archived++;
+    }
+
+    return {
+      ok: true,
+      total: products.length,
+      deleted,
+      archived,
+    };
   }
 
   qrForProduct(user: AuthUser, id: string) {

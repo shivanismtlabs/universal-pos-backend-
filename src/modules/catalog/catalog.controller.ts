@@ -28,6 +28,7 @@ import {
   ListCatalogQueryDto,
   SetBundleLinesDto,
   SetProductStatusDto,
+  BulkDeleteProductsDto,
   UpdateBatchDto,
   UpdateBrandDto,
   UpdateCatalogProductDto,
@@ -233,6 +234,19 @@ export class CatalogController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.catalog.deleteProduct(user, id);
+  }
+
+  @Post('products/bulk-delete')
+  @Roles(...RoleGroup.catalogWrite)
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Bulk delete or clear catalog products (tenant-scoped)',
+  })
+  bulkDeleteProducts(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: BulkDeleteProductsDto,
+  ) {
+    return this.catalog.bulkDeleteProducts(user, dto);
   }
 
   // ── Variants ───────────────────────────────────────────────────────────

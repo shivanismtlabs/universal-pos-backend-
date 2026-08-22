@@ -4,15 +4,6 @@
     "node_modules",
     "test",
     "dist",
-    "**/*spec.ts",
-    "src/modules/appointments/**",
-    "src/modules/billing/**",
-    "src/modules/documents/**",
-    "src/modules/notify/**",
-    "src/modules/platform/**",
-    "src/modules/platform-billing/**",
-    "src/modules/reports/**",
-    "src/modules/suppliers/**",
-    "src/modules/sync/**"
+    "**/*spec.ts"
   ]
 }

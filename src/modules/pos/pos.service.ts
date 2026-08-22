@@ -937,16 +937,35 @@ export class PosService {
             : {}),
         },
       });
-      await tx.stockLevel.update({
-        where: { id: level.id },
-        data: {
-          ...(dto.price !== undefined
-            ? { sellPrice: Number(dto.price).toFixed(2) }
-            : {}),
-          ...(nextQty !== undefined ? { qtyOnHand: nextQty } : {}),
-          ...(dto.sellUnit !== undefined ? { sellUnit } : {}),
-        },
-      });
+      const levelPatch: Prisma.StockLevelUpdateInput = {
+        ...(dto.price !== undefined
+          ? { sellPrice: Number(dto.price).toFixed(2) }
+          : {}),
+        ...(dto.sellUnit !== undefined ? { sellUnit } : {}),
+      };
+      if (Object.keys(levelPatch).length) {
+        await tx.stockLevel.update({
+          where: { id: level.id },
+          data: levelPatch,
+        });
+      }
+      if (nextQty !== undefined) {
+        const delta = nextQty - Number(level.qtyOnHand);
+        if (Math.abs(delta) >= 1e-9) {
+          await this.stock.mutateInTx(tx, {
+            tenantId: user.tenantId,
+            actorUserId: user.userId,
+            locationId: level.locationId,
+            stockLevelId: level.id,
+            qty: delta,
+            type: StockLedgerType.adjustment,
+            reason: 'Item qty update',
+            referenceType: 'product',
+            referenceId: level.productId,
+            skipComponentExplosion: true,
+          });
+        }
+      }
     });
 
     return this.getSaleProduct(user, stockLevelId);
@@ -1300,11 +1319,23 @@ export class PosService {
         balanceDue: true,
         createdAt: true,
         customer: { select: { fullName: true, phone: true } },
+        items: {
+          take: 8,
+          select: {
+            description: true,
+            product: { select: { name: true } },
+          },
+        },
         _count: { select: { items: true } },
       },
     });
     return {
-      items: orders.map((o) => ({
+      items: orders.map((o) => {
+        const productNames = o.items.map(
+          (i) => i.product?.name || i.description || 'Item',
+        );
+        const more = Math.max(0, o._count.items - productNames.length);
+        return {
         id: o.id,
         orderNumber: o.orderNumber,
         status: o.status,
@@ -1319,7 +1350,11 @@ export class PosService {
         createdAt: o.createdAt,
         customerName: o.customer?.fullName ?? 'Walk-in',
         itemCount: o._count.items,
-      })),
+        productNames,
+        productSummary:
+          productNames.join(', ') + (more > 0 ? ` +${more}` : ''),
+      };
+      }),
     };
   }
 
@@ -2945,14 +2980,18 @@ export class PosService {
         amount: Number(p.amount),
       }));
       const clientPayHint = paymentLines.reduce((s, p) => s + p.amount, 0);
-      // Full-ticket cash: always collect server Due (includes exclusive tax).
-      // Stops client tax/settings drift from recording a tax-free payment.
+      // Full-ticket cash: lift to server Due only when cashier is already
+      // collecting ~the whole ticket (tax/settings drift). Never silently
+      // convert a split/partial part into a full payment.
       if (
         dto.allowPartial !== true &&
         paymentLines.length === 1 &&
         paymentLines[0]!.method === PaymentMethod.cash
       ) {
-        paymentLines[0]!.amount = Number(due.toFixed(2));
+        const sent = money(paymentLines[0]!.amount);
+        if (sent.gte(due.sub(0.05))) {
+          paymentLines[0]!.amount = Number(due.toFixed(2));
+        }
       }
       const paidSum = paymentLines.reduce((s, p) => s + p.amount, 0);
       if (paidSum <= 0) {

@@ -305,21 +305,39 @@ export class InventoryOpsService {
       query.page,
       Number(query.limit) || 25,
     );
+    const needle = query.q?.trim();
     const where: Prisma.StockLedgerEntryWhereInput = {
       tenantId: user.tenantId,
       ...locFilter,
       ...(query.productId ? { productId: query.productId } : {}),
       ...(query.type ? { type: query.type as StockLedgerType } : {}),
+      ...(needle
+        ? {
+            OR: [
+              {
+                product: {
+                  name: { contains: needle, mode: 'insensitive' },
+                },
+              },
+              {
+                product: {
+                  skuCode: { contains: needle, mode: 'insensitive' },
+                },
+              },
+            ],
+          }
+        : {}),
     };
     const [total, rows] = await this.prisma.$transaction([
       this.prisma.stockLedgerEntry.count({ where }),
       this.prisma.stockLedgerEntry.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip,
         take: limit,
         include: {
           product: { select: { id: true, name: true, skuCode: true } },
+          stockLevel: { select: { sku: true, sellUnit: true } },
           location: { select: { id: true, name: true } },
           actor: { select: { id: true, fullName: true } },
         },
@@ -329,6 +347,7 @@ export class InventoryOpsService {
       items: rows.map((r) => ({
         id: r.id,
         type: r.type,
+        qtyBefore: Number(r.qtyBefore),
         qtyDelta: Number(r.qtyDelta),
         qtyAfter: Number(r.qtyAfter),
         damageDelta: Number(r.damageDelta),
@@ -336,6 +355,8 @@ export class InventoryOpsService {
         referenceType: r.referenceType,
         referenceId: r.referenceId,
         createdAt: r.createdAt,
+        sku: r.product?.skuCode ?? r.stockLevel?.sku ?? null,
+        sellUnit: r.stockLevel?.sellUnit ?? null,
         product: r.product,
         location: r.location,
         actor: r.actor,
@@ -692,6 +713,7 @@ export class InventoryOpsService {
         productId: data.productId,
         stockLevelId: data.stockLevelId,
         type: data.type,
+        qtyBefore: data.qtyAfter - data.qtyDelta,
         qtyDelta: data.qtyDelta,
         qtyAfter: data.qtyAfter,
         damageDelta: data.damageDelta ?? 0,

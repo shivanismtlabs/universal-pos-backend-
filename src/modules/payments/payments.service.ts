@@ -113,7 +113,9 @@ export class PaymentsService {
 
       if (!opts?.allowFailedRecord && NON_PAYABLE.includes(order.status)) {
         throw new BadRequestException(
-          `Cannot record payment for a ${order.status} order`,
+          order.status === OrderStatus.closed
+            ? 'This ticket is already fully paid'
+            : `Cannot record payment for a ${order.status} order`,
         );
       }
 
@@ -124,12 +126,16 @@ export class PaymentsService {
       ) {
         const due = Number(order.balanceDue);
         if (due <= 0.009) {
-          throw new BadRequestException('Order is already fully paid');
+          throw new BadRequestException('This ticket is already fully paid');
         }
-        if (dto.amount > due + 0.02 && dto.method !== PaymentMethod.cash) {
-          throw new BadRequestException(
-            `Payment amount exceeds balance due (${due.toFixed(2)})`,
-          );
+        if (dto.amount > due + 0.02) {
+          if (dto.method === PaymentMethod.cash) {
+            dto.amount = Math.round(due * 100) / 100;
+          } else {
+            throw new BadRequestException(
+              `Payment amount exceeds balance due (${due.toFixed(2)})`,
+            );
+          }
         }
       }
 

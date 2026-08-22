@@ -382,6 +382,7 @@ export class RestaurantService {
 
   async listTables(user: AuthUser, locationId?: string) {
     if (locationId) await assertLocationAccess(this.prisma, user, locationId);
+    await this.syncEmptyTables(user.tenantId, locationId);
     const rows = await this.prisma.restaurantTable.findMany({
       where: {
         tenantId: user.tenantId,
@@ -1508,6 +1509,7 @@ export class RestaurantService {
       },
       select: { id: true },
     });
+    let freedTableIds: string[] = [];
     await this.prisma.$transaction(async (tx) => {
       if (kots.length) {
         await tx.kitchenTicket.updateMany({
@@ -1524,6 +1526,7 @@ export class RestaurantService {
         where: { tenantId: user.tenantId, currentOrderId: orderId },
         select: { id: true, resourceId: true },
       });
+      freedTableIds = tables.map((t) => t.id);
       await tx.restaurantTable.updateMany({
         where: { tenantId: user.tenantId, currentOrderId: orderId },
         data: { status: DiningTableStatus.available, currentOrderId: null },
@@ -1557,6 +1560,7 @@ export class RestaurantService {
       });
     });
     await this.audit(user, 'Order', orderId, 'void', { reason: note });
+    await this.releaseTablesAfterService(user.tenantId, freedTableIds);
     return { id: orderId, status: OrderStatus.cancelled };
   }
 
@@ -1584,6 +1588,7 @@ export class RestaurantService {
       event: 'order_finalize',
       alreadyPosted: ext.consumptionPosted,
     });
+    let freedTableIds: string[] = [];
     await this.prisma.$transaction(async (tx) => {
       await tx.restaurantOrder.update({
         where: { id: ext.id },
@@ -1597,20 +1602,22 @@ export class RestaurantService {
         where: { tenantId: opts.tenantId, currentOrderId: opts.orderId },
         select: { id: true, resourceId: true },
       });
+      freedTableIds = tables.map((t) => t.id);
       await tx.restaurantTable.updateMany({
         where: {
           tenantId: opts.tenantId,
           currentOrderId: opts.orderId,
         },
-        data: { status: DiningTableStatus.cleaning, currentOrderId: null },
+        data: { currentOrderId: null },
       });
       if (tables.length) {
         await tx.resource.updateMany({
           where: { id: { in: tables.map((t) => t.resourceId) } },
-          data: { status: ResourceStatus.maintenance },
+          data: { status: ResourceStatus.available },
         });
       }
     });
+    await this.releaseTablesAfterService(opts.tenantId, freedTableIds);
   }
 
   private async presentKot(id: string, user: AuthUser) {
@@ -1787,16 +1794,7 @@ export class RestaurantService {
         notes: dto.notes?.trim() || null,
       },
     });
-    if (dto.tableId) {
-      await this.prisma.restaurantTable.updateMany({
-        where: {
-          id: dto.tableId,
-          tenantId: user.tenantId,
-          status: DiningTableStatus.available,
-        },
-        data: { status: DiningTableStatus.reserved },
-      });
-    }
+    if (dto.tableId) await this.syncTableHold(user.tenantId, dto.tableId);
     return row;
   }
 
@@ -1812,22 +1810,149 @@ export class RestaurantService {
     if (dto.status === 'seated' && !canSeatReservation(row.status)) {
       throw new BadRequestException('Only booked reservations can be seated');
     }
+    if (dto.status === 'completed' && row.status !== 'seated') {
+      throw new BadRequestException('Only seated reservations can be completed');
+    }
     const next = await this.prisma.diningReservation.update({
       where: { id },
       data: { status: dto.status ?? row.status },
     });
-    if (dto.status === 'cancelled' && row.tableId) {
-      await this.prisma.restaurantTable.updateMany({
-        where: {
-          id: row.tableId,
-          tenantId: user.tenantId,
-          status: DiningTableStatus.reserved,
-          currentOrderId: null,
-        },
-        data: { status: DiningTableStatus.available },
+    if (dto.status === 'seated' && row.tableId) {
+      const table = await this.prisma.restaurantTable.findFirst({
+        where: { id: row.tableId, tenantId: user.tenantId },
+        select: { resourceId: true },
       });
+      await this.prisma.restaurantTable.updateMany({
+        where: { id: row.tableId, tenantId: user.tenantId },
+        data: { status: DiningTableStatus.occupied },
+      });
+      if (table) {
+        await this.prisma.resource.update({
+          where: { id: table.resourceId },
+          data: { status: ResourceStatus.occupied },
+        });
+      }
+    } else if (
+      (dto.status === 'cancelled' ||
+        dto.status === 'no_show' ||
+        dto.status === 'completed') &&
+      row.tableId
+    ) {
+      await this.syncTableHold(user.tenantId, row.tableId);
     }
     return next;
+  }
+
+  /** Empty table → available, unless a booking starts within 10 minutes. */
+  private async syncTableHold(tenantId: string, tableId: string) {
+    const table = await this.prisma.restaurantTable.findFirst({
+      where: { id: tableId, tenantId },
+    });
+    if (!table || table.currentOrderId) return;
+    if (table.status === DiningTableStatus.blocked) return;
+    const seated = await this.prisma.diningReservation.findFirst({
+      where: { tenantId, tableId, status: 'seated' },
+      select: { id: true },
+    });
+    if (seated) return;
+    const now = new Date();
+    const soon = new Date(now.getTime() + 10 * 60 * 1000);
+    const upcoming = await this.prisma.diningReservation.findFirst({
+      where: {
+        tenantId,
+        tableId,
+        status: 'booked',
+        startAt: { gte: new Date(now.getTime() - 30 * 60 * 1000), lte: soon },
+      },
+    });
+    const next = upcoming
+      ? DiningTableStatus.reserved
+      : DiningTableStatus.available;
+    if (table.status === next) return;
+    await this.prisma.restaurantTable.update({
+      where: { id: table.id },
+      data: { status: next },
+    });
+    await this.prisma.resource.update({
+      where: { id: table.resourceId },
+      data: {
+        status: upcoming
+          ? ResourceStatus.occupied
+          : ResourceStatus.available,
+      },
+    });
+  }
+
+  private async releaseTablesAfterService(
+    tenantId: string,
+    tableIds: string[],
+  ) {
+    if (!tableIds.length) return;
+    await this.prisma.diningReservation.updateMany({
+      where: { tenantId, tableId: { in: tableIds }, status: 'seated' },
+      data: { status: 'completed' },
+    });
+    for (const id of tableIds) await this.syncTableHold(tenantId, id);
+  }
+
+  private async syncEmptyTables(tenantId: string, locationId?: string) {
+    const now = new Date();
+    const soon = new Date(now.getTime() + 10 * 60 * 1000);
+    const tables = await this.prisma.restaurantTable.findMany({
+      where: {
+        tenantId,
+        ...(locationId ? { locationId } : {}),
+        currentOrderId: null,
+        status: { not: DiningTableStatus.blocked },
+      },
+      select: { id: true, resourceId: true, status: true },
+    });
+    if (!tables.length) return;
+    const holds = await this.prisma.diningReservation.findMany({
+      where: {
+        tenantId,
+        tableId: { in: tables.map((t) => t.id) },
+        status: { in: ['seated', 'booked'] },
+      },
+      select: { tableId: true, status: true, startAt: true },
+    });
+    const seatedIds = new Set(
+      holds
+        .filter((h) => h.status === 'seated')
+        .map((h) => h.tableId)
+        .filter((id): id is string => !!id),
+    );
+    const windowStart = new Date(now.getTime() - 30 * 60 * 1000);
+    const reservedIds = new Set(
+      holds
+        .filter(
+          (h) =>
+            h.status === 'booked' &&
+            h.tableId &&
+            h.startAt >= windowStart &&
+            h.startAt <= soon,
+        )
+        .map((h) => h.tableId as string),
+    );
+    for (const t of tables) {
+      if (seatedIds.has(t.id)) continue;
+      const next = reservedIds.has(t.id)
+        ? DiningTableStatus.reserved
+        : DiningTableStatus.available;
+      if (t.status === next) continue;
+      await this.prisma.restaurantTable.update({
+        where: { id: t.id },
+        data: { status: next },
+      });
+      await this.prisma.resource.update({
+        where: { id: t.resourceId },
+        data: {
+          status: reservedIds.has(t.id)
+            ? ResourceStatus.occupied
+            : ResourceStatus.available,
+        },
+      });
+    }
   }
 
   private async audit(

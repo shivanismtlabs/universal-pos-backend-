@@ -226,6 +226,7 @@ export const RESERVATION_STATUSES = [
   'seated',
   'cancelled',
   'no_show',
+  'completed',
 ] as const;
 
 export function canSeatReservation(status: string): boolean {

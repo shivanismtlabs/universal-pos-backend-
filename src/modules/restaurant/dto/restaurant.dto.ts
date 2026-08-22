@@ -720,6 +720,6 @@ export class CreateReservationDto {
 
 export class UpdateReservationDto {
   @IsOptional()
-  @IsIn(['booked', 'seated', 'cancelled', 'no_show'])
+  @IsIn(['booked', 'seated', 'cancelled', 'no_show', 'completed'])
   status?: string;
 }

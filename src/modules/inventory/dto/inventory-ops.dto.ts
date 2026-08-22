@@ -144,6 +144,12 @@ export class ListLedgerQueryDto {
   @IsString()
   type?: string;
 
+  @ApiPropertyOptional({ description: 'Filter by item name or SKU' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  q?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @Type(() => Number)

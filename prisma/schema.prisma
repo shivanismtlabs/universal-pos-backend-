@@ -372,6 +372,8 @@ model Tenant {
   stockLedgerEntries StockLedgerEntry[]
   stockCountSessions StockCountSession[]
   stockCountLines    StockCountLine[]
+  stockAdjustments   StockAdjustment[]
+  stockAdjustmentLines StockAdjustmentLine[]
   stockReservations  StockReservation[]
   stockMovements     StockMovement[]
   purchaseOrders     PurchaseOrder[]
@@ -601,6 +603,7 @@ model Location {
   productBatches    ProductBatch[]
   stockLedgerEntries StockLedgerEntry[]
   stockCountSessions StockCountSession[]
+  stockAdjustments   StockAdjustment[]
   qtyReservations   QtyReservation[]
   stockTransfersFrom StockTransfer[] @relation("TransferFromLocation")
   stockTransfersTo   StockTransfer[] @relation("TransferToLocation")
@@ -792,6 +795,9 @@ model User {
   memberships        Membership[]
   userRoles          UserRole[]
   auditLogs          AuditLog[]
+  adjustmentsCreated   StockAdjustment[]     @relation("AdjustmentCreatedBy")
+  adjustmentsFinalized StockAdjustment[]     @relation("AdjustmentFinalizedBy")
+  adjustmentsCancelled StockAdjustment[]     @relation("AdjustmentCancelledBy")
   stockMovements     StockMovement[]
   stockLedgerEntries StockLedgerEntry[]
   ordersCreated      Order[]             @relation("OrderCreatedBy")
@@ -1273,6 +1279,7 @@ model Product {
   customerSubscriptions CustomerSubscription[]
   stockLedgerEntries    StockLedgerEntry[]
   stockCountLines       StockCountLine[]
+  stockAdjustmentLines  StockAdjustmentLine[]
   workJobLines          WorkJobLine[]
   qtyReservations       QtyReservation[]
   unitConversions       UnitConversion[]
@@ -1614,6 +1621,7 @@ model StockLevel {
   purchaseOrderLines PurchaseOrderLine[]
   ledgerEntries      StockLedgerEntry[]
   countLines         StockCountLine[]
+  adjustmentLines    StockAdjustmentLine[]
   goodsReceiptLines  GoodsReceiptLine[]
 
   @@unique([tenantId, locationId, productId, variantKey])
@@ -1732,6 +1740,76 @@ model StockCountLine {
 
   @@unique([sessionId, stockLevelId])
   @@map("stock_count_lines")
+}
+
+enum StockAdjustmentStatus {
+  draft
+  pending
+  adjusted
+  cancelled
+}
+
+enum StockAdjustmentType {
+  quantity
+  value
+}
+
+model StockAdjustment {
+  id             String                @id @default(uuid()) @db.Uuid
+  tenantId       String                @map("tenant_id") @db.Uuid
+  locationId     String                @map("location_id") @db.Uuid
+  adjustmentNo   String                @map("adjustment_no") @db.VarChar(32)
+  adjustmentDate DateTime              @map("adjustment_date") @db.Timestamptz(6)
+  type           StockAdjustmentType   @default(quantity)
+  status         StockAdjustmentStatus @default(draft)
+  reason         String
+  description    String?
+  attachments    Json                  @default("[]")
+  createdById    String?               @map("created_by_id") @db.Uuid
+  finalizedAt    DateTime?             @map("finalized_at") @db.Timestamptz(6)
+  finalizedById  String?               @map("finalized_by_id") @db.Uuid
+  cancelledAt    DateTime?             @map("cancelled_at") @db.Timestamptz(6)
+  cancelledById  String?               @map("cancelled_by_id") @db.Uuid
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant      Tenant                @relation(fields: [tenantId], references: [id])
+  location    Location              @relation(fields: [locationId], references: [id])
+  createdBy   User?                 @relation("AdjustmentCreatedBy", fields: [createdById], references: [id])
+  finalizedBy User?                 @relation("AdjustmentFinalizedBy", fields: [finalizedById], references: [id])
+  cancelledBy User?                 @relation("AdjustmentCancelledBy", fields: [cancelledById], references: [id])
+  lines       StockAdjustmentLine[]
+
+  @@unique([tenantId, adjustmentNo])
+  @@index([tenantId, locationId, status])
+  @@index([tenantId, createdAt])
+  @@map("stock_adjustments")
+}
+
+model StockAdjustmentLine {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  adjustmentId    String   @map("adjustment_id") @db.Uuid
+  productId       String   @map("product_id") @db.Uuid
+  stockLevelId    String?  @map("stock_level_id") @db.Uuid
+  currentQty      Decimal  @default(0) @map("current_qty") @db.Decimal(12, 3)
+  adjustmentQty   Decimal  @default(0) @map("adjustment_qty") @db.Decimal(12, 3)
+  newQty          Decimal  @default(0) @map("new_qty") @db.Decimal(12, 3)
+  unit            String   @default("pcs") @db.VarChar(16)
+  currentUnitCost Decimal? @map("current_unit_cost") @db.Decimal(12, 2)
+  adjustmentValue Decimal? @map("adjustment_value") @db.Decimal(12, 2)
+  serialNumber    String?  @map("serial_number")
+  notes           String?
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant     Tenant          @relation(fields: [tenantId], references: [id])
+  adjustment StockAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Cascade)
+  product    Product         @relation(fields: [productId], references: [id])
+  stockLevel StockLevel?     @relation(fields: [stockLevelId], references: [id])
+
+  @@index([tenantId, adjustmentId])
+  @@index([tenantId, productId])
+  @@map("stock_adjustment_lines")
 }
 
 model StockReservation {

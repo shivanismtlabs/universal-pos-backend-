@@ -7,6 +7,8 @@ import { StockMutationEngine } from './stock-mutation.engine';
 import { NotifyModule } from '../notify/notify.module';
 import { EnterpriseModule } from '../enterprise/enterprise.module';
 
+import { StockAdjustmentService } from './stock-adjustment.service';
+
 @Module({
   imports: [NotifyModule, EnterpriseModule],
   controllers: [InventoryController],
@@ -15,12 +17,14 @@ import { EnterpriseModule } from '../enterprise/enterprise.module';
     InventoryOpsService,
     InventoryLifecycleService,
     StockMutationEngine,
+    StockAdjustmentService,
   ],
   exports: [
     InventoryService,
     InventoryOpsService,
     InventoryLifecycleService,
     StockMutationEngine,
+    StockAdjustmentService,
   ],
 })
 export class InventoryModule {}

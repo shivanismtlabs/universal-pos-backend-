@@ -71,7 +71,11 @@ export class SaleReturnsService {
         id: dto.orderId,
         tenantId: user.tenantId,
         kind: OrderKind.sale,
-        status: OrderStatus.closed,
+        OR: [
+          { status: OrderStatus.closed },
+          { status: OrderStatus.fulfilled },
+          { status: OrderStatus.confirmed, balanceDue: { lte: 0 } },
+        ],
       },
       include: {
         items: true,
@@ -310,7 +314,16 @@ export class SaleReturnsService {
           reasonCode: dto.reasonCode,
           refundAmount: refundAmount.toFixed(2),
           refundMethod: resolvedMethod,
-          itemsJson: lines,
+          itemsJson: lines.map((l) => {
+            const src = order.items.find(
+              (i) => i.stockLevelId === l.stockLevelId,
+            );
+            return {
+              ...l,
+              name: src?.description ?? null,
+              sku: null,
+            };
+          }),
           idempotencyKey: dto.idempotencyKey,
           parentPaymentId: dto.parentPaymentId,
         },
@@ -757,7 +770,11 @@ export class SaleReturnsService {
         id: dto.orderId,
         tenantId: user.tenantId,
         kind: OrderKind.sale,
-        status: OrderStatus.closed,
+        OR: [
+          { status: OrderStatus.closed },
+          { status: OrderStatus.fulfilled },
+          { status: OrderStatus.confirmed, balanceDue: { lte: 0 } },
+        ],
       },
       include: { items: true, payments: true },
     });

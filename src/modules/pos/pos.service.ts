@@ -1046,16 +1046,35 @@ export class PosService {
             : {}),
         },
       });
-      await tx.stockLevel.update({
-        where: { id: level.id },
-        data: {
-          ...(dto.price !== undefined
-            ? { sellPrice: Number(dto.price).toFixed(2) }
-            : {}),
-          ...(nextQty !== undefined ? { qtyOnHand: nextQty } : {}),
-          ...(dto.sellUnit !== undefined ? { sellUnit } : {}),
-        },
-      });
+      const levelPatch: Prisma.StockLevelUpdateInput = {
+        ...(dto.price !== undefined
+          ? { sellPrice: Number(dto.price).toFixed(2) }
+          : {}),
+        ...(dto.sellUnit !== undefined ? { sellUnit } : {}),
+      };
+      if (Object.keys(levelPatch).length) {
+        await tx.stockLevel.update({
+          where: { id: level.id },
+          data: levelPatch,
+        });
+      }
+      if (nextQty !== undefined) {
+        const delta = nextQty - Number(level.qtyOnHand);
+        if (Math.abs(delta) >= 1e-9) {
+          await this.stock.mutateInTx(tx, {
+            tenantId: user.tenantId,
+            actorUserId: user.userId,
+            locationId: level.locationId,
+            stockLevelId: level.id,
+            qty: delta,
+            type: StockLedgerType.adjustment,
+            reason: 'Item qty update',
+            referenceType: 'product',
+            referenceId: level.productId,
+            skipComponentExplosion: true,
+          });
+        }
+      }
     });
 
     return this.getSaleProduct(user, stockLevelId);
@@ -1404,23 +1423,47 @@ export class PosService {
         orderNumber: true,
         status: true,
         subtotal: true,
+        taxTotal: true,
+        discountTotal: true,
         balanceDue: true,
         createdAt: true,
         customer: { select: { fullName: true, phone: true } },
+        items: {
+          take: 8,
+          select: {
+            description: true,
+            product: { select: { name: true } },
+          },
+        },
         _count: { select: { items: true } },
       },
     });
     return {
-      items: orders.map((o) => ({
+      items: orders.map((o) => {
+        const productNames = o.items.map(
+          (i) => i.product?.name || i.description || 'Item',
+        );
+        const more = Math.max(0, o._count.items - productNames.length);
+        return {
         id: o.id,
         orderNumber: o.orderNumber,
         status: o.status,
         subtotal: o.subtotal,
+        taxTotal: o.taxTotal,
+        discountTotal: o.discountTotal,
         balanceDue: o.balanceDue,
+        total: Math.max(
+          0,
+          Number(o.subtotal) + Number(o.taxTotal) - Number(o.discountTotal),
+        ),
         createdAt: o.createdAt,
         customerName: o.customer?.fullName ?? 'Walk-in',
         itemCount: o._count.items,
-      })),
+        productNames,
+        productSummary:
+          productNames.join(', ') + (more > 0 ? ` +${more}` : ''),
+      };
+      }),
     };
   }
 
@@ -2383,6 +2426,22 @@ export class PosService {
         }
       }
 
+      const merchAfterDisc = Math.max(
+        0,
+        merchandise - Number(dto.discountAmount ?? 0),
+      );
+      await this.restaurant.attachCounterDining(tx, {
+        tenantId: user.tenantId,
+        userId: user.userId,
+        orderId: created.id,
+        locationId: dto.locationId,
+        meta: {
+          ...(dto.meta && typeof dto.meta === 'object' ? dto.meta : {}),
+          ...(dto.note ? { note: dto.note } : {}),
+        },
+        merchandiseAfterDiscount: merchAfterDisc,
+      });
+
       await this.ordersService.recalculateTotals(
         tx,
         user.tenantId,
@@ -2660,6 +2719,11 @@ export class PosService {
     });
 
     await this.releaseDiningIfAny(user.tenantId, orderId, user.userId);
+    try {
+      await this.restaurant.ensureKotAfterSale(user, orderId);
+    } catch {
+      /* dining overlay optional */
+    }
 
     return this.getReceipt(user, orderId);
   }
@@ -2950,6 +3014,22 @@ export class PosService {
         });
       }
 
+      const merchAfterDisc = Math.max(
+        0,
+        merchandise - Number(dto.discountAmount ?? 0),
+      );
+      await this.restaurant.attachCounterDining(tx, {
+        tenantId: user.tenantId,
+        userId: user.userId,
+        orderId: created.id,
+        locationId: dto.locationId,
+        meta: {
+          ...(dto.meta && typeof dto.meta === 'object' ? dto.meta : {}),
+          ...(dto.note ? { note: dto.note } : {}),
+        },
+        merchandiseAfterDiscount: merchAfterDisc,
+      });
+
       await this.ordersService.recalculateTotals(
         tx,
         user.tenantId,
@@ -3009,14 +3089,18 @@ export class PosService {
         amount: Number(p.amount),
       }));
       const clientPayHint = paymentLines.reduce((s, p) => s + p.amount, 0);
-      // Full-ticket cash: always collect server Due (includes exclusive tax).
-      // Stops client tax/settings drift from recording a tax-free payment.
+      // Full-ticket cash: lift to server Due only when cashier is already
+      // collecting ~the whole ticket (tax/settings drift). Never silently
+      // convert a split/partial part into a full payment.
       if (
         dto.allowPartial !== true &&
         paymentLines.length === 1 &&
         paymentLines[0]!.method === PaymentMethod.cash
       ) {
-        paymentLines[0]!.amount = Number(due.toFixed(2));
+        const sent = money(paymentLines[0]!.amount);
+        if (sent.gte(due.sub(0.05))) {
+          paymentLines[0]!.amount = Number(due.toFixed(2));
+        }
       }
       const paidSum = paymentLines.reduce((s, p) => s + p.amount, 0);
       if (paidSum <= 0) {
@@ -3401,6 +3485,11 @@ export class PosService {
     }
 
     await this.releaseDiningIfAny(user.tenantId, result.orderId, user.userId);
+    try {
+      await this.restaurant.ensureKotAfterSale(user, result.orderId);
+    } catch {
+      /* dining overlay optional */
+    }
 
     return {
       order,
@@ -3647,7 +3736,16 @@ export class PosService {
         discountTotal: order.discountTotal,
         depositTotal: order.depositTotal,
         balanceDue: order.balanceDue,
+        feesTotal: (order.fees ?? []).reduce(
+          (s, f) => s + Number(f.amount),
+          0,
+        ),
       },
+      fees: (order.fees ?? []).map((f) => ({
+        feeCode: f.feeCode,
+        reason: f.reason,
+        amount: f.amount,
+      })),
       payments: order.payments.map((p) => ({
         id: p.id,
         type: p.type,

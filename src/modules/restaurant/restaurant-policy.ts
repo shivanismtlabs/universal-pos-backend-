@@ -226,10 +226,97 @@ export const RESERVATION_STATUSES = [
   'seated',
   'cancelled',
   'no_show',
+  'completed',
 ] as const;
 
 export function canSeatReservation(status: string): boolean {
   return status === 'booked';
+}
+
+/** Guest table specials (water, cake, décor) — not a restaurant-only catalog. */
+export const GUEST_OCCASIONS = [
+  'none',
+  'birthday',
+  'anniversary',
+  'celebration',
+] as const;
+
+export type GuestOccasion = (typeof GUEST_OCCASIONS)[number];
+
+export const GUEST_REQUESTS = [
+  'water',
+  'cake',
+  'decor',
+  'candles',
+  'extra_cutlery',
+  'complimentary',
+] as const;
+
+export type GuestRequest = (typeof GUEST_REQUESTS)[number];
+
+const GUEST_REQUEST_LABEL: Record<GuestRequest, string> = {
+  water: 'Bottled water',
+  cake: 'Cake',
+  decor: 'Decoration',
+  candles: 'Candles',
+  extra_cutlery: 'Extra plates / cutlery',
+  complimentary: 'Complimentary',
+};
+
+export type GuestSpecials = {
+  occasion: Exclude<GuestOccasion, 'none'> | null;
+  requests: GuestRequest[];
+  note: string;
+};
+
+export function parseGuestSpecials(meta: unknown): GuestSpecials {
+  const root =
+    meta && typeof meta === 'object' && !Array.isArray(meta)
+      ? (meta as Record<string, unknown>)
+      : {};
+  const raw =
+    root.guestSpecials && typeof root.guestSpecials === 'object'
+      ? (root.guestSpecials as Record<string, unknown>)
+      : root;
+  const occasionRaw = String(raw.occasion ?? 'none');
+  const occasion =
+    occasionRaw === 'birthday' ||
+    occasionRaw === 'anniversary' ||
+    occasionRaw === 'celebration'
+      ? occasionRaw
+      : null;
+  const requests = Array.isArray(raw.requests)
+    ? raw.requests.filter((x): x is GuestRequest =>
+        GUEST_REQUESTS.includes(x as GuestRequest),
+      )
+    : [];
+  const note = typeof raw.note === 'string' ? raw.note.trim() : '';
+  return { occasion, requests, note };
+}
+
+export function formatGuestSpecials(specials: GuestSpecials): string {
+  const bits: string[] = [];
+  if (specials.occasion) {
+    bits.push(
+      `Occasion: ${specials.occasion.replace(/^\w/, (c) => c.toUpperCase())}`,
+    );
+  }
+  if (specials.requests.length) {
+    bits.push(specials.requests.map((r) => GUEST_REQUEST_LABEL[r]).join(', '));
+  }
+  if (specials.note) bits.push(specials.note);
+  return bits.join(' · ');
+}
+
+export function applyGuestSpecialsNote(
+  existing: string | null | undefined,
+  specialsText: string,
+): string {
+  const stripped = String(existing ?? '')
+    .replace(/(?:^|\n)\s*\[Guest\][^\n]*/g, '')
+    .trim();
+  const guest = specialsText ? `[Guest] ${specialsText}` : '';
+  return [stripped, guest].filter(Boolean).join('\n');
 }
 
 export function nextTokenNumber(last: number | null | undefined): number {
@@ -239,4 +326,264 @@ export function nextTokenNumber(last: number | null | undefined): number {
 /** Guest QR never posts inventory; checkout still does once. */
 export function qrOrderPostsInventory(): false {
   return false;
+}
+
+export type DiningFeeLine = {
+  feeCode: string;
+  reason: string;
+  amount: number;
+};
+
+/**
+ * Dining pack extras on a ticket. Service is dine-in % of food after discount.
+ * Packaging is takeaway/pickup/delivery/online. Delivery fee is delivery only.
+ * Never keyed off businessType.
+ */
+export function diningFeesFromConfig(opts: {
+  diningMode?: string | null;
+  merchandiseAfterDiscount: number;
+  serviceChargePercent?: number | null;
+  packagingCharge?: number | null;
+  deliveryCharge?: number | null;
+  areaTaxPercent?: number | null;
+}): DiningFeeLine[] {
+  const mode = opts.diningMode ?? '';
+  const base = Math.max(0, Number(opts.merchandiseAfterDiscount) || 0);
+  const fees: DiningFeeLine[] = [];
+  const servicePct = Number(opts.serviceChargePercent);
+  if (
+    mode === 'dine_in' &&
+    Number.isFinite(servicePct) &&
+    servicePct > 0 &&
+    base > 0
+  ) {
+    const amount = Math.round(((base * servicePct) / 100) * 100) / 100;
+    if (amount > 0) {
+      fees.push({
+        feeCode: 'service_charge',
+        reason: `Service ${servicePct}%`,
+        amount,
+      });
+    }
+  }
+  const pack = Number(opts.packagingCharge);
+  if (
+    (mode === 'takeaway' ||
+      mode === 'pickup' ||
+      mode === 'delivery' ||
+      mode === 'online') &&
+    Number.isFinite(pack) &&
+    pack > 0
+  ) {
+    fees.push({
+      feeCode: 'packaging',
+      reason: 'Packaging',
+      amount: Math.round(pack * 100) / 100,
+    });
+  }
+  const delivery = Number(opts.deliveryCharge);
+  if (mode === 'delivery' && Number.isFinite(delivery) && delivery > 0) {
+    fees.push({
+      feeCode: 'delivery',
+      reason: 'Delivery',
+      amount: Math.round(delivery * 100) / 100,
+    });
+  }
+  const areaTax = Number(opts.areaTaxPercent);
+  if (Number.isFinite(areaTax) && areaTax > 0 && base > 0) {
+    const amount = Math.round(((base * areaTax) / 100) * 100) / 100;
+    if (amount > 0) {
+      fees.push({
+        feeCode: 'area_tax',
+        reason: `Area tax ${areaTax}%`,
+        amount,
+      });
+    }
+  }
+  return fees;
+}
+
+export type FloorDiningSettings = {
+  categoryIds: string[];
+  taxRatePercent: number | null;
+  serviceChargePercent: number | null;
+};
+
+function optionalPercent(value: unknown): number | null {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+export function parseFloorDiningSettings(meta: unknown): FloorDiningSettings {
+  const m =
+    meta && typeof meta === 'object' && !Array.isArray(meta)
+      ? (meta as Record<string, unknown>)
+      : {};
+  const categoryIds = Array.isArray(m.categoryIds)
+    ? m.categoryIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : [];
+  return {
+    categoryIds,
+    taxRatePercent: optionalPercent(m.taxRatePercent),
+    serviceChargePercent: optionalPercent(m.serviceChargePercent),
+  };
+}
+
+export function parseTableLayout(meta: unknown): {
+  layoutX: number | null;
+  layoutY: number | null;
+} {
+  const m =
+    meta && typeof meta === 'object' && !Array.isArray(meta)
+      ? (meta as Record<string, unknown>)
+      : {};
+  const x = Number(m.layoutX);
+  const y = Number(m.layoutY);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return { layoutX: null, layoutY: null };
+  }
+  return {
+    layoutX: Math.min(90, Math.max(0, x)),
+    layoutY: Math.min(90, Math.max(0, y)),
+  };
+}
+
+export type StationKitchenSettings = {
+  categoryIds: string[];
+  printerName: string | null;
+};
+
+export function parseStationKitchenSettings(meta: unknown): StationKitchenSettings {
+  const m =
+    meta && typeof meta === 'object' && !Array.isArray(meta)
+      ? (meta as Record<string, unknown>)
+      : {};
+  const categoryIds = Array.isArray(m.categoryIds)
+    ? m.categoryIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : [];
+  const printer =
+    typeof m.printerName === 'string' ? m.printerName.trim() : '';
+  return {
+    categoryIds,
+    printerName: printer.length ? printer : null,
+  };
+}
+
+/** First station whose area menu includes this category; else fallback. */
+export function routeItemToStationId(
+  categoryId: string | null | undefined,
+  stations: Array<{ id: string; categoryIds: string[] }>,
+  fallbackStationId?: string | null,
+): string | null {
+  if (categoryId) {
+    const hit = stations.find((s) => s.categoryIds.includes(categoryId));
+    if (hit) return hit.id;
+  }
+  return fallbackStationId ?? stations[0]?.id ?? null;
+}
+
+export type SellingMenu = {
+  id: string;
+  name: string;
+  categoryIds: string[];
+  locationId: string | null;
+  channel: 'pos' | 'qr' | 'all';
+  isActive: boolean;
+  days: number[];
+  startTime: string | null;
+  endTime: string | null;
+};
+
+export function parseSellingMenus(input: unknown): SellingMenu[] {
+  const raw = Array.isArray(input)
+    ? input
+    : input && typeof input === 'object' && !Array.isArray(input)
+      ? (input as Record<string, unknown>).sellingMenus
+      : null;
+  const list = Array.isArray(raw) ? raw : [];
+  return list
+    .map((row) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+      const r = row as Record<string, unknown>;
+      const name = typeof r.name === 'string' ? r.name.trim() : '';
+      if (!name) return null;
+      const channel =
+        r.channel === 'pos' || r.channel === 'qr' || r.channel === 'all'
+          ? r.channel
+          : 'all';
+      const days = Array.isArray(r.days)
+        ? r.days
+            .map((d) => Number(d))
+            .filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+        : [];
+      const start = typeof r.startTime === 'string' ? r.startTime : '';
+      const end = typeof r.endTime === 'string' ? r.endTime : '';
+      return {
+        id:
+          typeof r.id === 'string' && r.id.length > 0
+            ? r.id
+            : `menu-${name.toLowerCase().replace(/\s+/g, '-')}`,
+        name,
+        categoryIds: Array.isArray(r.categoryIds)
+          ? r.categoryIds.filter(
+              (id): id is string => typeof id === 'string' && id.length > 0,
+            )
+          : [],
+        locationId:
+          typeof r.locationId === 'string' && r.locationId.length > 0
+            ? r.locationId
+            : null,
+        channel,
+        isActive: r.isActive !== false,
+        days,
+        startTime: start.length >= 4 ? start : null,
+        endTime: end.length >= 4 ? end : null,
+      } satisfies SellingMenu;
+    })
+    .filter((m): m is SellingMenu => m != null);
+}
+
+export function sellingMenuIsLive(
+  menu: SellingMenu,
+  opts: {
+    channel: 'pos' | 'qr';
+    locationId?: string | null;
+    now?: Date;
+  },
+): boolean {
+  if (!menu.isActive) return false;
+  if (menu.channel !== 'all' && menu.channel !== opts.channel) return false;
+  if (menu.locationId && menu.locationId !== opts.locationId) return false;
+  const now = opts.now ?? new Date();
+  if (menu.days.length && !menu.days.includes(now.getDay())) return false;
+  if (menu.startTime && menu.endTime) {
+    const t = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const start = menu.startTime.slice(0, 5);
+    const end = menu.endTime.slice(0, 5);
+    if (t < start || t > end) return false;
+  }
+  return true;
+}
+
+/** No lists configured → no restriction. Lists exist but none live → empty set. */
+export function sellingMenuCategoryFilter(opts: {
+  menus: SellingMenu[];
+  channel: 'pos' | 'qr';
+  locationId?: string | null;
+  now?: Date;
+}): { restrict: false } | { restrict: true; categoryIds: string[] } {
+  const defined = opts.menus.filter(
+    (m) =>
+      (m.channel === 'all' || m.channel === opts.channel) &&
+      (!m.locationId || m.locationId === opts.locationId),
+  );
+  if (!defined.length) return { restrict: false };
+  const live = defined.filter((m) => sellingMenuIsLive(m, opts));
+  if (!live.length) return { restrict: true, categoryIds: [] };
+  if (live.some((m) => m.categoryIds.length === 0)) return { restrict: false };
+  return {
+    restrict: true,
+    categoryIds: [...new Set(live.flatMap((m) => m.categoryIds))],
+  };
 }

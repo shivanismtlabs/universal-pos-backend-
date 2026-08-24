@@ -1,12 +1,16 @@
 import {
   canMergeTables,
   canTransitionKot,
+  diningFeesFromConfig,
   foodCostPercent,
   foodMargin,
   isRecipePurpose,
   kotAgingBand,
   kotPostsInventory,
   nextTokenNumber,
+  parseFloorDiningSettings,
+  routeItemToStationId,
+  sellingMenuCategoryFilter,
   normalizeDiningModes,
   normalizeWastageReason,
   qrOrderPostsInventory,
@@ -14,6 +18,9 @@ import {
   recipeCostTotal,
   shouldPostConsumption,
   canSeatReservation,
+  parseGuestSpecials,
+  formatGuestSpecials,
+  applyGuestSpecialsNote,
 } from './restaurant-policy';
 
 describe('restaurant pack policy', () => {
@@ -139,5 +146,124 @@ describe('restaurant pack policy', () => {
     expect(canSeatReservation('cancelled')).toBe(false);
     expect(qrOrderPostsInventory()).toBe(false);
     expect(kotPostsInventory()).toBe(false);
+  });
+
+  it('formats guest specials for KOT without industry branching', () => {
+    const s = parseGuestSpecials({
+      guestSpecials: {
+        occasion: 'birthday',
+        requests: ['water', 'cake', 'decor'],
+        note: 'Write Riya on cake',
+      },
+    });
+    expect(formatGuestSpecials(s)).toContain('Bottled water');
+    expect(formatGuestSpecials(s)).toContain('Cake');
+    expect(formatGuestSpecials(s)).toContain('Decoration');
+    expect(
+      applyGuestSpecialsNote('No onion', formatGuestSpecials(s)),
+    ).toMatch(/^No onion\n\[Guest\]/);
+  });
+
+  it('applies service / packaging / delivery from dining mode, not industry type', () => {
+    expect(
+      diningFeesFromConfig({
+        diningMode: 'dine_in',
+        merchandiseAfterDiscount: 200,
+        serviceChargePercent: 10,
+        packagingCharge: 15,
+        deliveryCharge: 40,
+      }),
+    ).toEqual([
+      { feeCode: 'service_charge', reason: 'Service 10%', amount: 20 },
+    ]);
+    expect(
+      diningFeesFromConfig({
+        diningMode: 'takeaway',
+        merchandiseAfterDiscount: 200,
+        serviceChargePercent: 10,
+        packagingCharge: 15,
+        deliveryCharge: 40,
+      }),
+    ).toEqual([{ feeCode: 'packaging', reason: 'Packaging', amount: 15 }]);
+    expect(
+      diningFeesFromConfig({
+        diningMode: 'delivery',
+        merchandiseAfterDiscount: 100,
+        serviceChargePercent: 5,
+        packagingCharge: 10,
+        deliveryCharge: 40,
+      }).map((f) => f.feeCode),
+    ).toEqual(['packaging', 'delivery']);
+    expect(
+      diningFeesFromConfig({
+        diningMode: 'dine_in',
+        merchandiseAfterDiscount: 100,
+        serviceChargePercent: 5,
+        areaTaxPercent: 2.5,
+      }).map((f) => f.feeCode),
+    ).toEqual(['service_charge', 'area_tax']);
+  });
+
+  it('reads area menu, tax, and service from floor meta', () => {
+    expect(parseFloorDiningSettings(undefined)).toEqual({
+      categoryIds: [],
+      taxRatePercent: null,
+      serviceChargePercent: null,
+    });
+    expect(
+      parseFloorDiningSettings({
+        categoryIds: ['cat-1', 2, ''],
+        taxRatePercent: 2.5,
+        serviceChargePercent: 0,
+      }),
+    ).toEqual({
+      categoryIds: ['cat-1'],
+      taxRatePercent: 2.5,
+      serviceChargePercent: 0,
+    });
+  });
+
+  it('routes KOT lines to the station that owns the category', () => {
+    const stations = [
+      { id: 'grill', categoryIds: ['meat'] },
+      { id: 'bar', categoryIds: ['drink'] },
+    ];
+    expect(routeItemToStationId('drink', stations, 'grill')).toBe('bar');
+    expect(routeItemToStationId('other', stations, 'grill')).toBe('grill');
+    expect(routeItemToStationId(null, stations, null)).toBe('grill');
+  });
+
+  it('selling lists restrict POS/QR by schedule and categories', () => {
+    const lunch = {
+      id: '1',
+      name: 'Lunch',
+      categoryIds: ['food'],
+      locationId: null,
+      channel: 'pos' as const,
+      isActive: true,
+      days: [],
+      startTime: '11:00',
+      endTime: '15:00',
+    };
+    expect(
+      sellingMenuCategoryFilter({
+        menus: [lunch],
+        channel: 'pos',
+        now: new Date(2026, 7, 22, 12, 0, 0),
+      }),
+    ).toEqual({ restrict: true, categoryIds: ['food'] });
+    expect(
+      sellingMenuCategoryFilter({
+        menus: [lunch],
+        channel: 'pos',
+        now: new Date(2026, 7, 22, 18, 0, 0),
+      }),
+    ).toEqual({ restrict: true, categoryIds: [] });
+    expect(
+      sellingMenuCategoryFilter({
+        menus: [],
+        channel: 'pos',
+      }),
+    ).toEqual({ restrict: false });
   });
 });

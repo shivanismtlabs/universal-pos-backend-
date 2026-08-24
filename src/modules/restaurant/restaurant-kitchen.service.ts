@@ -39,7 +39,7 @@ export class RestaurantKitchenService {
       where: {
         tenantId: user.tenantId,
         bundleComponents: {
-          some: { consumeOnSale: true, purpose: { in: ['recipe', 'production'] } },
+          some: { purpose: { in: ['recipe', 'production'] } },
         },
       },
       select: {
@@ -104,8 +104,12 @@ export class RestaurantKitchenService {
             componentProductId: l.componentProductId,
             componentVariantId: l.componentVariantId ?? null,
             quantity: l.quantity ?? 1,
-            consumeOnSale: true,
-            purpose: 'recipe',
+            consumeOnSale: !l.stageId,
+            purpose: l.stageId
+              ? 'production'
+              : l.purpose === 'production'
+                ? 'production'
+                : 'recipe',
             unit: l.unit?.trim() || null,
             wastagePercent: l.wastagePercent ?? 0,
             stageId: l.stageId ?? null,
@@ -221,7 +225,7 @@ export class RestaurantKitchenService {
       where: {
         tenantId: user.tenantId,
         bundleComponents: {
-          some: { consumeOnSale: true, purpose: { in: ['recipe', 'production'] } },
+          some: { purpose: { in: ['recipe', 'production'] } },
         },
       },
       include: {
@@ -492,7 +496,7 @@ export class RestaurantKitchenService {
     includeCost: boolean,
   ) {
     const lines = p.bundleComponents
-      .filter((l) => l.consumeOnSale && isRecipePurpose(l.purpose))
+      .filter((l) => isRecipePurpose(l.purpose))
       .map((l) => ({
         id: l.id,
         componentProductId: l.componentProduct.id,
@@ -502,6 +506,7 @@ export class RestaurantKitchenService {
         unit: l.unit ?? l.componentProduct.unitOfMeasure,
         wastagePercent: Number(l.wastagePercent ?? 0),
         stageId: l.stageId,
+        purpose: l.purpose,
         unitCost: includeCost
           ? Number(l.componentProduct.costPrice ?? 0)
           : undefined,

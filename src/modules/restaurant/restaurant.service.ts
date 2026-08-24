@@ -23,12 +23,22 @@ import {
   canOpenTable,
   canSeatReservation,
   canTransitionKot,
+  parseFloorDiningSettings,
+  parseTableLayout,
+  parseStationKitchenSettings,
+  parseSellingMenus,
+  routeItemToStationId,
+  diningFeesFromConfig,
+  isDiningMode,
   kotAgingBand,
   kotPostsInventory,
   nextTokenNumber,
   normalizeConsumptionPolicy,
   normalizeDiningModes,
   shouldPostConsumption,
+  parseGuestSpecials,
+  formatGuestSpecials,
+  applyGuestSpecialsNote,
   type KotStatusCode,
 } from './restaurant-policy';
 import {
@@ -39,11 +49,13 @@ import {
   MoveTableDto,
   OpenDiningOrderDto,
   OpenTableDto,
+  PatchGuestSpecialsDto,
   SendKotDto,
   SplitItemsDto,
   UpdateDiningTableDto,
   UpdateFloorDto,
   UpdateKotStatusDto,
+  UpdateStationDto,
   UpsertRestaurantConfigDto,
   CreateReservationDto,
   UpdateReservationDto,
@@ -96,6 +108,20 @@ export class RestaurantService {
         'Critical prep threshold must be >= warning threshold',
       );
     }
+    const prev = await this.prisma.restaurantConfig.findUnique({
+      where: { tenantId: user.tenantId },
+    });
+    const prevMeta =
+      prev?.meta && typeof prev.meta === 'object' && !Array.isArray(prev.meta)
+        ? (prev.meta as Record<string, unknown>)
+        : {};
+    const nextMeta =
+      dto.sellingMenus !== undefined
+        ? {
+            ...prevMeta,
+            sellingMenus: parseSellingMenus(dto.sellingMenus),
+          }
+        : undefined;
     const row = await this.prisma.restaurantConfig.upsert({
       where: { tenantId: user.tenantId },
       create: {
@@ -118,6 +144,7 @@ export class RestaurantService {
         prepWarnMinutes: warn,
         prepCriticalMinutes: critical,
         otpOnQrOrder: dto.otpOnQrOrder ?? false,
+        ...(nextMeta ? { meta: nextMeta } : {}),
       },
       update: {
         ...(dto.locationId !== undefined ? { locationId: dto.locationId } : {}),
@@ -170,6 +197,7 @@ export class RestaurantService {
         ...(dto.otpOnQrOrder !== undefined
           ? { otpOnQrOrder: dto.otpOnQrOrder }
           : {}),
+        ...(nextMeta ? { meta: nextMeta } : {}),
       },
     });
     await this.audit(user, 'RestaurantConfig', row.id, 'upsert', {
@@ -188,14 +216,20 @@ export class RestaurantService {
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       include: { _count: { select: { tables: true } } },
     });
-    return rows.map((r) => ({
-      id: r.id,
-      locationId: r.locationId,
-      name: r.name,
-      sortOrder: r.sortOrder,
-      isActive: r.isActive,
-      tableCount: r._count.tables,
-    }));
+    return rows.map((r) => {
+      const settings = parseFloorDiningSettings(r.meta);
+      return {
+        id: r.id,
+        locationId: r.locationId,
+        name: r.name,
+        sortOrder: r.sortOrder,
+        isActive: r.isActive,
+        tableCount: r._count.tables,
+        categoryIds: settings.categoryIds,
+        taxRatePercent: settings.taxRatePercent,
+        serviceChargePercent: settings.serviceChargePercent,
+      };
+    });
   }
 
   async createFloor(user: AuthUser, dto: CreateFloorDto) {
@@ -212,23 +246,58 @@ export class RestaurantService {
 
   async updateFloor(user: AuthUser, id: string, dto: UpdateFloorDto) {
     const floor = await this.requireFloor(user, id);
+    const prev = parseFloorDiningSettings(floor.meta);
+    const prevMeta =
+      floor.meta && typeof floor.meta === 'object' && !Array.isArray(floor.meta)
+        ? (floor.meta as Record<string, unknown>)
+        : {};
+    const nextSettings = {
+      categoryIds: dto.categoryIds ?? prev.categoryIds,
+      taxRatePercent:
+        dto.taxRatePercent !== undefined
+          ? dto.taxRatePercent
+          : prev.taxRatePercent,
+      serviceChargePercent:
+        dto.serviceChargePercent !== undefined
+          ? dto.serviceChargePercent
+          : prev.serviceChargePercent,
+    };
     return this.prisma.restaurantFloor.update({
       where: { id: floor.id },
       data: {
         ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
         ...(dto.sortOrder !== undefined ? { sortOrder: dto.sortOrder } : {}),
         ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+        meta: {
+          ...prevMeta,
+          categoryIds: nextSettings.categoryIds,
+          taxRatePercent: nextSettings.taxRatePercent,
+          serviceChargePercent: nextSettings.serviceChargePercent,
+        },
       },
     });
   }
 
   async listStations(user: AuthUser, locationId?: string) {
-    return this.prisma.kitchenStation.findMany({
+    const rows = await this.prisma.kitchenStation.findMany({
       where: {
         tenantId: user.tenantId,
         ...(locationId ? { locationId } : {}),
       },
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    });
+    return rows.map((s) => {
+      const settings = parseStationKitchenSettings(s.meta);
+      return {
+        id: s.id,
+        locationId: s.locationId,
+        name: s.name,
+        code: s.code,
+        sortOrder: s.sortOrder,
+        isActive: s.isActive,
+        categoryIds: settings.categoryIds,
+        printerName: settings.printerName,
+      };
     });
   }
 
@@ -237,10 +306,19 @@ export class RestaurantService {
       await assertLocationAccess(this.prisma, user, dto.locationId);
     }
     const code = dto.code.trim().toLowerCase().replace(/\s+/g, '_');
+    const meta = {
+      categoryIds: dto.categoryIds ?? [],
+      printerName: dto.printerName?.trim() || null,
+    };
     const existing = await this.prisma.kitchenStation.findUnique({
       where: { tenantId_code: { tenantId: user.tenantId, code } },
     });
     if (existing) {
+      const prev = parseStationKitchenSettings(existing.meta);
+      const prevMeta =
+        existing.meta && typeof existing.meta === 'object' && !Array.isArray(existing.meta)
+          ? (existing.meta as Record<string, unknown>)
+          : {};
       return this.prisma.kitchenStation.update({
         where: { id: existing.id },
         data: {
@@ -248,6 +326,14 @@ export class RestaurantService {
           ...(dto.locationId !== undefined ? { locationId: dto.locationId } : {}),
           ...(dto.sortOrder !== undefined ? { sortOrder: dto.sortOrder } : {}),
           isActive: true,
+          meta: {
+            ...prevMeta,
+            categoryIds: dto.categoryIds ?? prev.categoryIds,
+            printerName:
+              dto.printerName !== undefined
+                ? dto.printerName.trim() || null
+                : prev.printerName,
+          },
         },
       });
     }
@@ -259,6 +345,7 @@ export class RestaurantService {
           name: dto.name.trim(),
           code,
           sortOrder: dto.sortOrder ?? 0,
+          meta,
         },
       });
     } catch (error) {
@@ -266,8 +353,36 @@ export class RestaurantService {
     }
   }
 
+  async updateStation(user: AuthUser, id: string, dto: UpdateStationDto) {
+    const station = await this.prisma.kitchenStation.findFirst({
+      where: { id, tenantId: user.tenantId },
+    });
+    if (!station) throw new NotFoundException('Kitchen station not found');
+    const prev = parseStationKitchenSettings(station.meta);
+    const prevMeta =
+      station.meta && typeof station.meta === 'object' && !Array.isArray(station.meta)
+        ? (station.meta as Record<string, unknown>)
+        : {};
+    return this.prisma.kitchenStation.update({
+      where: { id: station.id },
+      data: {
+        ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
+        ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+        meta: {
+          ...prevMeta,
+          categoryIds: dto.categoryIds ?? prev.categoryIds,
+          printerName:
+            dto.printerName !== undefined
+              ? (dto.printerName ?? '').trim() || null
+              : prev.printerName,
+        },
+      },
+    });
+  }
+
   async listTables(user: AuthUser, locationId?: string) {
     if (locationId) await assertLocationAccess(this.prisma, user, locationId);
+    await this.syncEmptyTables(user.tenantId, locationId);
     const rows = await this.prisma.restaurantTable.findMany({
       where: {
         tenantId: user.tenantId,
@@ -275,7 +390,7 @@ export class RestaurantService {
       },
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       include: {
-        floor: { select: { id: true, name: true } },
+        floor: { select: { id: true, name: true, meta: true } },
         currentOrder: {
           select: {
             id: true,
@@ -287,29 +402,41 @@ export class RestaurantService {
                 diningMode: true,
                 covers: true,
                 guestName: true,
+                meta: true,
               },
             },
           },
         },
       },
     });
-    return rows.map((t) => ({
-      id: t.id,
-      locationId: t.locationId,
-      floorId: t.floorId,
-      floorName: t.floor?.name ?? null,
-      resourceId: t.resourceId,
-      name: t.name,
-      capacity: t.capacity,
-      status: t.status,
-      currentOrderId: t.currentOrderId,
-      orderNumber: t.currentOrder?.orderNumber ?? null,
-      diningMode: t.currentOrder?.restaurantExt?.diningMode ?? null,
-      covers: t.currentOrder?.restaurantExt?.covers ?? null,
-      guestName: t.currentOrder?.restaurantExt?.guestName ?? null,
-      qrToken: t.qrToken,
-      sortOrder: t.sortOrder,
-    }));
+    return rows.map((t) => {
+      const layout = parseTableLayout(t.meta);
+      const floorSettings = parseFloorDiningSettings(t.floor?.meta);
+      return {
+        id: t.id,
+        locationId: t.locationId,
+        floorId: t.floorId,
+        floorName: t.floor?.name ?? null,
+        resourceId: t.resourceId,
+        name: t.name,
+        capacity: t.capacity,
+        status: t.status,
+        currentOrderId: t.currentOrderId,
+        orderNumber: t.currentOrder?.orderNumber ?? null,
+        diningMode: t.currentOrder?.restaurantExt?.diningMode ?? null,
+        covers: t.currentOrder?.restaurantExt?.covers ?? null,
+        guestName: t.currentOrder?.restaurantExt?.guestName ?? null,
+        guestOccasion:
+          parseGuestSpecials(t.currentOrder?.restaurantExt?.meta).occasion,
+        qrToken: t.qrToken,
+        sortOrder: t.sortOrder,
+        layoutX: layout.layoutX,
+        layoutY: layout.layoutY,
+        areaCategoryIds: floorSettings.categoryIds,
+        areaTaxRatePercent: floorSettings.taxRatePercent,
+        areaServiceChargePercent: floorSettings.serviceChargePercent,
+      };
+    });
   }
 
   async createTable(user: AuthUser, dto: CreateDiningTableDto) {
@@ -350,6 +477,11 @@ export class RestaurantService {
         'Free the table by billing or transferring the order first',
       );
     }
+    const prevMeta =
+      table.meta && typeof table.meta === 'object' && !Array.isArray(table.meta)
+        ? (table.meta as Record<string, unknown>)
+        : {};
+    const layout = parseTableLayout(table.meta);
     const updated = await this.prisma.restaurantTable.update({
       where: { id: table.id },
       data: {
@@ -358,6 +490,17 @@ export class RestaurantService {
         ...(dto.capacity !== undefined ? { capacity: dto.capacity } : {}),
         ...(dto.status !== undefined ? { status: dto.status } : {}),
         ...(dto.sortOrder !== undefined ? { sortOrder: dto.sortOrder } : {}),
+        ...(dto.layoutX !== undefined || dto.layoutY !== undefined
+          ? {
+              meta: {
+                ...prevMeta,
+                layoutX:
+                  dto.layoutX !== undefined ? dto.layoutX : layout.layoutX,
+                layoutY:
+                  dto.layoutY !== undefined ? dto.layoutY : layout.layoutY,
+              },
+            }
+          : {}),
       },
     });
     await this.prisma.resource.update({
@@ -547,6 +690,7 @@ export class RestaurantService {
       },
     });
     if (!order) throw new NotFoundException('Order not found');
+    const guestSpecials = parseGuestSpecials(order.restaurantExt?.meta);
     return {
       id: order.id,
       orderNumber: order.orderNumber,
@@ -562,7 +706,9 @@ export class RestaurantService {
         productId: i.productId,
         meta: i.meta,
       })),
-      restaurant: order.restaurantExt,
+      restaurant: order.restaurantExt
+        ? { ...order.restaurantExt, guestSpecials }
+        : null,
       kots: order.kitchenTickets,
       totals: {
         subtotal: Number(order.subtotal),
@@ -571,6 +717,63 @@ export class RestaurantService {
         balanceDue: Number(order.balanceDue),
       },
     };
+  }
+
+  async patchGuestSpecials(
+    user: AuthUser,
+    orderId: string,
+    dto: PatchGuestSpecialsDto,
+  ) {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, tenantId: user.tenantId },
+      include: { restaurantExt: true },
+    });
+    if (!order?.restaurantExt) {
+      throw new BadRequestException('Open a dining order first');
+    }
+    const prev = parseGuestSpecials(order.restaurantExt.meta);
+    const specials = {
+      occasion:
+        dto.occasion === undefined
+          ? prev.occasion
+          : dto.occasion === 'none'
+            ? null
+            : dto.occasion === 'birthday' ||
+                dto.occasion === 'anniversary' ||
+                dto.occasion === 'celebration'
+              ? dto.occasion
+              : prev.occasion,
+      requests: (dto.requests ?? prev.requests) as typeof prev.requests,
+      note: dto.note !== undefined ? dto.note.trim() : prev.note,
+    };
+    const meta = {
+      ...((order.restaurantExt.meta as Record<string, unknown>) ?? {}),
+      guestSpecials: specials,
+    };
+    await this.prisma.restaurantOrder.update({
+      where: { id: order.restaurantExt.id },
+      data: { meta },
+    });
+    const text = formatGuestSpecials(specials);
+    const openKots = await this.prisma.kitchenTicket.findMany({
+      where: {
+        tenantId: user.tenantId,
+        orderId,
+        status: { not: KitchenTicketStatus.cancelled },
+      },
+    });
+    for (const kot of openKots) {
+      await this.prisma.kitchenTicket.update({
+        where: { id: kot.id },
+        data: {
+          specialInstructions: applyGuestSpecialsNote(
+            kot.specialInstructions,
+            text,
+          ),
+        },
+      });
+    }
+    return this.getDiningOrder(user, orderId);
   }
 
   async moveTable(user: AuthUser, fromTableId: string, dto: MoveTableDto) {
@@ -809,40 +1012,98 @@ export class RestaurantService {
     const existing = await this.prisma.kitchenTicket.findFirst({
       where: { tenantId: user.tenantId, idempotencyKey: key },
     });
-    if (existing) return this.presentKot(existing.id, user);
+    if (existing) return { tickets: [await this.presentKot(existing.id, user)] };
 
-    const kotNumber = await this.nextKotNumber(user.tenantId);
-    const ticket = await this.prisma.$transaction(async (tx) => {
-      const created = await tx.kitchenTicket.create({
-        data: {
-          tenantId: user.tenantId,
-          locationId: order.locationId,
-          orderId: order.id,
-          tableId: order.restaurantExt?.tableId,
-          stationId: dto.stationId,
-          kotNumber,
-          diningMode: order.restaurantExt!.diningMode,
-          status: KitchenTicketStatus.new,
-          priority: dto.priority ?? 0,
-          specialInstructions: dto.specialInstructions,
-          createdById: user.userId,
-          idempotencyKey: key,
-        },
-      });
-      for (const item of pending) {
-        const meta = (item.meta ?? {}) as Record<string, unknown>;
-        await tx.kitchenTicketLine.create({
+    const guestNote = formatGuestSpecials(
+      parseGuestSpecials(order.restaurantExt.meta),
+    );
+    const specialInstructions = applyGuestSpecialsNote(
+      dto.specialInstructions,
+      guestNote,
+    );
+
+    const stations = await this.listStations(user);
+    const activeStations = stations.filter((s) => s.isActive);
+    const productIds = [
+      ...new Set(
+        pending
+          .map((i) => i.productId)
+          .filter((id): id is string => typeof id === 'string'),
+      ),
+    ];
+    const products = productIds.length
+      ? await this.prisma.product.findMany({
+          where: { tenantId: user.tenantId, id: { in: productIds } },
+          select: { id: true, categoryId: true },
+        })
+      : [];
+    const categoryByProduct = new Map(
+      products.map((p) => [p.id, p.categoryId]),
+    );
+    const groups = new Map<string | null, typeof pending>();
+    for (const item of pending) {
+      const stationId = dto.stationId
+        ? dto.stationId
+        : routeItemToStationId(
+            item.productId
+              ? (categoryByProduct.get(item.productId) ?? null)
+              : null,
+            activeStations,
+            activeStations[0]?.id ?? null,
+          );
+      const bucket = groups.get(stationId) ?? [];
+      bucket.push(item);
+      groups.set(stationId, bucket);
+    }
+
+    const createdIds: string[] = [];
+    let kotSeq = await this.prisma.kitchenTicket.count({
+      where: { tenantId: user.tenantId },
+    });
+    await this.prisma.$transaction(async (tx) => {
+      for (const [stationId, items] of groups) {
+        kotSeq += 1;
+        const kotNumber = `KOT-${String(kotSeq).padStart(5, '0')}`;
+        const groupKey = `${key}:${stationId ?? 'none'}`;
+        const dup = await tx.kitchenTicket.findFirst({
+          where: { tenantId: user.tenantId, idempotencyKey: groupKey },
+        });
+        if (dup) {
+          createdIds.push(dup.id);
+          continue;
+        }
+        const created = await tx.kitchenTicket.create({
           data: {
             tenantId: user.tenantId,
-            ticketId: created.id,
-            orderItemId: item.id,
-            name: item.description ?? 'Item',
-            quantity: item.quantity,
-            notes: typeof meta.note === 'string' ? meta.note : null,
-            modifiers: Array.isArray(meta.modifiers) ? meta.modifiers : [],
-            stationId: dto.stationId,
+            locationId: order.locationId,
+            orderId: order.id,
+            tableId: order.restaurantExt?.tableId,
+            stationId,
+            kotNumber,
+            diningMode: order.restaurantExt!.diningMode,
+            status: KitchenTicketStatus.new,
+            priority: dto.priority ?? 0,
+            specialInstructions,
+            createdById: user.userId,
+            idempotencyKey: groupKey,
           },
         });
+        for (const item of items) {
+          const meta = (item.meta ?? {}) as Record<string, unknown>;
+          await tx.kitchenTicketLine.create({
+            data: {
+              tenantId: user.tenantId,
+              ticketId: created.id,
+              orderItemId: item.id,
+              name: item.description ?? 'Item',
+              quantity: item.quantity,
+              notes: typeof meta.note === 'string' ? meta.note : null,
+              modifiers: Array.isArray(meta.modifiers) ? meta.modifiers : [],
+              stationId,
+            },
+          });
+        }
+        createdIds.push(created.id);
       }
       await tx.restaurantOrder.update({
         where: { id: order.restaurantExt!.id },
@@ -854,15 +1115,19 @@ export class RestaurantService {
           data: { status: OrderStatus.confirmed },
         });
       }
-      return created;
     });
 
-    await this.audit(user, 'KitchenTicket', ticket.id, 'create', {
+    await this.audit(user, 'KitchenTicket', createdIds[0] ?? orderId, 'create', {
       orderId,
-      kotNumber,
+      ticketIds: createdIds,
       inventoryPosted: false,
+      routed: groups.size > 1,
     });
-    return this.presentKot(ticket.id, user);
+    const tickets = [];
+    for (const id of createdIds) {
+      tickets.push(await this.presentKot(id, user));
+    }
+    return { tickets };
   }
 
   async listKots(
@@ -880,12 +1145,12 @@ export class RestaurantService {
         ...(query.status ? { status: query.status } : {}),
         ...(query.stationId ? { stationId: query.stationId } : {}),
       },
-      orderBy: [{ createdAt: 'asc' }],
+      orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
       include: {
         lines: true,
         table: { select: { id: true, name: true } },
         order: { select: { orderNumber: true, customerId: true } },
-        station: { select: { id: true, name: true } },
+        station: { select: { id: true, name: true, meta: true } },
       },
       take: 200,
     });
@@ -899,10 +1164,17 @@ export class RestaurantService {
       diningMode: row.diningMode,
       stationId: row.stationId,
       stationName: row.station?.name ?? null,
+      printerName: parseStationKitchenSettings(row.station?.meta).printerName,
       status: row.status,
       priority: row.priority,
       specialInstructions: row.specialInstructions,
       createdAt: row.createdAt,
+      readyAt: row.readyAt,
+      reprintCount: Number(
+        (row.meta && typeof row.meta === 'object'
+          ? (row.meta as Record<string, unknown>).reprintCount
+          : 0) ?? 0,
+      ),
       aging: kotAgingBand({
         createdAt: row.createdAt,
         warnMinutes: cfg.prepWarnMinutes,
@@ -925,23 +1197,70 @@ export class RestaurantService {
     });
     if (!ticket) throw new NotFoundException('KOT not found');
     if (
-      !canTransitionKot(
-        ticket.status as KotStatusCode,
-        dto.status as KotStatusCode,
-      )
+      !dto.status &&
+      dto.specialInstructions === undefined &&
+      dto.priority === undefined &&
+      !dto.lineId
     ) {
-      throw new BadRequestException(
-        `Cannot change KOT from ${ticket.status} to ${dto.status}`,
-      );
+      throw new BadRequestException('Nothing to update');
     }
-    if (dto.status === KitchenTicketStatus.cancelled && !dto.cancelReason?.trim()) {
-      throw new BadRequestException('Cancel reason is required');
+    if (dto.lineId) {
+      if (!dto.status) {
+        throw new BadRequestException('Line status is required');
+      }
+      const line = await this.prisma.kitchenTicketLine.findFirst({
+        where: {
+          id: dto.lineId,
+          ticketId: ticket.id,
+          tenantId: user.tenantId,
+        },
+      });
+      if (!line) throw new NotFoundException('KOT line not found');
+      if (
+        !canTransitionKot(
+          line.status as KotStatusCode,
+          dto.status as KotStatusCode,
+        )
+      ) {
+        throw new BadRequestException(
+          `Cannot change item from ${line.status} to ${dto.status}`,
+        );
+      }
+      await this.prisma.kitchenTicketLine.update({
+        where: { id: line.id },
+        data: { status: dto.status },
+      });
+      await this.audit(user, 'KitchenTicketLine', line.id, 'status', {
+        ticketId: ticket.id,
+        from: line.status,
+        to: dto.status,
+      });
+      return this.presentKot(ticket.id, user);
+    }
+    if (dto.status) {
+      if (
+        !canTransitionKot(
+          ticket.status as KotStatusCode,
+          dto.status as KotStatusCode,
+        )
+      ) {
+        throw new BadRequestException(
+          `Cannot change KOT from ${ticket.status} to ${dto.status}`,
+        );
+      }
+      if (dto.status === KitchenTicketStatus.cancelled && !dto.cancelReason?.trim()) {
+        throw new BadRequestException('Cancel reason is required');
+      }
     }
     const now = new Date();
     const updated = await this.prisma.kitchenTicket.update({
       where: { id: ticket.id },
       data: {
-        status: dto.status,
+        ...(dto.priority !== undefined ? { priority: dto.priority } : {}),
+        ...(dto.status ? { status: dto.status } : {}),
+        ...(dto.specialInstructions !== undefined
+          ? { specialInstructions: dto.specialInstructions.trim() || null }
+          : {}),
         ...(dto.status === KitchenTicketStatus.accepted ? { acceptedAt: now } : {}),
         ...(dto.status === KitchenTicketStatus.preparing
           ? { preparingAt: now, recalledAt: ticket.status === 'ready' || ticket.status === 'served' ? now : ticket.recalledAt }
@@ -957,16 +1276,292 @@ export class RestaurantService {
           : {}),
       },
     });
-    await this.prisma.kitchenTicketLine.updateMany({
-      where: { ticketId: ticket.id, tenantId: user.tenantId },
-      data: { status: dto.status },
-    });
-    await this.audit(user, 'KitchenTicket', ticket.id, 'status', {
+    if (dto.status) {
+      await this.prisma.kitchenTicketLine.updateMany({
+        where: { ticketId: ticket.id, tenantId: user.tenantId },
+        data: { status: dto.status },
+      });
+    }
+    await this.audit(user, 'KitchenTicket', ticket.id, dto.status ? 'status' : 'modify', {
       from: ticket.status,
-      to: dto.status,
+      to: dto.status ?? ticket.status,
       cancelReason: dto.cancelReason ?? null,
     });
     return this.presentKot(updated.id, user);
+  }
+
+  /**
+   * Counter checkout: dining overlay + service/packaging/delivery fees.
+   * No-op unless the ticket has a dining mode or a table.
+   */
+  async attachCounterDining(
+    tx: Prisma.TransactionClient,
+    opts: {
+      tenantId: string;
+      userId?: string;
+      orderId: string;
+      locationId: string;
+      meta?: Record<string, unknown>;
+      merchandiseAfterDiscount: number;
+    },
+  ) {
+    const meta = opts.meta ?? {};
+    const rawMode =
+      typeof meta.orderType === 'string' ? meta.orderType : undefined;
+    const tableRef =
+      typeof meta.tableId === 'string'
+        ? meta.tableId
+        : typeof meta.resourceId === 'string'
+          ? meta.resourceId
+          : undefined;
+    const diningMode = isDiningMode(rawMode)
+      ? rawMode
+      : tableRef
+        ? 'dine_in'
+        : null;
+    if (!diningMode) return;
+
+    const cfg = await tx.restaurantConfig.findUnique({
+      where: { tenantId: opts.tenantId },
+    });
+    let tableId: string | null = null;
+    let serviceChargePercent =
+      cfg?.serviceChargePercent != null
+        ? Number(cfg.serviceChargePercent)
+        : null;
+    let areaTaxPercent: number | null = null;
+    if (tableRef) {
+      const table = await tx.restaurantTable.findFirst({
+        where: {
+          tenantId: opts.tenantId,
+          OR: [{ id: tableRef }, { resourceId: tableRef }],
+        },
+        select: {
+          id: true,
+          currentOrderId: true,
+          floor: { select: { meta: true } },
+        },
+      });
+      if (table) {
+        tableId = table.id;
+        const floorSettings = parseFloorDiningSettings(table.floor?.meta);
+        if (floorSettings.serviceChargePercent != null) {
+          serviceChargePercent = floorSettings.serviceChargePercent;
+        }
+        areaTaxPercent = floorSettings.taxRatePercent;
+        if (!table.currentOrderId || table.currentOrderId === opts.orderId) {
+          await tx.restaurantTable.update({
+            where: { id: table.id },
+            data: {
+              status: DiningTableStatus.occupied,
+              currentOrderId: opts.orderId,
+            },
+          });
+        }
+      }
+    }
+    const packagingCharge =
+      cfg?.packagingCharge != null ? Number(cfg.packagingCharge) : null;
+    const deliveryCharge =
+      cfg?.deliveryCharge != null ? Number(cfg.deliveryCharge) : null;
+    const fees = diningFeesFromConfig({
+      diningMode,
+      merchandiseAfterDiscount: opts.merchandiseAfterDiscount,
+      serviceChargePercent,
+      packagingCharge,
+      deliveryCharge,
+      areaTaxPercent,
+    });
+    const existingFees = await tx.orderFee.findMany({
+      where: { tenantId: opts.tenantId, orderId: opts.orderId },
+      select: { feeCode: true },
+    });
+    const have = new Set(existingFees.map((f) => f.feeCode));
+    for (const fee of fees) {
+      if (have.has(fee.feeCode)) continue;
+      await tx.orderFee.create({
+        data: {
+          tenantId: opts.tenantId,
+          orderId: opts.orderId,
+          feeCode: fee.feeCode,
+          reason: fee.reason,
+          amount: fee.amount.toFixed(2),
+        },
+      });
+    }
+
+    const guestName =
+      typeof meta.guestName === 'string' ? meta.guestName.trim() : '';
+    const deliveryAddress =
+      typeof meta.deliveryAddress === 'string'
+        ? meta.deliveryAddress.trim()
+        : '';
+    const covers =
+      typeof meta.covers === 'number' && meta.covers > 0
+        ? Math.floor(meta.covers)
+        : 1;
+
+    const ext = await tx.restaurantOrder.findUnique({
+      where: { orderId: opts.orderId },
+    });
+    if (ext) {
+      await tx.restaurantOrder.update({
+        where: { id: ext.id },
+        data: {
+          ...(tableId ? { tableId } : {}),
+          diningMode: diningMode as DiningMode,
+          covers,
+          ...(guestName ? { guestName } : {}),
+          ...(deliveryAddress ? { deliveryAddress } : {}),
+        },
+      });
+      return;
+    }
+
+    await tx.restaurantOrder.create({
+      data: {
+        tenantId: opts.tenantId,
+        locationId: opts.locationId,
+        orderId: opts.orderId,
+        tableId,
+        diningMode: diningMode as DiningMode,
+        channel: RestaurantOrderChannel.pos,
+        covers,
+        guestName: guestName || null,
+        deliveryAddress: deliveryAddress || null,
+        kitchenPhase: 'kot_pending',
+      },
+    });
+  }
+
+  async ensureKotAfterSale(user: AuthUser, orderId: string) {
+    const ext = await this.prisma.restaurantOrder.findUnique({
+      where: { orderId },
+    });
+    if (!ext || ext.tenantId !== user.tenantId) return null;
+    const cfg = await this.getConfig(user);
+    if (!cfg.kotEnabled) return null;
+    try {
+      return await this.sendKot(user, orderId, {});
+    } catch (e) {
+      if (
+        e instanceof BadRequestException &&
+        /already have an active KOT/i.test(String(e.message))
+      ) {
+        return null;
+      }
+      throw e;
+    }
+  }
+
+  async reprintKot(user: AuthUser, id: string) {
+    const ticket = await this.prisma.kitchenTicket.findFirst({
+      where: { id, tenantId: user.tenantId },
+    });
+    if (!ticket) throw new NotFoundException('KOT not found');
+    const meta =
+      ticket.meta && typeof ticket.meta === 'object'
+        ? (ticket.meta as Record<string, unknown>)
+        : {};
+    const reprintCount = Number(meta.reprintCount ?? 0) + 1;
+    await this.prisma.kitchenTicket.update({
+      where: { id: ticket.id },
+      data: {
+        meta: {
+          ...meta,
+          reprintCount,
+          lastReprintAt: new Date().toISOString(),
+        },
+      },
+    });
+    await this.audit(user, 'KitchenTicket', ticket.id, 'reprint', {
+      reprintCount,
+    });
+    return this.presentKot(ticket.id, user);
+  }
+
+  async voidDiningOrder(user: AuthUser, orderId: string, reason: string) {
+    const note = reason.trim();
+    if (!note) throw new BadRequestException('Cancel reason is required');
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, tenantId: user.tenantId },
+      include: {
+        payments: true,
+        restaurantExt: true,
+      },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    const paid = order.payments.some((p) => p.status === 'succeeded');
+    if (
+      paid ||
+      order.status === OrderStatus.closed ||
+      order.status === OrderStatus.fulfilled
+    ) {
+      throw new BadRequestException(
+        'This bill is already paid. Use Returns to reverse it.',
+      );
+    }
+    const kots = await this.prisma.kitchenTicket.findMany({
+      where: {
+        tenantId: user.tenantId,
+        orderId,
+        status: { not: KitchenTicketStatus.cancelled },
+      },
+      select: { id: true },
+    });
+    let freedTableIds: string[] = [];
+    await this.prisma.$transaction(async (tx) => {
+      if (kots.length) {
+        await tx.kitchenTicket.updateMany({
+          where: { id: { in: kots.map((k) => k.id) } },
+          data: {
+            status: KitchenTicketStatus.cancelled,
+            cancelledAt: new Date(),
+            cancelReason: note,
+            cancelledById: user.userId,
+          },
+        });
+      }
+      const tables = await tx.restaurantTable.findMany({
+        where: { tenantId: user.tenantId, currentOrderId: orderId },
+        select: { id: true, resourceId: true },
+      });
+      freedTableIds = tables.map((t) => t.id);
+      await tx.restaurantTable.updateMany({
+        where: { tenantId: user.tenantId, currentOrderId: orderId },
+        data: { status: DiningTableStatus.available, currentOrderId: null },
+      });
+      if (tables.length) {
+        await tx.resource.updateMany({
+          where: { id: { in: tables.map((t) => t.resourceId) } },
+          data: { status: ResourceStatus.available },
+        });
+      }
+      if (order.restaurantExt) {
+        await tx.restaurantOrder.update({
+          where: { id: order.restaurantExt.id },
+          data: { kitchenPhase: 'voided', billedAt: null },
+        });
+      }
+      const prev =
+        order.meta && typeof order.meta === 'object'
+          ? (order.meta as Record<string, unknown>)
+          : {};
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          status: OrderStatus.cancelled,
+          meta: {
+            ...prev,
+            voidedAt: new Date().toISOString(),
+            voidReason: note,
+          },
+        },
+      });
+    });
+    await this.audit(user, 'Order', orderId, 'void', { reason: note });
+    await this.releaseTablesAfterService(user.tenantId, freedTableIds);
+    return { id: orderId, status: OrderStatus.cancelled };
   }
 
   /**
@@ -993,6 +1588,7 @@ export class RestaurantService {
       event: 'order_finalize',
       alreadyPosted: ext.consumptionPosted,
     });
+    let freedTableIds: string[] = [];
     await this.prisma.$transaction(async (tx) => {
       await tx.restaurantOrder.update({
         where: { id: ext.id },
@@ -1006,20 +1602,22 @@ export class RestaurantService {
         where: { tenantId: opts.tenantId, currentOrderId: opts.orderId },
         select: { id: true, resourceId: true },
       });
+      freedTableIds = tables.map((t) => t.id);
       await tx.restaurantTable.updateMany({
         where: {
           tenantId: opts.tenantId,
           currentOrderId: opts.orderId,
         },
-        data: { status: DiningTableStatus.cleaning, currentOrderId: null },
+        data: { currentOrderId: null },
       });
       if (tables.length) {
         await tx.resource.updateMany({
           where: { id: { in: tables.map((t) => t.resourceId) } },
-          data: { status: ResourceStatus.maintenance },
+          data: { status: ResourceStatus.available },
         });
       }
     });
+    await this.releaseTablesAfterService(opts.tenantId, freedTableIds);
   }
 
   private async presentKot(id: string, user: AuthUser) {
@@ -1124,6 +1722,7 @@ export class RestaurantService {
       prepWarnMinutes: row.prepWarnMinutes,
       prepCriticalMinutes: row.prepCriticalMinutes,
       otpOnQrOrder: row.otpOnQrOrder,
+      sellingMenus: parseSellingMenus(row.meta),
       inventoryNote:
         'KOT never deducts stock. Consumption posts once at checkout (order_finalize).',
     };
@@ -1195,16 +1794,7 @@ export class RestaurantService {
         notes: dto.notes?.trim() || null,
       },
     });
-    if (dto.tableId) {
-      await this.prisma.restaurantTable.updateMany({
-        where: {
-          id: dto.tableId,
-          tenantId: user.tenantId,
-          status: DiningTableStatus.available,
-        },
-        data: { status: DiningTableStatus.reserved },
-      });
-    }
+    if (dto.tableId) await this.syncTableHold(user.tenantId, dto.tableId);
     return row;
   }
 
@@ -1220,22 +1810,149 @@ export class RestaurantService {
     if (dto.status === 'seated' && !canSeatReservation(row.status)) {
       throw new BadRequestException('Only booked reservations can be seated');
     }
+    if (dto.status === 'completed' && row.status !== 'seated') {
+      throw new BadRequestException('Only seated reservations can be completed');
+    }
     const next = await this.prisma.diningReservation.update({
       where: { id },
       data: { status: dto.status ?? row.status },
     });
-    if (dto.status === 'cancelled' && row.tableId) {
-      await this.prisma.restaurantTable.updateMany({
-        where: {
-          id: row.tableId,
-          tenantId: user.tenantId,
-          status: DiningTableStatus.reserved,
-          currentOrderId: null,
-        },
-        data: { status: DiningTableStatus.available },
+    if (dto.status === 'seated' && row.tableId) {
+      const table = await this.prisma.restaurantTable.findFirst({
+        where: { id: row.tableId, tenantId: user.tenantId },
+        select: { resourceId: true },
       });
+      await this.prisma.restaurantTable.updateMany({
+        where: { id: row.tableId, tenantId: user.tenantId },
+        data: { status: DiningTableStatus.occupied },
+      });
+      if (table) {
+        await this.prisma.resource.update({
+          where: { id: table.resourceId },
+          data: { status: ResourceStatus.occupied },
+        });
+      }
+    } else if (
+      (dto.status === 'cancelled' ||
+        dto.status === 'no_show' ||
+        dto.status === 'completed') &&
+      row.tableId
+    ) {
+      await this.syncTableHold(user.tenantId, row.tableId);
     }
     return next;
+  }
+
+  /** Empty table → available, unless a booking starts within 10 minutes. */
+  private async syncTableHold(tenantId: string, tableId: string) {
+    const table = await this.prisma.restaurantTable.findFirst({
+      where: { id: tableId, tenantId },
+    });
+    if (!table || table.currentOrderId) return;
+    if (table.status === DiningTableStatus.blocked) return;
+    const seated = await this.prisma.diningReservation.findFirst({
+      where: { tenantId, tableId, status: 'seated' },
+      select: { id: true },
+    });
+    if (seated) return;
+    const now = new Date();
+    const soon = new Date(now.getTime() + 10 * 60 * 1000);
+    const upcoming = await this.prisma.diningReservation.findFirst({
+      where: {
+        tenantId,
+        tableId,
+        status: 'booked',
+        startAt: { gte: new Date(now.getTime() - 30 * 60 * 1000), lte: soon },
+      },
+    });
+    const next = upcoming
+      ? DiningTableStatus.reserved
+      : DiningTableStatus.available;
+    if (table.status === next) return;
+    await this.prisma.restaurantTable.update({
+      where: { id: table.id },
+      data: { status: next },
+    });
+    await this.prisma.resource.update({
+      where: { id: table.resourceId },
+      data: {
+        status: upcoming
+          ? ResourceStatus.occupied
+          : ResourceStatus.available,
+      },
+    });
+  }
+
+  private async releaseTablesAfterService(
+    tenantId: string,
+    tableIds: string[],
+  ) {
+    if (!tableIds.length) return;
+    await this.prisma.diningReservation.updateMany({
+      where: { tenantId, tableId: { in: tableIds }, status: 'seated' },
+      data: { status: 'completed' },
+    });
+    for (const id of tableIds) await this.syncTableHold(tenantId, id);
+  }
+
+  private async syncEmptyTables(tenantId: string, locationId?: string) {
+    const now = new Date();
+    const soon = new Date(now.getTime() + 10 * 60 * 1000);
+    const tables = await this.prisma.restaurantTable.findMany({
+      where: {
+        tenantId,
+        ...(locationId ? { locationId } : {}),
+        currentOrderId: null,
+        status: { not: DiningTableStatus.blocked },
+      },
+      select: { id: true, resourceId: true, status: true },
+    });
+    if (!tables.length) return;
+    const holds = await this.prisma.diningReservation.findMany({
+      where: {
+        tenantId,
+        tableId: { in: tables.map((t) => t.id) },
+        status: { in: ['seated', 'booked'] },
+      },
+      select: { tableId: true, status: true, startAt: true },
+    });
+    const seatedIds = new Set(
+      holds
+        .filter((h) => h.status === 'seated')
+        .map((h) => h.tableId)
+        .filter((id): id is string => !!id),
+    );
+    const windowStart = new Date(now.getTime() - 30 * 60 * 1000);
+    const reservedIds = new Set(
+      holds
+        .filter(
+          (h) =>
+            h.status === 'booked' &&
+            h.tableId &&
+            h.startAt >= windowStart &&
+            h.startAt <= soon,
+        )
+        .map((h) => h.tableId as string),
+    );
+    for (const t of tables) {
+      if (seatedIds.has(t.id)) continue;
+      const next = reservedIds.has(t.id)
+        ? DiningTableStatus.reserved
+        : DiningTableStatus.available;
+      if (t.status === next) continue;
+      await this.prisma.restaurantTable.update({
+        where: { id: t.id },
+        data: { status: next },
+      });
+      await this.prisma.resource.update({
+        where: { id: t.resourceId },
+        data: {
+          status: reservedIds.has(t.id)
+            ? ResourceStatus.occupied
+            : ResourceStatus.available,
+        },
+      });
+    }
   }
 
   private async audit(

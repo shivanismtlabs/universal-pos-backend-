@@ -144,7 +144,7 @@ export class CustomersService {
     const { rentalMeasurements, rentalPartyMemberships, ...rest } = customer;
     const meta = (rest.meta as Record<string, unknown>) ?? {};
 
-    const [orderAgg, dueAgg, noteCount, spentAgg, lastVisit, activeMembership] =
+    const [orderAgg, dueAgg, noteCount, spentAgg, lastVisit, firstVisit, activeMembership] =
       await Promise.all([
         this.prisma.order.aggregate({
           where: { tenantId: user.tenantId, customerId: id },
@@ -168,6 +168,7 @@ export class CustomersService {
             customerId: id,
             status: { notIn: [OrderStatus.cancelled, OrderStatus.draft] },
           },
+          _count: { _all: true },
           _sum: { subtotal: true, taxTotal: true, discountTotal: true },
         }),
         this.prisma.order.findFirst({
@@ -178,6 +179,15 @@ export class CustomersService {
           },
           orderBy: { createdAt: 'desc' },
           select: { createdAt: true, orderNumber: true },
+        }),
+        this.prisma.order.findFirst({
+          where: {
+            tenantId: user.tenantId,
+            customerId: id,
+            status: { notIn: [OrderStatus.cancelled, OrderStatus.draft] },
+          },
+          orderBy: { createdAt: 'asc' },
+          select: { createdAt: true },
         }),
         this.prisma.customerSubscription.findFirst({
           where: {
@@ -199,6 +209,14 @@ export class CustomersService {
         Number(spentAgg._sum.discountTotal ?? 0),
     );
     const openDueTotal = Number(dueAgg._sum.balanceDue ?? 0);
+    const visitCount = spentAgg._count._all;
+    let visitEveryDays: number | null = null;
+    if (visitCount >= 2 && firstVisit?.createdAt && lastVisit?.createdAt) {
+      const spanDays =
+        (lastVisit.createdAt.getTime() - firstVisit.createdAt.getTime()) /
+        86_400_000;
+      visitEveryDays = Math.max(1, Math.round(spanDays / (visitCount - 1)));
+    }
     const creditLimit =
       rest.creditLimit == null ? null : Number(rest.creditLimit);
     const availableCredit =
@@ -227,6 +245,8 @@ export class CustomersService {
         totalSpent: Math.round(totalSpent * 100) / 100,
         lastVisitAt: lastVisit?.createdAt ?? null,
         lastVisitOrder: lastVisit?.orderNumber ?? null,
+        firstVisitAt: firstVisit?.createdAt ?? null,
+        visitEveryDays,
         creditLimit,
         availableCredit,
         activeMembership: activeMembership

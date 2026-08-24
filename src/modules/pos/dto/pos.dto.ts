@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PaymentMethod, PaymentType } from '@prisma/client';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -251,6 +251,7 @@ export class SaleCheckoutDto {
       'Allow payment less than balance due (order stays open with balance)',
   })
   @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true' || value === 1)
   @IsBoolean()
   allowPartial?: boolean;
 

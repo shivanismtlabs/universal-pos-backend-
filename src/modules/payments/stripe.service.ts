@@ -259,6 +259,9 @@ export class StripeService implements PaymentProvider {
     }
 
     const balanceDue = Number(order.balanceDue);
+    if (balanceDue <= 0.009) {
+      throw new BadRequestException('This ticket is already fully paid');
+    }
     if (dto.amount > balanceDue + 0.02) {
       throw new BadRequestException(
         `Payment amount exceeds balance due (${balanceDue.toFixed(2)})`,

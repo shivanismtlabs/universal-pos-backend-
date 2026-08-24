@@ -813,12 +813,10 @@ export class CatalogService {
           },
         });
 
-        if (trackQty && !trackSerial) {
-          const opening = dto.openingQty;
-          if (opening == null || !(opening >= 1)) {
-            throw new BadRequestException(
-              'Opening quantity must be at least 1 (not 0 or a fraction below 1)',
-            );
+        if (trackQty) {
+          const opening = dto.openingQty != null ? Number(dto.openingQty) : 0;
+          if (opening < 0) {
+            throw new BadRequestException('Opening quantity cannot be negative');
           }
           const locationId =
             dto.locationId ??
@@ -850,18 +848,20 @@ export class CatalogService {
               ...(reorderPoint != null ? { reorderPoint } : {}),
             },
           });
-          await this.stock.mutateInTx(tx, {
-            tenantId: user.tenantId,
-            actorUserId: user.userId,
-            locationId,
-            productId: created.id,
-            qty: opening,
-            type: StockLedgerType.opening,
-            reason: 'Opening stock',
-            referenceType: 'product',
-            referenceId: created.id,
-            skipComponentExplosion: true,
-          });
+          if (opening > 0) {
+            await this.stock.mutateInTx(tx, {
+              tenantId: user.tenantId,
+              actorUserId: user.userId,
+              locationId,
+              productId: created.id,
+              qty: opening,
+              type: StockLedgerType.opening,
+              reason: 'Opening stock',
+              referenceType: 'product',
+              referenceId: created.id,
+              skipComponentExplosion: true,
+            });
+          }
           await seedZeroStockAtOtherLocations(tx, {
             tenantId: user.tenantId,
             productId: created.id,

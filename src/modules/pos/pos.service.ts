@@ -980,7 +980,7 @@ export class PosService {
     let level = await this.prisma.stockLevel.findFirst({
       where: { id: stockLevelId, tenantId: user.tenantId },
       include: {
-        product: { select: { id: true, name: true, skuCode: true } },
+        product: { select: { id: true, name: true, skuCode: true, trackSerial: true } },
       },
     });
     if (!level) {
@@ -992,12 +992,16 @@ export class PosService {
           ...(locationId ? { locationId } : {}),
         },
         include: {
-          product: { select: { id: true, name: true, skuCode: true } },
+          product: { select: { id: true, name: true, skuCode: true, trackSerial: true } },
         },
         orderBy: { updatedAt: 'desc' },
       });
     }
     if (!level) throw new NotFoundException('Product not found');
+
+    if (level.product.trackSerial === true && !dto.serialNumber?.trim()) {
+      throw new BadRequestException('Serial number is required for this product');
+    }
 
     const unit = normalizeSellUnit(level.sellUnit);
     const units = await this.tenantUnits(user.tenantId);
@@ -1035,6 +1039,7 @@ export class PosService {
       referenceType: 'stock_level',
       referenceId: level.id,
       skipComponentExplosion: true,
+      serialNumber: dto.serialNumber?.trim() || undefined,
     });
 
     await this.prisma.auditLog.create({

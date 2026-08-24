@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { CustomFieldEntity } from '@prisma/client';
 import {
+  Allow,
   IsBoolean,
   IsEnum,
   IsInt,
@@ -46,6 +47,7 @@ export class CreateCustomFieldDefinitionDto {
     description: 'Select options: string[] or { options: string[] }',
   })
   @IsOptional()
+  @Allow()
   options?: unknown;
 
   @ApiPropertyOptional()

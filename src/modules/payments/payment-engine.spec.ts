@@ -343,8 +343,8 @@ describe('POS payment scenarios (engine rules)', () => {
   });
 
   it('29. store isolation: location mismatch is a forbidden payment', () => {
-    const userLocation = 'loc-a';
-    const orderLocation = 'loc-b';
+    const userLocation: string = 'loc-a';
+    const orderLocation: string = 'loc-b';
     expect(userLocation === orderLocation).toBe(false);
   });
 

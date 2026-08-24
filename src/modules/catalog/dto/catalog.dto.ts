@@ -7,6 +7,7 @@ import {
   IsEnum,
   IsIn,
   IsNumber,
+  Allow,
   IsObject,
   IsOptional,
   IsString,
@@ -306,9 +307,19 @@ export class CreateCatalogProductDto {
   @Min(1)
   openingQty?: number;
 
+  @ApiPropertyOptional({
+    description: 'Low-stock alert qty at the opening location (qty-tracked only)',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  reorderPoint?: number;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsObject()
+  @Allow()
   extraFields?: Record<string, unknown>;
 }
 
@@ -457,6 +468,7 @@ export class UpdateCatalogProductDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsObject()
+  @Allow()
   extraFields?: Record<string, unknown>;
 }
 

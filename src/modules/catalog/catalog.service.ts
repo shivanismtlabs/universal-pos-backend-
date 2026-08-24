@@ -765,6 +765,9 @@ export class CatalogService {
       ...(rateFromForm != null ? { taxRatePercent: rateFromForm } : {}),
       ...(resolvedImages.length ? { images: resolvedImages } : {}),
       sellUnit: unit,
+      ...(dto.reorderPoint != null && Number.isFinite(Number(dto.reorderPoint))
+        ? { reorderPoint: Number(dto.reorderPoint) }
+        : {}),
     };
 
     try {
@@ -831,6 +834,10 @@ export class CatalogService {
               'No store location configured — add a location before creating stocked items',
             );
           }
+          const reorderPoint =
+            dto.reorderPoint != null && Number.isFinite(Number(dto.reorderPoint))
+              ? Number(dto.reorderPoint)
+              : undefined;
           await tx.stockLevel.create({
             data: {
               tenantId: user.tenantId,
@@ -840,6 +847,7 @@ export class CatalogService {
               sellUnit: unit.slice(0, 8),
               qtyOnHand: 0,
               sellPrice: price,
+              ...(reorderPoint != null ? { reorderPoint } : {}),
             },
           });
           await this.stock.mutateInTx(tx, {

@@ -11,6 +11,7 @@ import {
   IsNumber,
   IsObject,
   IsOptional,
+  Allow,
   IsPositive,
   IsString,
   IsUUID,
@@ -624,6 +625,7 @@ export class AddSaleProductDto {
   })
   @IsOptional()
   @IsObject()
+  @Allow()
   extraFields?: Record<string, unknown>;
 }
 
@@ -857,6 +859,15 @@ export class AdjustSaleStockDto {
   @IsString()
   @MaxLength(500)
   reason?: string;
+
+  @ApiPropertyOptional({
+    example: 'SN-987654',
+    description: 'Serial number for serialized items',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  serialNumber?: string;
 }
 
 export class RenameSaleCategoryDto {

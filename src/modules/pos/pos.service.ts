@@ -289,19 +289,10 @@ export class PosService {
     const priceErr = validateSellPrice(price);
     if (priceErr) throw new BadRequestException(priceErr);
 
-    const rawQty = Number(dto.qty);
+    const rawQty = Number(dto.qty ?? 0);
     const qtyErr = validateSellQty(rawQty, sellUnit, units);
     if (qtyErr) throw new BadRequestException(qtyErr);
     const qty = normalizeQty(rawQty, sellUnit, units);
-
-    const isServiceEarly = dto.itemType === 'service';
-    const willTrack =
-      isServiceEarly ? false : dto.trackInventory !== false;
-    if (willTrack && qty < 1) {
-      throw new BadRequestException(
-        'Opening quantity must be at least 1 (not 0 or a fraction below 1)',
-      );
-    }
 
     const cat = await this.prisma.category.findFirst({
       where: { id: dto.categoryId, tenantId: user.tenantId },
@@ -326,25 +317,143 @@ export class PosService {
       isService ? false : dto.trackInventory !== false;
     const trackSerial = Boolean(dto.serialTracking) && !isService;
 
+    const existingProduct = await this.prisma.product.findUnique({
+      where: {
+        tenantId_skuCode: {
+          tenantId: user.tenantId,
+          skuCode: dto.sku.trim().toUpperCase(),
+        },
+      },
+    });
+
+    const photoUrl = await resolveProductPhoto(
+      user.tenantId,
+      dto.image ?? dto.photoUrl,
+    );
+
+    if (existingProduct) {
+      const updatedProduct = await this.prisma.product.update({
+        where: { id: existingProduct.id },
+        data: {
+          name: dto.title.trim(),
+          categoryId: dto.categoryId,
+          description: dto.description?.trim() ?? existingProduct.description,
+          photoUrl: photoUrl ?? existingProduct.photoUrl,
+          basePrice: price,
+          costPrice:
+            dto.costPrice != null && Number.isFinite(dto.costPrice)
+              ? Number(dto.costPrice)
+              : existingProduct.costPrice,
+          unitOfMeasure: sellUnit,
+          status: 'active',
+          isActive: true,
+          availableInPos: true,
+          trackQty: trackInventory,
+        },
+      });
+
+      let level = await this.prisma.stockLevel.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          locationId,
+          productId: existingProduct.id,
+        },
+      });
+
+      if (!level) {
+        level = await this.prisma.stockLevel.create({
+          data: {
+            tenantId: user.tenantId,
+            locationId,
+            productId: existingProduct.id,
+            sku: dto.sku.trim().toUpperCase(),
+            sellUnit,
+            qtyOnHand: 0,
+            sellPrice: price.toFixed(2),
+          },
+        });
+      } else {
+        level = await this.prisma.stockLevel.update({
+          where: { id: level.id },
+          data: {
+            sellPrice: price.toFixed(2),
+            sellUnit,
+          },
+        });
+      }
+
+      if (trackInventory && qty > 0) {
+        await this.stock.mutate(this.prisma, {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          locationId,
+          stockLevelId: level.id,
+          qty,
+          type: StockLedgerType.opening,
+          reason: 'Opening stock',
+          referenceType: 'product',
+          referenceId: existingProduct.id,
+          skipComponentExplosion: true,
+        });
+      }
+
+      return {
+        mode: 'sale' as const,
+        fieldsUsed: SALE_PRODUCT_FIELDS.map((f) => f.key),
+        product: {
+          id: updatedProduct.id,
+          title: updatedProduct.name,
+          sku: updatedProduct.skuCode,
+          description: updatedProduct.description,
+          image: updatedProduct.photoUrl,
+          photoUrl: updatedProduct.photoUrl,
+          category: cat,
+          sellUnit,
+        },
+        stockLevel: {
+          id: level.id,
+          sku: level.sku,
+          sellPrice: level.sellPrice,
+          qtyOnHand: Number(level.qtyOnHand) + (trackInventory && qty > 0 ? qty : 0),
+          sellUnit: level.sellUnit,
+        },
+        posItem: {
+          id: level.id,
+          sku: level.sku,
+          name: updatedProduct.name,
+          sellPrice: level.sellPrice,
+          qtyOnHand: Number(level.qtyOnHand) + (trackInventory && qty > 0 ? qty : 0),
+          sellUnit: level.sellUnit,
+          image: updatedProduct.photoUrl,
+          photoUrl: updatedProduct.photoUrl,
+          category: cat,
+        },
+      };
+    }
+
     let barcode = dto.barcode?.trim() || dto.upc?.trim() || null;
     let barcodeType: string | null = null;
-    if (!barcode) {
+    if (barcode) {
+      const barcodeTaken = await this.prisma.product.findFirst({
+        where: { tenantId: user.tenantId, barcode },
+        select: { id: true },
+      });
+      if (barcodeTaken) {
+        barcode = await this.allocateUniqueBarcode(user.tenantId);
+        barcodeType = 'code128';
+      } else {
+        barcodeType = /^\d{13}$/.test(barcode)
+          ? 'ean13'
+          : /^\d{12}$/.test(barcode)
+            ? 'upca'
+            : 'code128';
+      }
+    } else {
       barcode = await this.allocateUniqueBarcode(user.tenantId);
       barcodeType = 'code128';
-    } else {
-      barcodeType = /^\d{13}$/.test(barcode)
-        ? 'ean13'
-        : /^\d{12}$/.test(barcode)
-          ? 'upca'
-          : 'code128';
     }
 
     try {
-      const photoUrl = await resolveProductPhoto(
-        user.tenantId,
-        dto.image ?? dto.photoUrl,
-      );
-
       const product = await this.prisma.product.create({
         data: {
           tenantId: user.tenantId,

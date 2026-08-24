@@ -728,3 +728,23 @@ export class SetProductStatusDto {
   @IsEnum(ProductStatus)
   status!: ProductStatus;
 }
+
+export class BulkDeleteProductsDto {
+  @ApiPropertyOptional({ description: 'Delete all products for the tenant' })
+  @IsOptional()
+  @IsBoolean()
+  all?: boolean;
+
+  @ApiPropertyOptional({ description: 'Delete products matching specific SKUs' })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  skus?: string[];
+
+  @ApiPropertyOptional({ description: 'Delete products matching specific product IDs' })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  ids?: string[];
+}
+

@@ -489,9 +489,11 @@ export class CatalogService {
       ...(categoryIds ? { categoryId: { in: categoryIds } } : {}),
       ...(query.brandId ? { brandId: query.brandId } : {}),
       ...(query.kind ? { kind: query.kind } : {}),
-      ...(query.status
-        ? { status: query.status }
-        : { status: { not: ProductStatus.archived } }),
+      ...(query.status === 'inactive'
+        ? { status: { in: [ProductStatus.inactive, ProductStatus.archived] } }
+        : query.status
+          ? { status: query.status }
+          : {}),
       ...(query.availableInPos === 'true'
         ? { availableInPos: true }
         : query.availableInPos === 'false'

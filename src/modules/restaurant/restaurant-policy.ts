@@ -191,7 +191,47 @@ export function normalizeWastageReason(raw: string | undefined): WastageReason {
 }
 
 export function canOpenTable(status: string): boolean {
-  return status === 'available' || status === 'cleaning';
+  return status === 'available';
+}
+
+export function canAssignTable(opts: {
+  status: string;
+  hasBookedReservation?: boolean;
+  hasSeatedReservation?: boolean;
+  currentOrderId?: string | null;
+  isSeatingReservation?: boolean;
+}): { ok: true } | { ok: false; reason: string } {
+  if (opts.status === 'blocked') {
+    return { ok: false, reason: 'Table is blocked' };
+  }
+  if (opts.status === 'occupied' || opts.currentOrderId) {
+    if (!opts.isSeatingReservation) {
+      return {
+        ok: false,
+        reason: 'Table is occupied with a running order',
+      };
+    }
+  }
+  if (opts.status === 'cleaning') {
+    return {
+      ok: false,
+      reason:
+        'Table is currently being cleaned. Mark as cleaned/available first',
+    };
+  }
+  if (
+    (opts.status === 'reserved' || opts.hasBookedReservation) &&
+    !opts.isSeatingReservation
+  ) {
+    return {
+      ok: false,
+      reason: 'Table is reserved and cannot be assigned to another customer',
+    };
+  }
+  if (opts.status !== 'available' && !opts.isSeatingReservation) {
+    return { ok: false, reason: `Table status is ${opts.status}` };
+  }
+  return { ok: true };
 }
 
 export function canMergeTables(opts: {

@@ -17,6 +17,7 @@ import { Roles } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
 import { CatalogService } from './catalog.service';
+import { UnitPricingService } from './unit-pricing.service';
 import {
   CreateBatchDto,
   CreateBrandDto,
@@ -39,7 +40,64 @@ import {
 @ApiBearerAuth('access-token')
 @Controller('catalog')
 export class CatalogController {
-  constructor(private readonly catalog: CatalogService) {}
+  constructor(
+    private readonly catalog: CatalogService,
+    private readonly unitPricing: UnitPricingService,
+  ) {}
+
+  // ── Unit master & product units ────────────────────────────────────────
+
+  @Post('units/seed')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Ensure system unit groups + units exist' })
+  seedUnits() {
+    return this.unitPricing.ensureSystemUnits();
+  }
+
+  @Get('unit-groups')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'List unit groups with units' })
+  listUnitGroups() {
+    return this.unitPricing.listUnitGroups();
+  }
+
+  @Get('products/:id/units')
+  @Roles(...RoleGroup.catalogRead)
+  listProductUnits(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.unitPricing.listProductUnits(user, id);
+  }
+
+  @Post('products/:id/units')
+  @Roles(...RoleGroup.catalogWrite)
+  upsertProductUnit(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body()
+    body: {
+      unitId: string;
+      conversionToBase: number;
+      fixedPrice?: number | null;
+      isDefaultSellingUnit?: boolean;
+      isPurchaseUnit?: boolean;
+    },
+  ) {
+    return this.unitPricing.upsertProductUnit(user, id, body);
+  }
+
+  @Post('pricing/quote')
+  @Roles(...RoleGroup.catalogRead)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Quote line amount + base qty (PricingEngine)' })
+  quoteLine(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: { productId: string; enteredQty: number; sellingUnitId: string },
+  ) {
+    return this.unitPricing.quoteLine(user, body);
+  }
 
   // ── Brands ─────────────────────────────────────────────────────────────
 

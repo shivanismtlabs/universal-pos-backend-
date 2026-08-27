@@ -365,6 +365,11 @@ export class EnterpriseMetricsService {
     };
   }
 
+  /** Prisma binds JS strings as text; Postgres UUID columns need an explicit cast. */
+  private uuidIn(ids: string[]) {
+    return Prisma.join(ids.map((id) => Prisma.sql`${id}::uuid`));
+  }
+
   private async cogsSum(
     tenantIds: string[],
     locIds: string[],
@@ -372,14 +377,14 @@ export class EnterpriseMetricsService {
   ) {
     if (!tenantIds.length) return 0;
     const locSql = locIds.length
-      ? Prisma.sql`AND o.location_id IN (${Prisma.join(locIds)})`
+      ? Prisma.sql`AND o.location_id IN (${this.uuidIn(locIds)})`
       : Prisma.empty;
     const rows = await this.prisma.$queryRaw<Array<{ cogs: Prisma.Decimal }>>`
       SELECT COALESCE(SUM(oi.quantity * COALESCE(p.cost_price, 0)), 0) AS cogs
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
       LEFT JOIN products p ON p.id = oi.product_id
-      WHERE o.tenant_id IN (${Prisma.join(tenantIds)})
+      WHERE o.tenant_id IN (${this.uuidIn(tenantIds)})
         AND o.status NOT IN ('cancelled', 'draft')
         AND o.kind <> 'return_order'
         AND o.created_at >= ${range.start}
@@ -470,7 +475,7 @@ export class EnterpriseMetricsService {
   private async inventoryValue(tenantIds: string[], locIds: string[]) {
     if (!tenantIds.length) return { value: 0, qty: 0 };
     const locSql = locIds.length
-      ? Prisma.sql`AND sl.location_id IN (${Prisma.join(locIds)})`
+      ? Prisma.sql`AND sl.location_id IN (${this.uuidIn(locIds)})`
       : Prisma.empty;
     const rows = await this.prisma.$queryRaw<
       Array<{ value: Prisma.Decimal; qty: Prisma.Decimal }>
@@ -480,7 +485,7 @@ export class EnterpriseMetricsService {
         COALESCE(SUM(sl.qty_on_hand), 0) AS qty
       FROM stock_levels sl
       JOIN products p ON p.id = sl.product_id
-      WHERE sl.tenant_id IN (${Prisma.join(tenantIds)})
+      WHERE sl.tenant_id IN (${this.uuidIn(tenantIds)})
         ${locSql}
     `;
     return {
@@ -504,12 +509,12 @@ export class EnterpriseMetricsService {
   private async lowStockCount(tenantIds: string[], locIds: string[]) {
     if (!tenantIds.length) return 0;
     const locSql = locIds.length
-      ? Prisma.sql`AND location_id IN (${Prisma.join(locIds)})`
+      ? Prisma.sql`AND location_id IN (${this.uuidIn(locIds)})`
       : Prisma.empty;
     const rows = await this.prisma.$queryRaw<Array<{ n: bigint }>>`
       SELECT COUNT(*)::bigint AS n
       FROM stock_levels sl
-      WHERE sl.tenant_id IN (${Prisma.join(tenantIds)})
+      WHERE sl.tenant_id IN (${this.uuidIn(tenantIds)})
         AND sl.reorder_point IS NOT NULL
         AND sl.qty_on_hand <= sl.reorder_point
         ${locSql}
@@ -573,7 +578,7 @@ export class EnterpriseMetricsService {
   private async inventoryValueByTenant(tenantIds: string[], locIds: string[]) {
     if (!tenantIds.length) return new Map();
     const locSql = locIds.length
-      ? Prisma.sql`AND sl.location_id IN (${Prisma.join(locIds)})`
+      ? Prisma.sql`AND sl.location_id IN (${this.uuidIn(locIds)})`
       : Prisma.empty;
     const rows = await this.prisma.$queryRaw<
       Array<{ tenant_id: string; value: Prisma.Decimal }>
@@ -581,7 +586,7 @@ export class EnterpriseMetricsService {
       SELECT sl.tenant_id, COALESCE(SUM(sl.qty_on_hand * COALESCE(p.cost_price, 0)), 0) AS value
       FROM stock_levels sl
       JOIN products p ON p.id = sl.product_id
-      WHERE sl.tenant_id IN (${Prisma.join(tenantIds)})
+      WHERE sl.tenant_id IN (${this.uuidIn(tenantIds)})
         ${locSql}
       GROUP BY sl.tenant_id
     `;

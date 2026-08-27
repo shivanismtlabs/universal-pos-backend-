@@ -8,6 +8,8 @@ import {
   OrderKind,
   PaymentType,
   Prisma,
+  ProductKind,
+  ProductStatus,
   RentalOrderLifecycle,
   ReservationStatus,
   StockUnitStatus,
@@ -72,36 +74,60 @@ export class RentalPosService {
     const locId = locationId ?? (await this.defaultLocationId(user.tenantId));
     if (!locId) throw new BadRequestException('No location configured');
 
-    const [categories, products, units, openOut, available] = await Promise.all([
-      this.prisma.category.findMany({
-        where: { tenantId: user.tenantId },
-        orderBy: { name: 'asc' },
-        select: { id: true, name: true },
-      }),
-      this.prisma.product.count({
-        where: {
-          tenantId: user.tenantId,
-          fulfillmentMode: FulfillmentMode.rental,
-        },
-      }),
-      this.prisma.stockUnit.count({
-        where: { tenantId: user.tenantId, locationId: locId },
-      }),
-      this.prisma.stockUnit.count({
-        where: {
-          tenantId: user.tenantId,
-          locationId: locId,
-          status: StockUnitStatus.checked_out,
-        },
-      }),
-      this.prisma.stockUnit.count({
-        where: {
-          tenantId: user.tenantId,
-          locationId: locId,
-          status: StockUnitStatus.available,
-        },
-      }),
-    ]);
+    const [categories, products, units, openOut, available, serviceRows] =
+      await Promise.all([
+        this.prisma.category.findMany({
+          where: { tenantId: user.tenantId },
+          orderBy: { name: 'asc' },
+          select: { id: true, name: true },
+        }),
+        this.prisma.product.count({
+          where: {
+            tenantId: user.tenantId,
+            fulfillmentMode: FulfillmentMode.rental,
+          },
+        }),
+        this.prisma.stockUnit.count({
+          where: { tenantId: user.tenantId, locationId: locId },
+        }),
+        this.prisma.stockUnit.count({
+          where: {
+            tenantId: user.tenantId,
+            locationId: locId,
+            status: StockUnitStatus.checked_out,
+          },
+        }),
+        this.prisma.stockUnit.count({
+          where: {
+            tenantId: user.tenantId,
+            locationId: locId,
+            status: StockUnitStatus.available,
+          },
+        }),
+        // Service catalog items (no stock units) — rentable as product lines
+        this.prisma.product.findMany({
+          where: {
+            tenantId: user.tenantId,
+            isActive: true,
+            availableInPos: true,
+            status: ProductStatus.active,
+            OR: [
+              { kind: ProductKind.service },
+              { fulfillmentMode: FulfillmentMode.service },
+            ],
+          },
+          orderBy: { name: 'asc' },
+          take: 80,
+          select: {
+            id: true,
+            name: true,
+            skuCode: true,
+            basePrice: true,
+            photoUrl: true,
+            category: { select: { id: true, name: true } },
+          },
+        }),
+      ]);
 
     const recentUnits = await this.prisma.stockUnit.findMany({
       where: { tenantId: user.tenantId, locationId: locId },
@@ -130,9 +156,22 @@ export class RentalPosService {
         units,
         available,
         checkedOut: openOut,
+        services: serviceRows.length,
       },
       categories,
       units: recentUnits.map((u) => this.mapUnit(u)),
+      services: serviceRows.map((p) => ({
+        id: p.id,
+        productId: p.id,
+        title: p.name,
+        sku: p.skuCode,
+        rentalPrice: Number(p.basePrice),
+        deposit: 0,
+        kind: 'service' as const,
+        category: p.category,
+        image: p.photoUrl,
+        photoUrl: p.photoUrl,
+      })),
     };
   }
 

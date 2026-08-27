@@ -145,7 +145,9 @@ export class EnterpriseApprovalsService {
     if (evaled.allowed && !evaled.needsApproval) return { queued: false as const };
     const req = await this.createRequest(user, input);
     throw new ForbiddenException({
-      message: evaled.reason ?? 'Approval required',
+      message:
+        evaled.reason ??
+        `Approval required — open Approvals and approve request ${req.id.slice(0, 8)} before this stock transfer can run.`,
       approvalRequestId: req.id,
       status: 'pending',
     });

@@ -563,15 +563,17 @@ export function recommendCommerceModes(input: {
 
 /**
  * Resolve effective capabilities for a tenant.
- * Explicit settings.capabilities wins when present (even empty after setup).
+ * Explicit settings.capabilities wins when present, but CORE_CAPABILITIES
+ * (partial pay, store credit, custom fields) always stay on — Universal POS.
  * Otherwise derive from businessType + commerceModes.
  */
 export function resolveTenantCapabilities(settings: unknown): CapabilityCode[] {
   const s = (settings ?? {}) as Record<string, unknown>;
   if (Array.isArray(s.capabilities)) {
-    return uniqCaps(
-      s.capabilities.filter(isCapabilityCode) as CapabilityCode[],
-    );
+    return uniqCaps([
+      ...CORE_CAPABILITIES,
+      ...(s.capabilities.filter(isCapabilityCode) as CapabilityCode[]),
+    ]);
   }
   const businessType =
     typeof s.businessType === 'string'

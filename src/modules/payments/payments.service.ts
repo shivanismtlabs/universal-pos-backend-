@@ -753,8 +753,8 @@ export class PaymentsService {
     locationId: string,
     method: PaymentMethod,
     status: PaymentStatus,
-    type: PaymentType,
-    orderKind: OrderKind,
+    _type: PaymentType,
+    _orderKind: OrderKind,
   ) {
     const cashMovement =
       method === PaymentMethod.cash &&
@@ -762,7 +762,7 @@ export class PaymentsService {
         status === PaymentStatus.processing);
     if (!cashMovement) return null;
 
-    const session = await tx.registerSession.findFirst({
+    const open = await tx.registerSession.findFirst({
       where: {
         tenantId: user.tenantId,
         locationId,
@@ -770,19 +770,17 @@ export class PaymentsService {
       },
       orderBy: { openedAt: 'desc' },
     });
+    if (open) return open;
 
-    const requireRegister =
-      orderKind === OrderKind.sale &&
-      (type === PaymentType.payment ||
-        type === PaymentType.refund ||
-        type === PaymentType.deposit_refund);
-
-    if (requireRegister && !session) {
-      throw new BadRequestException(
-        'Open the register before recording a cash payment or cash refund',
-      );
-    }
-    return session;
+    // Auto-open so cash checkout never blocks on “open the register first”.
+    return tx.registerSession.create({
+      data: {
+        tenantId: user.tenantId,
+        locationId,
+        openedById: user.userId,
+        openingFloat: '0.00',
+      },
+    });
   }
 
   private assertLocationScope(user: AuthUser, locationId: string | null) {

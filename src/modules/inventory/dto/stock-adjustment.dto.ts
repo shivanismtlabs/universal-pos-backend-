@@ -4,10 +4,13 @@ import {
   IsArray,
   IsDateString,
   IsEnum,
+  IsInt,
   IsNumber,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
+  Min,
   MinLength,
   ValidateNested,
 } from 'class-validator';
@@ -34,12 +37,15 @@ export class StockAdjustmentLineInputDto {
   stockLevelId?: string;
 
   @IsNumber()
+  @Type(() => Number)
   currentQty!: number;
 
   @IsNumber()
+  @Type(() => Number)
   adjustmentQty!: number;
 
   @IsNumber()
+  @Type(() => Number)
   newQty!: number;
 
   @IsOptional()
@@ -163,13 +169,17 @@ export class ListStockAdjustmentsQueryDto {
   @IsString()
   endDate?: string;
 
+  /** Query strings must use @IsInt + @Type — @IsNumber() rejects "20". */
   @IsOptional()
-  @IsNumber()
   @Type(() => Number)
+  @IsInt()
+  @Min(1)
   page?: number;
 
   @IsOptional()
-  @IsNumber()
   @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
   limit?: number;
 }

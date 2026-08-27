@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import {
@@ -15,6 +16,8 @@ import {
 } from './dto/stock-adjustment.dto';
 import { StockMutationEngine } from './stock-mutation.engine';
 import { Prisma, StockLedgerType } from '@prisma/client';
+import { isMissingRelation } from '../../common/prisma/prisma-errors';
+import { locationAccessFilter } from '../../common/location-access';
 
 @Injectable()
 export class StockAdjustmentService {
@@ -45,6 +48,46 @@ export class StockAdjustmentService {
     return `${prefix}${String(nextNum).padStart(6, '0')}`;
   }
 
+  private num(v: unknown, fallback = 0): number {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  private mapLine(l: {
+    id?: string;
+    productId: string;
+    stockLevelId?: string | null;
+    currentQty: unknown;
+    adjustmentQty: unknown;
+    newQty: unknown;
+    unit?: string | null;
+    currentUnitCost?: unknown;
+    adjustmentValue?: unknown;
+    serialNumber?: string | null;
+    notes?: string | null;
+    product?: { id?: string; name?: string; skuCode?: string; photoUrl?: string | null } | null;
+  }) {
+    return {
+      ...l,
+      currentQty: this.num(l.currentQty),
+      adjustmentQty: this.num(l.adjustmentQty),
+      newQty: this.num(l.newQty),
+      currentUnitCost:
+        l.currentUnitCost == null ? null : this.num(l.currentUnitCost),
+      adjustmentValue:
+        l.adjustmentValue == null ? null : this.num(l.adjustmentValue),
+      name: l.product?.name,
+      sku: l.product?.skuCode,
+    };
+  }
+
+  private mapAdjustment<T extends { lines?: unknown[] }>(row: T): T {
+    const lines = Array.isArray(row.lines)
+      ? row.lines.map((l) => this.mapLine(l as Parameters<typeof this.mapLine>[0]))
+      : row.lines;
+    return { ...row, lines };
+  }
+
   /** Validate location and lines before saving/finalizing */
   private async validateAdjustmentInput(
     tenantId: string,
@@ -57,7 +100,6 @@ export class StockAdjustmentService {
     }>,
     type: StockAdjustmentTypeDto,
   ) {
-    // 1. Verify location
     const loc = await this.prisma.location.findFirst({
       where: { id: locationId, tenantId, isActive: true },
     });
@@ -69,7 +111,6 @@ export class StockAdjustmentService {
       throw new BadRequestException('At least one item is required for adjustment');
     }
 
-    // 2. Verify products exist, belong to tenant, and are not archived/deleted
     const productIds = Array.from(new Set(lines.map((l) => l.productId)));
     const products = await this.prisma.product.findMany({
       where: {
@@ -86,15 +127,16 @@ export class StockAdjustmentService {
       );
     }
 
-    // 3. Validate line numbers
     for (const line of lines) {
       const isQtyAdj = type === StockAdjustmentTypeDto.quantity;
       if (isQtyAdj && Math.abs(line.adjustmentQty) < 1e-9) {
-        throw new BadRequestException(
-          'Adjustment quantity cannot be zero',
-        );
+        throw new BadRequestException('Adjustment quantity cannot be zero');
       }
-      if (!isQtyAdj && Math.abs(line.adjustmentValue ?? 0) < 1e-9 && Math.abs(line.adjustmentQty) < 1e-9) {
+      if (
+        !isQtyAdj &&
+        Math.abs(line.adjustmentValue ?? 0) < 1e-9 &&
+        Math.abs(line.adjustmentQty) < 1e-9
+      ) {
         throw new BadRequestException(
           'Adjustment value or quantity cannot be zero',
         );
@@ -110,6 +152,24 @@ export class StockAdjustmentService {
   }
 
   async create(user: AuthUser, dto: CreateStockAdjustmentDto) {
+    try {
+      return this.mapAdjustment(await this.createDocument(user, dto));
+    } catch (e) {
+      if (!isMissingRelation(e)) throw e;
+      const targetStatus = dto.status ?? StockAdjustmentStatusDto.draft;
+      if (
+        targetStatus === StockAdjustmentStatusDto.draft ||
+        targetStatus === StockAdjustmentStatusDto.pending
+      ) {
+        throw new BadRequestException(
+          'Draft adjustments need a database schema update (stock_adjustments). Use Finalize & Adjust Stock, or run prisma migrate / db push.',
+        );
+      }
+      return this.createViaLedger(user, dto);
+    }
+  }
+
+  private async createDocument(user: AuthUser, dto: CreateStockAdjustmentDto) {
     await this.validateAdjustmentInput(
       user.tenantId,
       dto.locationId,
@@ -188,18 +248,86 @@ export class StockAdjustmentService {
     return adjustment;
   }
 
+  /** When stock_adjustments table is missing, still apply qty via the ledger. */
+  private async createViaLedger(user: AuthUser, dto: CreateStockAdjustmentDto) {
+    await this.validateAdjustmentInput(
+      user.tenantId,
+      dto.locationId,
+      dto.lines,
+      dto.type,
+    );
+
+    const id = randomUUID();
+    const stamp = Date.now().toString(36).toUpperCase();
+    const adjustmentNo = `ADJ-${stamp}`;
+    const loc = await this.prisma.location.findFirst({
+      where: { id: dto.locationId, tenantId: user.tenantId },
+      select: { id: true, name: true, code: true },
+    });
+
+    const linesWithIds = dto.lines.map((l) => ({ ...l, id: randomUUID() }));
+
+    await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      await this.applyAdjustmentStockMutations(tx, user, {
+        id,
+        locationId: dto.locationId,
+        adjustmentNo,
+        reason: dto.reason,
+        lines: linesWithIds,
+      });
+    });
+
+    return {
+      id,
+      adjustmentNo,
+      locationId: dto.locationId,
+      location: loc,
+      adjustmentDate: new Date(dto.adjustmentDate),
+      type: dto.type,
+      status: StockAdjustmentStatusDto.adjusted,
+      reason: dto.reason,
+      description: dto.description ?? null,
+      attachments: dto.attachments ?? [],
+      createdById: user.userId,
+      finalizedAt: new Date(),
+      finalizedById: user.userId,
+      lines: linesWithIds.map((l) => ({
+        ...l,
+        currentQty: l.currentQty,
+        adjustmentQty: l.adjustmentQty,
+        newQty: l.newQty,
+      })),
+    };
+  }
+
   async findAll(user: AuthUser, query: ListStockAdjustmentsQueryDto) {
+    try {
+      return await this.findAllDocuments(user, query);
+    } catch (e) {
+      if (!isMissingRelation(e)) throw e;
+      return this.findAllFromLedger(user, query);
+    }
+  }
+
+  private async findAllDocuments(
+    user: AuthUser,
+    query: ListStockAdjustmentsQueryDto,
+  ) {
     const page = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, Math.max(1, query.limit ?? 20));
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 20));
     const skip = (page - 1) * limit;
 
-    const where: any = {
+    const locFilter = await locationAccessFilter(
+      this.prisma,
+      user,
+      query.locationId,
+    );
+
+    const where: Prisma.StockAdjustmentWhereInput = {
       tenantId: user.tenantId,
+      ...(locFilter as Prisma.StockAdjustmentWhereInput),
     };
 
-    if (query.locationId) {
-      where.locationId = query.locationId;
-    }
     if (query.status) {
       where.status = query.status;
     }
@@ -218,8 +346,18 @@ export class StockAdjustmentService {
         { reason: { contains: q, mode: 'insensitive' } },
         { description: { contains: q, mode: 'insensitive' } },
         { createdBy: { fullName: { contains: q, mode: 'insensitive' } } },
-        { lines: { some: { product: { name: { contains: q, mode: 'insensitive' } } } } },
-        { lines: { some: { product: { skuCode: { contains: q, mode: 'insensitive' } } } } },
+        {
+          lines: {
+            some: { product: { name: { contains: q, mode: 'insensitive' } } },
+          },
+        },
+        {
+          lines: {
+            some: {
+              product: { skuCode: { contains: q, mode: 'insensitive' } },
+            },
+          },
+        },
       ];
     }
 
@@ -243,11 +381,110 @@ export class StockAdjustmentService {
     ]);
 
     return {
+      items: items.map((row) => this.mapAdjustment(row)),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    };
+  }
+
+  /** List qty ledger rows as adjustment documents when the header table is missing. */
+  private async findAllFromLedger(
+    user: AuthUser,
+    query: ListStockAdjustmentsQueryDto,
+  ) {
+    const page = Math.max(1, query.page ?? 1);
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    if (
+      (query.status && query.status !== StockAdjustmentStatusDto.adjusted) ||
+      (query.type && query.type !== StockAdjustmentTypeDto.quantity)
+    ) {
+      return { items: [], total: 0, page, limit, totalPages: 1 };
+    }
+
+    const locFilter = await locationAccessFilter(
+      this.prisma,
+      user,
+      query.locationId,
+    );
+
+    const needle = query.search?.trim();
+    const where: Prisma.StockLedgerEntryWhereInput = {
+      tenantId: user.tenantId,
+      type: StockLedgerType.adjustment,
+      ...(locFilter as Prisma.StockLedgerEntryWhereInput),
+      ...(needle
+        ? {
+            OR: [
+              { reason: { contains: needle, mode: 'insensitive' } },
+              {
+                product: {
+                  name: { contains: needle, mode: 'insensitive' },
+                },
+              },
+              {
+                product: {
+                  skuCode: { contains: needle, mode: 'insensitive' },
+                },
+              },
+            ],
+          }
+        : {}),
+    };
+
+    const [total, rows] = await Promise.all([
+      this.prisma.stockLedgerEntry.count({ where }),
+      this.prisma.stockLedgerEntry.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          product: { select: { id: true, name: true, skuCode: true } },
+          stockLevel: { select: { sku: true, sellUnit: true } },
+          location: { select: { id: true, name: true } },
+          actor: { select: { id: true, fullName: true } },
+        },
+      }),
+    ]);
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      adjustmentNo: r.stockLevel?.sku
+        ? `ADJ-${r.stockLevel.sku}`
+        : r.product?.skuCode
+          ? `ADJ-${r.product.skuCode}`
+          : `ADJ-${r.id.slice(0, 8)}`,
+      locationId: r.locationId,
+      location: r.location,
+      adjustmentDate: r.createdAt,
+      type: StockAdjustmentTypeDto.quantity,
+      status: StockAdjustmentStatusDto.adjusted,
+      reason: r.reason || 'Stock adjustment',
+      createdAt: r.createdAt,
+      createdBy: r.actor,
+      lines: [
+        {
+          productId: r.productId,
+          name: r.product?.name,
+          sku: r.product?.skuCode ?? r.stockLevel?.sku,
+          currentQty: this.num(r.qtyBefore),
+          adjustmentQty: this.num(r.qtyDelta),
+          newQty: this.num(r.qtyAfter),
+          unit: r.stockLevel?.sellUnit || 'pcs',
+        },
+      ],
+    }));
+
+    return {
       items,
       total,
       page,
       limit,
-      totalPages: Math.ceil(total / limit),
+      totalPages: Math.ceil(total / limit) || 1,
     };
   }
 
@@ -272,7 +509,7 @@ export class StockAdjustmentService {
       throw new NotFoundException('Adjustment record not found');
     }
 
-    return adj;
+    return this.mapAdjustment(adj);
   }
 
   async update(user: AuthUser, id: string, dto: UpdateStockAdjustmentDto) {
@@ -287,7 +524,7 @@ export class StockAdjustmentService {
     const locationId = dto.locationId ?? existing.locationId;
     const linesToValidate = dto.lines
       ? dto.lines
-      : existing.lines.map((l: any) => ({
+      : existing.lines.map((l: { productId: string; adjustmentQty: unknown; adjustmentValue?: unknown; newQty: unknown }) => ({
           productId: l.productId,
           adjustmentQty: Number(l.adjustmentQty),
           adjustmentValue: l.adjustmentValue ? Number(l.adjustmentValue) : undefined,
@@ -304,14 +541,12 @@ export class StockAdjustmentService {
     const isFinalizing = dto.status === StockAdjustmentStatusDto.adjusted;
 
     const updated = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      // 1. Delete existing lines if new lines provided
       if (dto.lines) {
         await tx.stockAdjustmentLine.deleteMany({
           where: { adjustmentId: id, tenantId: user.tenantId },
         });
       }
 
-      // 2. Update header and re-create lines
       const adj = await tx.stockAdjustment.update({
         where: { id },
         data: {
@@ -374,7 +609,7 @@ export class StockAdjustmentService {
       },
     });
 
-    return updated;
+    return this.mapAdjustment(updated);
   }
 
   async finalize(user: AuthUser, id: string) {
@@ -424,7 +659,7 @@ export class StockAdjustmentService {
       },
     });
 
-    return finalized;
+    return this.mapAdjustment(finalized);
   }
 
   async cancel(user: AuthUser, id: string, reason?: string) {
@@ -458,12 +693,11 @@ export class StockAdjustmentService {
         },
       });
 
-      // If adjustment was previously finalized, reverse stock changes atomically
       if (isFinalized) {
         for (const line of adj.lines) {
           const reverseQty = -Number(line.adjustmentQty);
           if (Math.abs(reverseQty) > 1e-9) {
-            let stockLevel = await tx.stockLevel.findFirst({
+            const stockLevel = await tx.stockLevel.findFirst({
               where: {
                 tenantId: user.tenantId,
                 locationId: adj.locationId,
@@ -508,7 +742,7 @@ export class StockAdjustmentService {
       },
     });
 
-    return cancelled;
+    return this.mapAdjustment(cancelled);
   }
 
   async delete(user: AuthUser, id: string) {
@@ -544,7 +778,19 @@ export class StockAdjustmentService {
   private async applyAdjustmentStockMutations(
     tx: Prisma.TransactionClient,
     user: AuthUser,
-    adjustment: any,
+    adjustment: {
+      id: string;
+      locationId: string;
+      adjustmentNo: string;
+      reason: string;
+      lines: Array<{
+        id?: string;
+        productId: string;
+        adjustmentQty: unknown;
+        unit?: string | null;
+        serialNumber?: string | null;
+      }>;
+    },
   ) {
     for (const line of adjustment.lines) {
       const delta = Number(line.adjustmentQty);
@@ -570,7 +816,7 @@ export class StockAdjustmentService {
             locationId: adjustment.locationId,
             productId: line.productId,
             sku: prod.skuCode,
-            sellUnit: line.unit || prod.unitOfMeasure || 'pcs',
+            sellUnit: String(line.unit || prod.unitOfMeasure || 'pcs').slice(0, 16),
             sellPrice: prod.basePrice,
             qtyOnHand: 0,
           },
@@ -588,7 +834,7 @@ export class StockAdjustmentService {
         referenceType: 'stock_adjustment',
         referenceId: adjustment.id,
         serialNumber: line.serialNumber || undefined,
-        idempotencyKey: `adj:${adjustment.id}:${line.id}`,
+        idempotencyKey: `adj:${adjustment.id}:${line.id ?? randomUUID()}`,
       });
     }
   }

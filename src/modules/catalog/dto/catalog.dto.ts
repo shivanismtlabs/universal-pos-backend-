@@ -15,6 +15,7 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -265,6 +266,41 @@ export class CreateCatalogProductDto {
   @MaxLength(16)
   unitOfMeasure?: string;
 
+  @ApiPropertyOptional({ description: 'Unit master id (base / inventory unit)' })
+  @IsOptional()
+  @IsUUID()
+  baseUnitId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  pricingUnitId?: string | null;
+
+  @ApiPropertyOptional({ enum: ['converted', 'fixed_tier'] })
+  @IsOptional()
+  @IsIn(['converted', 'fixed_tier'])
+  pricingStrategy?: 'converted' | 'fixed_tier';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  pricePerPricingUnit?: number;
+
+  @ApiPropertyOptional({
+    description: 'Selling/purchase unit rows (product_units)',
+  })
+  @IsOptional()
+  @IsArray()
+  productUnits?: Array<{
+    unitId: string;
+    conversionToBase: number;
+    fixedPrice?: number | null;
+    isDefaultSellingUnit?: boolean;
+    isPurchaseUnit?: boolean;
+  }>;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
@@ -437,6 +473,28 @@ export class UpdateCatalogProductDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsUUID()
+  baseUnitId?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  pricingUnitId?: string | null;
+
+  @ApiPropertyOptional({ enum: ['converted', 'fixed_tier'] })
+  @IsOptional()
+  @IsIn(['converted', 'fixed_tier'])
+  pricingStrategy?: 'converted' | 'fixed_tier';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  pricePerPricingUnit?: number | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsBoolean()
   trackInventory?: boolean;
 
@@ -464,6 +522,16 @@ export class UpdateCatalogProductDto {
   @IsOptional()
   @IsBoolean()
   availableInPos?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Low-stock alert qty — updates product meta + stock levels',
+  })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  reorderPoint?: number | null;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -510,7 +578,10 @@ export class ListCatalogQueryDto extends PaginationQueryDto {
   @IsUUID()
   locationId?: string;
 
-  @ApiPropertyOptional({ description: 'Filter items at or below default reorder (5)' })
+  @ApiPropertyOptional({
+    description:
+      'Filter items at or below default reorder (5), including zero stock',
+  })
   @IsOptional()
   @IsIn(['true', 'false', '1', '0'])
   lowStock?: string;

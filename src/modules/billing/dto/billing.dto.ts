@@ -100,6 +100,35 @@ export class CreateInvoiceDto {
   @IsOptional()
   @IsBoolean()
   useIgst?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Split-bill part total (tax-inclusive). When set, creates a part invoice instead of the full ticket.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @IsPositive()
+  amount?: number;
+
+  @ApiPropertyOptional({
+    description: '0-based split part index (idempotent with orderId)',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  splitPartIndex?: number;
+
+  @ApiPropertyOptional({ example: 'Part 1' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  splitPartLabel?: string;
+
+  @ApiPropertyOptional({ description: 'Payment that settled this part' })
+  @IsOptional()
+  @IsUUID()
+  paymentId?: string;
 }
 
 export class ApplyLateFeeDto {

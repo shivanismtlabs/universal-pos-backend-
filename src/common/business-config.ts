@@ -292,6 +292,19 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
     metaFields: [
       {
         entity: 'item',
+        key: 'foodType',
+        label: 'Diet tag',
+        type: 'select',
+        required: false,
+        hint: 'Optional veg / non-veg marker for menus — leave blank if not needed',
+        options: [
+          { value: 'veg', label: 'Veg' },
+          { value: 'non_veg', label: 'Non-veg' },
+          { value: 'egg', label: 'Egg' },
+        ],
+      },
+      {
+        entity: 'item',
         key: 'kitchenStation',
         label: 'Kitchen station',
         type: 'select',

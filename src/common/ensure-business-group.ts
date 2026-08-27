@@ -1,7 +1,10 @@
 import { randomUUID } from 'crypto';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/database.module';
-import { DEFAULT_GROUP_ENTITLEMENTS } from './entitlements';
+import {
+  DEFAULT_GROUP_ENTITLEMENTS,
+  parseEntitlements,
+} from './entitlements';
 
 const DEFAULT_POLICIES: Array<{ type: string; config: Prisma.InputJsonValue }> =
   [
@@ -128,6 +131,18 @@ export async function ensureBusinessGroupForIdentity(
         },
       },
     });
+  } else {
+    // Heal older groups that were created with empty entitlements —
+    // without these, All Businesses tabs show "Could not load this view".
+    const have = parseEntitlements(group.entitlements);
+    const missing = DEFAULT_GROUP_ENTITLEMENTS.filter((c) => !have.has(c));
+    if (missing.length) {
+      const next = [...new Set([...have, ...DEFAULT_GROUP_ENTITLEMENTS])];
+      group = await db.businessGroup.update({
+        where: { id: group.id },
+        data: { entitlements: next },
+      });
+    }
   }
 
   const unlinked = active

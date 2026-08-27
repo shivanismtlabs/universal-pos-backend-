@@ -31,6 +31,7 @@ import {
   computeReturnRefundFromOriginal,
   type ComputedReturnLine,
 } from './sale-return-math';
+import { reverseHistoricalBaseQty } from '../catalog/pricing-engine';
 
 function money(n: Prisma.Decimal | string | number) {
   return new Prisma.Decimal(n);
@@ -1472,6 +1473,31 @@ export class SaleReturnsService {
         `Stock level not found: ${line.stockLevelId}`,
       );
     }
+    const originals = await tx.orderItem.findMany({
+      where: {
+        tenantId: user.tenantId,
+        orderId: order.id,
+        stockLevelId: line.stockLevelId,
+      },
+      select: {
+        quantity: true,
+        orderedQuantity: true,
+        baseQuantity: true,
+      },
+    });
+    const orig = originals[0];
+    let restockQty = line.quantity;
+    if (orig) {
+      const ordered = orig.orderedQuantity ?? orig.quantity;
+      const base = orig.baseQuantity ?? orig.quantity;
+      restockQty = Number(
+        reverseHistoricalBaseQty({
+          originalOrderedQty: ordered,
+          originalBaseQty: base,
+          returnOrderedQty: line.quantity,
+        }).toFixed(),
+      );
+    }
     const resellable = RESELLABLE.has(line.condition || 'good');
     const recipe = await this.stock.hasRecipeExplosion(
       tx,
@@ -1485,7 +1511,7 @@ export class SaleReturnsService {
           actorUserId: user.userId,
           locationId: level.locationId,
           productId: level.productId,
-          parentQty: line.quantity,
+          parentQty: restockQty,
           referenceType: 'customer_return',
           referenceId: order.id,
         });
@@ -1498,7 +1524,7 @@ export class SaleReturnsService {
         actorUserId: user.userId,
         locationId: level.locationId,
         stockLevelId: level.id,
-        qty: line.quantity,
+        qty: restockQty,
         type: StockLedgerType.customer_return,
         reason: notes,
         referenceType: 'customer_return',
@@ -1513,7 +1539,7 @@ export class SaleReturnsService {
         stockLevelId: level.id,
         qty: 0,
         type: StockLedgerType.damage,
-        damageDelta: line.quantity,
+        damageDelta: restockQty,
         reason: notes,
         referenceType: 'customer_return',
         referenceId: order.id,

@@ -17,6 +17,7 @@ import {
   IsUUID,
   Matches,
   MaxLength,
+  Max,
   Min,
   MinLength,
   ValidateNested,
@@ -149,13 +150,21 @@ export class SaleCheckoutItemDto {
   quantity!: number;
 
   @ApiPropertyOptional({
-    description: 'Override sell price (defaults to stock level sellPrice)',
+    description: 'Override sell price (defaults to catalog/engine price for the transaction unit)',
   })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   unitPrice?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Transaction unit id (Unit master). When set, quantity is in this unit; backend converts to base.',
+  })
+  @IsOptional()
+  @IsUUID()
+  sellingUnitId?: string;
 
   @ApiPropertyOptional({ description: 'Selected product variant id when variants are enabled' })
   @IsOptional()
@@ -227,6 +236,18 @@ export class SaleCheckoutDto {
   @IsNumber()
   @Min(0)
   discountAmount?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Nearest-rupee half-up delta (rounded − exact). Positive adds Round off fee; negative writes off via discount.',
+    example: 0.4,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-0.99)
+  @Max(0.99)
+  roundOffAmount?: number;
 
   @ApiPropertyOptional({
     description: 'Loyalty coupon code applied at counter (records redemption)',
@@ -316,6 +337,18 @@ export class PrepareSaleCheckoutDto {
   @IsNumber()
   @Min(0)
   discountAmount?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Nearest-rupee half-up delta (rounded − exact). Positive adds Round off fee; negative writes off via discount.',
+    example: 0.4,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-0.99)
+  @Max(0.99)
+  roundOffAmount?: number;
 
   @ApiPropertyOptional({
     description: 'Loyalty coupon code (same as cash sale checkout)',

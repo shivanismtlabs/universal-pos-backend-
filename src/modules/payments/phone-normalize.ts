@@ -1,7 +1,7 @@
 /**
- * POS phone lookup — same digit strategy as Gupshup (91 + 10-digit local).
- * Avoids duplicate customers from +91 / 91 / 0 / bare 10-digit entry.
+ * POS phone lookup — digit strategy for search + E.164 storage via libphonenumber.
  */
+import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 export function phoneDigits(input: string): string {
   return input.replace(/\D/g, '');
@@ -10,6 +10,17 @@ export function phoneDigits(input: string): string {
 export function normalizePhone(input: string): string {
   const digits = phoneDigits(input);
   if (!digits) return '';
+  try {
+    const parsed = parsePhoneNumberFromString(
+      input.trim().startsWith('+') ? input.trim() : input.trim(),
+      input.trim().startsWith('+') ? undefined : 'IN',
+    );
+    if (parsed?.isValid()) {
+      return parsed.format('E.164').replace(/\D/g, '');
+    }
+  } catch {
+    /* fall through */
+  }
   if (digits.length === 10) return `91${digits}`;
   if (digits.startsWith('0') && digits.length === 11) {
     return `91${digits.slice(1)}`;
@@ -21,10 +32,21 @@ export function normalizePhone(input: string): string {
   return digits;
 }
 
-/** Canonical stored form for new customers (E.164-ish with +). */
+/** Canonical stored form for new customers (E.164 with +). */
 export function canonicalPhone(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = parsePhoneNumberFromString(
+      trimmed,
+      trimmed.startsWith('+') ? undefined : 'IN',
+    );
+    if (parsed?.isValid()) return parsed.format('E.164');
+  } catch {
+    /* fall through */
+  }
   const n = normalizePhone(input);
-  if (!n) return input.trim();
+  if (!n) return trimmed;
   return n.startsWith('+') ? n : `+${n}`;
 }
 

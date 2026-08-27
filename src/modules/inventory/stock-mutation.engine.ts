@@ -4,8 +4,10 @@ import {
   StockLedgerType,
   StockUnitStatus,
 } from '@prisma/client';
+import { normalizeBarcode } from '../../common/barcode';
 import { PrismaService } from '../../database/database.module';
 import { isRecipePurpose, recipeConsumeQty } from '../restaurant/restaurant-policy';
+import { convertQuantity } from '../catalog/pricing-engine';
 
 export type InvTx = Prisma.TransactionClient;
 
@@ -20,7 +22,8 @@ export type MutateStockInput = {
   variantId?: string | null;
   batchId?: string | null;
   serialNumber?: string | null;
-  qty: number;
+  qty: number | string;
+
   type: StockLedgerType;
   reason?: string | null;
   referenceType?: string | null;
@@ -82,7 +85,7 @@ export class StockMutationEngine {
   }
 
   async mutateInTx(tx: InvTx, input: MutateStockInput): Promise<MutationResult> {
-    const qty = Number(input.qty);
+    const qty = Number(new Prisma.Decimal(String(input.qty)).toString());
     const dmgOnly = Math.abs(Number(input.damageDelta ?? 0)) >= EPS;
     if (!Number.isFinite(qty) || (Math.abs(qty) < EPS && !dmgOnly)) {
       throw new BadRequestException('Quantity must be a non-zero number');
@@ -324,16 +327,116 @@ export class StockMutationEngine {
     qty: number,
   ): Promise<number> {
     const from = input.inputUnit?.trim();
-    if (!from || from === level.sellUnit) return qty;
+    const signed = new Prisma.Decimal(String(qty));
+    if (!from || from === level.sellUnit) {
+      return Number(signed.toString());
+    }
+
+    const product = await tx.product.findFirst({
+      where: { id: level.productId, tenantId: input.tenantId },
+      include: {
+        productUnits: { where: { effectiveTo: null } },
+        baseUnit: { include: { unitGroup: true } },
+      },
+    });
+
+    if (product?.baseUnitId) {
+      const units = await tx.unit.findMany({
+        where: {
+          isActive: true,
+          OR: [{ tenantId: null }, { tenantId: input.tenantId }],
+        },
+        include: { unitGroup: true },
+      });
+      const unitsById = new Map(
+        units.map((u) => [
+          u.id,
+          {
+            id: u.id,
+            symbol: u.symbol,
+            unitGroupId: u.unitGroupId,
+            unitGroupCode: u.unitGroup.code,
+            conversionToGroupBase: u.conversionToGroupBase,
+            isActive: u.isActive,
+          },
+        ]),
+      );
+      const bySymbol = new Map(
+        [...unitsById.values()].map((u) => [u.symbol.toLowerCase(), u]),
+      );
+      const fromUnit =
+        bySymbol.get(from.toLowerCase()) ??
+        unitsById.get(from);
+      const toUnit =
+        bySymbol.get(level.sellUnit.toLowerCase()) ??
+        (product.baseUnit
+          ? {
+              id: product.baseUnit.id,
+              symbol: product.baseUnit.symbol,
+              unitGroupId: product.baseUnit.unitGroupId,
+              unitGroupCode: product.baseUnit.unitGroup.code,
+              conversionToGroupBase: product.baseUnit.conversionToGroupBase,
+              isActive: true,
+            }
+          : undefined);
+      if (fromUnit && toUnit) {
+        const convRows = await tx.unitConversion.findMany({
+          where: {
+            tenantId: input.tenantId,
+            OR: [
+              { productId: level.productId },
+              { productKey: '' },
+              { productId: null },
+            ],
+          },
+        });
+        const extraEdges = convRows
+          .map((row) => {
+            const a = bySymbol.get(row.fromUnit.toLowerCase());
+            const b = bySymbol.get(row.toUnit.toLowerCase());
+            if (!a || !b) return null;
+            return { fromUnitId: a.id, toUnitId: b.id, factor: row.factor };
+          })
+          .filter((e): e is NonNullable<typeof e> => e != null);
+        try {
+          const abs = signed.abs();
+          const converted = convertQuantity({
+            quantity: abs,
+            fromUnit,
+            toUnit,
+            product: {
+              id: product.id,
+              baseUnitId: product.baseUnitId,
+              pricingUnitId: product.pricingUnitId,
+              pricingStrategy: 'CONVERTED',
+              pricePerPricingUnit: product.basePrice,
+              productUnits: product.productUnits.map((pu) => ({
+                unitId: pu.unitId,
+                conversionToBase: pu.conversionToBase,
+                fixedPrice: pu.fixedPrice,
+                effectiveFrom: pu.effectiveFrom,
+                effectiveTo: pu.effectiveTo,
+              })),
+              conversionEdges: extraEdges,
+            },
+            unitsById,
+            extraEdges,
+            validate: false,
+          });
+          const out = signed.isNeg() ? converted.neg() : converted;
+          return Number(out.toString());
+        } catch {
+          /* fall through to table lookup */
+        }
+      }
+    }
+
     const conv = await tx.unitConversion.findFirst({
       where: {
         tenantId: input.tenantId,
         fromUnit: from,
         toUnit: level.sellUnit,
-        OR: [
-          { productId: level.productId },
-          { productKey: '' },
-        ],
+        OR: [{ productId: level.productId }, { productKey: '' }],
       },
       orderBy: { productId: 'desc' },
     });
@@ -342,7 +445,8 @@ export class StockMutationEngine {
         `No unit conversion ${from} → ${level.sellUnit}`,
       );
     }
-    return qty * Number(conv.factor);
+    const out = signed.mul(conv.factor);
+    return Number(out.toString());
   }
 
   private async lockLevel(tx: InvTx, input: MutateStockInput): Promise<LockedLevel> {
@@ -542,9 +646,17 @@ export class StockMutationEngine {
       select: { trackSerial: true, fulfillmentMode: true },
     });
     if (!product?.trackSerial) return null;
-    const serial = input.serialNumber?.trim();
-    if (!serial) {
-      throw new BadRequestException('serial is required');
+    const serialRaw = input.serialNumber?.trim();
+    if (!serialRaw) {
+      throw new BadRequestException(
+        'This item requires a serial number for each unit. Enter serials in Stock In / Stock Out.',
+      );
+    }
+    const serial = normalizeBarcode(serialRaw);
+    if (serial.length < 2) {
+      throw new BadRequestException(
+        'Enter a valid serial number (at least 2 characters)',
+      );
     }
     const units = await tx.$queryRaw<
       Array<{ id: string; status: StockUnitStatus }>
@@ -555,7 +667,25 @@ export class StockMutationEngine {
         AND barcode_sku = ${serial}
       FOR UPDATE
     `;
-    const unit = units[0];
+    let unit = units[0];
+    const inboundCreate =
+      input.type === StockLedgerType.stock_in ||
+      input.type === StockLedgerType.opening;
+    if (!unit && inboundCreate) {
+      // First receive of this serial — register the physical unit, then mark available.
+      const created = await tx.stockUnit.create({
+        data: {
+          tenantId: input.tenantId,
+          locationId: level.locationId,
+          productId: level.productId,
+          productVariantId: level.variantId,
+          barcodeSku: serial,
+          status: StockUnitStatus.available,
+          meta: { catalogSerial: true } as Prisma.InputJsonValue,
+        },
+      });
+      unit = { id: created.id, status: created.status };
+    }
     if (!unit) {
       throw new BadRequestException(`Unknown serial ${serial}`);
     }

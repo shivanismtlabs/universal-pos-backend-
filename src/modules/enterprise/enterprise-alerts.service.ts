@@ -146,7 +146,7 @@ export class EnterpriseAlertsService {
       case 'low_stock': {
         const rows = await this.prisma.$queryRaw<Array<{ n: bigint }>>`
           SELECT COUNT(*)::bigint AS n FROM stock_levels
-          WHERE tenant_id = ${tenantId}
+          WHERE tenant_id = ${tenantId}::uuid
             AND reorder_point IS NOT NULL
             AND qty_on_hand <= reorder_point
         `;

@@ -74,9 +74,7 @@ export class EnterpriseMetricsService {
     const tenants = await this.tenantScope(p, query);
     const tz = tenants[0]?.timezone || 'Asia/Kolkata';
     const today = ymdInZone(new Date(), tz);
-    const yestDate = new Date();
-    yestDate.setDate(yestDate.getDate() - 1);
-    const yesterday = ymdInZone(yestDate, tz);
+    const yesterday = this.addCalendarDays(today, -1);
     const mtdFrom = `${today.slice(0, 7)}-01`;
     const ytdFrom = `${today.slice(0, 4)}-01-01`;
 
@@ -291,6 +289,13 @@ export class EnterpriseMetricsService {
     return this.range({ from: ymd, to: ymd }, tz);
   }
 
+  /** Shift a YYYY-MM-DD calendar day (not a timezone-local Date). */
+  private addCalendarDays(ymd: string, delta: number) {
+    const [y, m, d] = ymd.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + delta));
+    return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+  }
+
   private shiftPeriod(from: string | undefined, to: string | undefined, tz?: string) {
     const timezone = tz || 'Asia/Kolkata';
     const range = this.range({ from, to }, timezone);
@@ -352,6 +357,9 @@ export class EnterpriseMetricsService {
           status: PaymentStatus.succeeded,
           type: { in: [PaymentType.refund, PaymentType.deposit_refund] },
           createdAt: { gte: range.start, lte: range.end },
+          ...(locIds.length
+            ? { order: { locationId: { in: locIds } } }
+            : {}),
         },
         _sum: { amount: true },
       }),
@@ -412,27 +420,47 @@ export class EnterpriseMetricsService {
     return round2(Number(agg._sum.amount ?? 0));
   }
 
+  private async cashMaps(tenantIds: string[], locIds: string[]) {
+    const sessionWhere = {
+      tenantId: { in: tenantIds },
+      closedAt: null as null,
+      ...(locIds.length ? { locationId: { in: locIds } } : {}),
+    };
+    const [sessions, moves] = await Promise.all([
+      this.prisma.registerSession.groupBy({
+        by: ['tenantId'],
+        where: sessionWhere,
+        _sum: { openingFloat: true },
+      }),
+      this.prisma.payment.groupBy({
+        by: ['tenantId', 'type'],
+        where: {
+          tenantId: { in: tenantIds },
+          status: PaymentStatus.succeeded,
+          method: PaymentMethod.cash,
+          registerSession: sessionWhere,
+        },
+        _sum: { amount: true },
+      }),
+    ]);
+    const map = new Map<string, number>();
+    for (const s of sessions) {
+      map.set(s.tenantId, round2(Number(s._sum.openingFloat ?? 0)));
+    }
+    const inbound: PaymentType[] = [PaymentType.payment, PaymentType.deposit];
+    for (const m of moves) {
+      const amt = Number(m._sum.amount ?? 0);
+      const signed = inbound.includes(m.type) ? amt : -Math.abs(amt);
+      map.set(m.tenantId, round2((map.get(m.tenantId) ?? 0) + signed));
+    }
+    return map;
+  }
+
   private async cashOnHand(tenantIds: string[], locIds: string[]) {
-    const open = await this.prisma.registerSession.aggregate({
-      where: {
-        tenantId: { in: tenantIds },
-        closedAt: null,
-        ...(locIds.length ? { locationId: { in: locIds } } : {}),
-      },
-      _sum: { openingFloat: true },
-    });
-    const cashPays = await this.prisma.payment.aggregate({
-      where: {
-        tenantId: { in: tenantIds },
-        status: PaymentStatus.succeeded,
-        method: PaymentMethod.cash,
-        registerSession: { closedAt: null },
-      },
-      _sum: { amount: true },
-    });
-    return round2(
-      Number(open._sum.openingFloat ?? 0) + Number(cashPays._sum.amount ?? 0),
-    );
+    const map = await this.cashMaps(tenantIds, locIds);
+    let total = 0;
+    for (const v of map.values()) total += v;
+    return round2(total);
   }
 
   private async unclearedPayments(tenantIds: string[], _locIds: string[]) {
@@ -569,8 +597,20 @@ export class EnterpriseMetricsService {
     const sorted = grouped
       .filter((g) => g.productId)
       .sort((a, b) => Number(b._sum.quantity ?? 0) - Number(a._sum.quantity ?? 0));
+    const qtys = [...sorted.map((g) => Number(g._sum.quantity ?? 0))].sort(
+      (a, b) => a - b,
+    );
+    const mid = Math.floor(qtys.length / 2);
+    const median =
+      qtys.length === 0
+        ? 0
+        : qtys.length % 2
+          ? qtys[mid]
+          : (qtys[mid - 1] + qtys[mid]) / 2;
     return {
-      fast: sorted.slice(0, 5).length,
+      fast: sorted.filter(
+        (g) => Number(g._sum.quantity ?? 0) > Math.max(1, median),
+      ).length,
       slow: sorted.filter((g) => Number(g._sum.quantity ?? 0) <= 1).length,
     };
   }
@@ -594,18 +634,7 @@ export class EnterpriseMetricsService {
   }
 
   private async cashByTenant(tenantIds: string[], locIds: string[]) {
-    const sessions = await this.prisma.registerSession.groupBy({
-      by: ['tenantId'],
-      where: {
-        tenantId: { in: tenantIds },
-        closedAt: null,
-        ...(locIds.length ? { locationId: { in: locIds } } : {}),
-      },
-      _sum: { openingFloat: true },
-    });
-    return new Map(
-      sessions.map((s) => [s.tenantId, round2(Number(s._sum.openingFloat ?? 0))]),
-    );
+    return this.cashMaps(tenantIds, locIds);
   }
 
   private async arByTenant(tenantIds: string[], locIds: string[]) {

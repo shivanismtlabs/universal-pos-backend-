@@ -336,11 +336,15 @@ export class CreateCatalogProductDto {
   @IsUUID()
   locationId?: string;
 
-  @ApiPropertyOptional({ description: 'Opening stock at default location (qty-tracked only)' })
+  @ApiPropertyOptional({
+    description:
+      'Opening stock at default location (qty-tracked only). Omit or 0 = start at zero Stock on Hand.',
+  })
   @IsOptional()
+  @ValidateIf((_, v) => v !== '' && v != null)
   @Type(() => Number)
   @IsNumber()
-  @Min(0)
+  @Min(0, { message: 'Opening quantity cannot be negative' })
   openingQty?: number;
 
   @ApiPropertyOptional({

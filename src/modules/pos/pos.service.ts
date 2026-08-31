@@ -363,7 +363,9 @@ export class PosService {
             : dto.isComposite
               ? 'bundle'
               : 'physical',
-          fulfillmentMode: FulfillmentMode.sale,
+          fulfillmentMode: isService
+            ? FulfillmentMode.service
+            : FulfillmentMode.sale,
           trackQty: trackInventory,
           trackSerial,
           trackBatch: Boolean(dto.batchTracking) && !isService,
@@ -393,6 +395,12 @@ export class PosService {
             itemType: isService ? 'service' : 'goods',
             itemStructure: dto.itemStructure === 'variants' ? 'variants' : 'single',
             ...(photoUrl ? { images: [photoUrl] } : {}),
+            ...(isService &&
+            dto.durationMinutes != null &&
+            Number.isFinite(dto.durationMinutes) &&
+            dto.durationMinutes > 0
+              ? { durationMinutes: Math.round(Number(dto.durationMinutes)) }
+              : {}),
             ...(dto.manufacturer?.trim()
               ? { manufacturer: dto.manufacturer.trim() }
               : {}),
@@ -677,24 +685,29 @@ export class PosService {
           cat = await resolveCategory(row, i);
         }
 
+        const isService = row.itemType === 'service';
         const res = await this.addSaleProduct(user, {
           title: row.title,
           description: row.description,
           categoryId: cat.id,
           sku: row.sku,
-          sellUnit: row.sellUnit,
+          sellUnit: isService
+            ? row.sellUnit || 'service'
+            : row.sellUnit,
           price: row.price,
-          qty: row.qty ?? 0,
+          qty: isService ? 0 : row.qty ?? 0,
           locationId,
           manufacturer: row.manufacturer,
           barcode: row.barcode,
           costPrice: row.costPrice,
           reorderPoint: row.reorderPoint,
           hsnOrSac: row.hsnOrSac,
-          // Goods CSV import: count stock unless the row explicitly opts out.
-          // Opening qty (including 0) always tracks so catalog shows On Hand, not "Not counted".
-          trackInventory:
-            row.trackInventory === false && !(Number(row.qty) > 0)
+          itemType: isService ? 'service' : 'goods',
+          durationMinutes: row.durationMinutes,
+          // Services never track stock. Goods: count unless row opts out.
+          trackInventory: isService
+            ? false
+            : row.trackInventory === false && !(Number(row.qty) > 0)
               ? false
               : true,
           image,

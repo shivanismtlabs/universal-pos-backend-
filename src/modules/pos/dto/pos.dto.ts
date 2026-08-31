@@ -482,6 +482,16 @@ export class AddSaleProductDto {
   @IsIn(['goods', 'service'])
   itemType?: 'goods' | 'service';
 
+  @ApiPropertyOptional({
+    example: 30,
+    description: 'Service duration in minutes',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  durationMinutes?: number;
+
   /** Single item vs variants parent (matrix pack later) */
   @ApiPropertyOptional({ enum: ['single', 'variants'] })
   @IsOptional()
@@ -752,6 +762,18 @@ export class ImportSaleProductRowDto {
   @IsOptional()
   @IsBoolean()
   trackInventory?: boolean;
+
+  @ApiPropertyOptional({ enum: ['goods', 'service'] })
+  @IsOptional()
+  @IsIn(['goods', 'service'])
+  itemType?: 'goods' | 'service';
+
+  @ApiPropertyOptional({ example: 30 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  durationMinutes?: number;
 }
 
 export class ImportSaleProductsDto {

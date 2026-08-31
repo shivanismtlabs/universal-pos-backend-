@@ -179,9 +179,14 @@ export class CreateServiceProductDto {
   @IsUUID()
   categoryId!: string;
 
-  @ApiProperty({ example: 'SVC-HAIRCUT-STD01', minLength: 15, maxLength: 18 })
+  @ApiProperty({
+    example: 'SVC-HAIR-30',
+    description: '2–18 chars; letters, numbers, . _ - /',
+    minLength: 2,
+    maxLength: 18,
+  })
   @IsString()
-  @MinLength(15)
+  @MinLength(2)
   @MaxLength(18)
   sku!: string;
 
@@ -201,9 +206,12 @@ export class CreateServiceProductDto {
 }
 
 export class BillServiceDto {
-  @ApiProperty()
+  @ApiPropertyOptional({
+    description: 'Omit for walk-in / anonymous counter charge',
+  })
+  @IsOptional()
   @IsUUID()
-  customerId!: string;
+  customerId?: string;
 
   @ApiProperty()
   @IsUUID()
@@ -213,6 +221,14 @@ export class BillServiceDto {
   @IsOptional()
   @IsIn(['cash', 'card', 'upi'])
   paymentMethod?: 'cash' | 'card' | 'upi';
+
+  @ApiPropertyOptional({ example: 1, minimum: 1, maximum: 99 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(99)
+  quantity?: number;
 
   @ApiPropertyOptional()
   @IsOptional()

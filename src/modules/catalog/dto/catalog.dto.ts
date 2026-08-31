@@ -22,6 +22,35 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ProductKind, ProductStatus } from '@prisma/client';
 import { PaginationQueryDto } from '../../../common/dto/pagination.dto';
 
+export class ProductUnitInputDto {
+  @ApiProperty()
+  @IsUUID()
+  unitId!: string;
+
+  @ApiProperty({ description: '1 of this unit = N of product base unit' })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.00000001)
+  conversionToBase!: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  fixedPrice?: number | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isDefaultSellingUnit?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isPurchaseUnit?: boolean;
+}
+
 export class CreateBrandDto {
   @ApiProperty()
   @IsString()
@@ -290,16 +319,13 @@ export class CreateCatalogProductDto {
 
   @ApiPropertyOptional({
     description: 'Selling/purchase unit rows (product_units)',
+    type: [ProductUnitInputDto],
   })
   @IsOptional()
   @IsArray()
-  productUnits?: Array<{
-    unitId: string;
-    conversionToBase: number;
-    fixedPrice?: number | null;
-    isDefaultSellingUnit?: boolean;
-    isPurchaseUnit?: boolean;
-  }>;
+  @ValidateNested({ each: true })
+  @Type(() => ProductUnitInputDto)
+  productUnits?: ProductUnitInputDto[];
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -496,6 +522,13 @@ export class UpdateCatalogProductDto {
   @IsNumber()
   @Min(0)
   pricePerPricingUnit?: number | null;
+
+  @ApiPropertyOptional({ type: [ProductUnitInputDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ProductUnitInputDto)
+  productUnits?: ProductUnitInputDto[];
 
   @ApiPropertyOptional()
   @IsOptional()

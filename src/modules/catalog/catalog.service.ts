@@ -864,16 +864,25 @@ export class CatalogService {
             costPrice: dec(dto.costPrice),
             mrp: dec(dto.mrp),
             unitOfMeasure: unit,
-            baseUnitId: dto.baseUnitId || null,
-            pricingUnitId: dto.pricingUnitId || null,
-            pricingStrategy:
-              dto.pricingStrategy === 'fixed_tier'
-                ? PricingStrategy.fixed_tier
-                : PricingStrategy.converted,
-            pricePerPricingUnit:
-              dto.pricePerPricingUnit != null
-                ? dec(dto.pricePerPricingUnit)
-                : dec(price),
+            ...(dto.baseUnitId
+              ? { baseUnitId: dto.baseUnitId }
+              : {}),
+            ...(dto.pricingUnitId
+              ? { pricingUnitId: dto.pricingUnitId }
+              : {}),
+            ...(dto.pricingStrategy
+              ? {
+                  pricingStrategy:
+                    dto.pricingStrategy === 'fixed_tier'
+                      ? PricingStrategy.fixed_tier
+                      : PricingStrategy.converted,
+                }
+              : {}),
+            ...(dto.pricePerPricingUnit != null
+              ? { pricePerPricingUnit: dec(dto.pricePerPricingUnit) }
+              : dto.baseUnitId || dto.pricingUnitId
+                ? { pricePerPricingUnit: dec(price) }
+                : {}),
             trackQty,
             trackSerial,
             trackBatch,
@@ -1044,6 +1053,16 @@ export class CatalogService {
       return this.getProduct(user, product.id);
     } catch (e) {
       throwIfUnique(e, 'SKU or barcode already exists');
+      if (
+        e instanceof Error &&
+        /product_units|base_unit_id|pricing_unit_id|pricing_strategy|P2021|P2022/i.test(
+          e.message,
+        )
+      ) {
+        throw new BadRequestException(
+          'Unit pricing tables are missing on this database. Run: npx prisma migrate deploy (or db push), then retry. Simple items only need Unit of measure (pcs/kg) — leave advanced Unit & pricing empty.',
+        );
+      }
       throw e;
     }
   }

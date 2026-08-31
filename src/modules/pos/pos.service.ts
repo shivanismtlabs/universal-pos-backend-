@@ -1313,7 +1313,7 @@ export class PosService {
   }
 
   /** Recent closed sale tickets for the floor */
-  async listRecentSales(user: AuthUser, limit = 20) {
+  async listRecentSales(user: AuthUser, limit = 20, locationId?: string) {
     await this.assertSaleShop(user.tenantId);
     const take = Math.min(Math.max(limit, 1), 50);
     const orders = await this.prisma.order.findMany({
@@ -1321,6 +1321,7 @@ export class PosService {
         tenantId: user.tenantId,
         kind: OrderKind.sale,
         status: { in: [OrderStatus.closed, OrderStatus.fulfilled] },
+        ...(locationId ? { locationId } : {}),
       },
       orderBy: { createdAt: 'desc' },
       take,

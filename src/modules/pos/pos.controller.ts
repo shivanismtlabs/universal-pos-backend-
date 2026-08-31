@@ -242,10 +242,12 @@ export class PosController {
   listRecentSales(
     @CurrentUser() user: AuthUser,
     @Query('limit') limit?: string,
+    @Query('locationId') locationId?: string,
   ) {
     return this.posService.listRecentSales(
       user,
       limit ? Number(limit) : undefined,
+      locationId,
     );
   }
 

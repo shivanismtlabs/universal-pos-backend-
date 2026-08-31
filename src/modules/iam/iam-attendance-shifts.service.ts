@@ -57,10 +57,13 @@ function calcWorkedMinutes(
   clockInAt: Date | null | undefined,
   clockOutAt: Date | null | undefined,
   breakMinutes: number,
+  asOf: Date = new Date(),
 ): number | null {
-  if (!clockInAt || !clockOutAt) return null;
+  if (!clockInAt) return null;
+  const end = clockOutAt ?? asOf;
+  if (end.getTime() < clockInAt.getTime()) return null;
   const raw = Math.round(
-    (clockOutAt.getTime() - clockInAt.getTime()) / 60000,
+    (end.getTime() - clockInAt.getTime()) / 60000,
   );
   return Math.max(0, raw - Math.max(0, breakMinutes || 0));
 }
@@ -83,19 +86,6 @@ export class IamAttendanceService {
     }
 
     const workDate = parseWorkDate(todayYmd());
-    const existing = await this.prisma.attendanceEntry.findFirst({
-      where: {
-        tenantId: user.tenantId,
-        userId: user.userId,
-        workDate,
-      },
-    });
-    if (existing) {
-      throw new BadRequestException(
-        'Attendance already recorded for today — edit the entry or clock out an open session',
-      );
-    }
-
     const now = new Date();
     const created = await this.prisma.attendanceEntry.create({
       data: {
@@ -427,6 +417,7 @@ export class IamAttendanceService {
       r.clockOutAt,
       r.breakMinutes ?? 0,
     );
+    const isOpenSession = Boolean(r.clockInAt && !r.clockOutAt);
     return {
       id: r.id,
       userId: r.userId,
@@ -456,9 +447,10 @@ export class IamAttendanceService {
       method: r.method,
       notes: r.notes,
       minutes,
+      isOpenSession,
       workingHours:
         minutes != null
-          ? `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`
+          ? `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m${isOpenSession ? ' (running)' : ''}`
           : null,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,

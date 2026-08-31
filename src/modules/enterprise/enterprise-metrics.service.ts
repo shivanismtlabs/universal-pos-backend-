@@ -26,6 +26,66 @@ export type MetricsQuery = {
   tender?: string;
 };
 
+type KpiBlock = {
+  todaySales: number;
+  yesterdaySales: number;
+  mtdSales: number;
+  ytdSales: number;
+  grossProfit: number;
+  grossMarginPct: number | null;
+  expenses: number;
+  netProfit: number;
+  cash: number;
+  unclearedPayments: number;
+  accountsReceivable: number;
+  accountsPayable: number;
+  inventoryValue: number;
+  taxAccrued: number;
+  lowStock: number;
+  deadStock: number;
+  fastMoving: number;
+  slowMoving: number;
+};
+
+type BusinessRow = {
+  tenantId: string;
+  name: string;
+  currencyCode: string;
+  timezone: string;
+  todaySales: number;
+  yesterdaySales: number;
+  periodSales: number;
+  mtdSales: number;
+  ytdSales: number;
+  grossProfit: number;
+  expenses: number;
+  netProfit: number;
+  cash: number;
+  unclearedPayments: number;
+  accountsReceivable: number;
+  accountsPayable: number;
+  inventoryValue: number;
+  taxAccrued: number;
+  lowStock: number;
+  deadStock: number;
+  fastMoving: number;
+  slowMoving: number;
+  period: { from: string; to: string };
+};
+
+type PnlRow = {
+  tenantId: string;
+  name: string;
+  currencyCode: string;
+  timezone: string;
+  revenue: number;
+  cogs: number;
+  grossProfit: number;
+  grossMarginPct: number | null;
+  expenses: number;
+  netProfit: number;
+};
+
 @Injectable()
 export class EnterpriseMetricsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -46,7 +106,9 @@ export class EnterpriseMetricsService {
       },
     });
     const allowed =
-      p.groupRole === 'owner' || p.groupRole === 'finance'
+      p.groupRole === 'owner' ||
+      p.groupRole === 'finance' ||
+      p.groupRole === 'auditor'
         ? all
         : all.filter((t) => p.tenantIds.includes(t.id));
     if (query.tenantId && !allowed.some((t) => t.id === query.tenantId)) {
@@ -67,106 +129,82 @@ export class EnterpriseMetricsService {
     };
   }
 
-  async dashboard(p: EnterprisePrincipal, query: MetricsQuery) {
-    if (!hasEntitlement(p.entitlements, 'GROUP_DASHBOARD')) {
-      throw new ForbiddenException('GROUP_DASHBOARD entitlement required');
-    }
-    const tenants = await this.tenantScope(p, query);
-    const tz = tenants[0]?.timezone || 'Asia/Kolkata';
-    const today = ymdInZone(new Date(), tz);
-    const yesterday = this.addCalendarDays(today, -1);
-    const mtdFrom = `${today.slice(0, 7)}-01`;
-    const ytdFrom = `${today.slice(0, 4)}-01-01`;
-
-    const ids = tenants.map((t) => t.id);
-    const locFilter = await this.locationFilter(ids, query);
-
-    const [todayS, yestS, mtd, ytd, expenses, cogsMtd, cash, uncleared, ar, ap, inv, tax, low, dead] =
-      await Promise.all([
-        this.salesSum(ids, locFilter, this.day(today, tz), query),
-        this.salesSum(ids, locFilter, this.day(yesterday, tz), query),
-        this.salesSum(ids, locFilter, this.range({ from: mtdFrom, to: today }, tz), query),
-        this.salesSum(ids, locFilter, this.range({ from: ytdFrom, to: today }, tz), query),
-        this.expenseSum(ids, locFilter, this.range({ from: mtdFrom, to: today }, tz)),
-        this.cogsSum(ids, locFilter, this.range({ from: mtdFrom, to: today }, tz)),
-        this.cashOnHand(ids, locFilter),
-        this.unclearedPayments(ids, locFilter),
-        this.arSum(ids, locFilter),
-        this.apSum(ids),
-        this.inventoryValue(ids, locFilter),
-        this.taxAccrued(ids, locFilter, this.range({ from: mtdFrom, to: today }, tz)),
-        this.lowStockCount(ids, locFilter),
-        this.deadStockCount(ids, locFilter),
-      ]);
-
-    const grossProfit = round2(mtd.netSales - cogsMtd);
-    const netProfit = round2(grossProfit - expenses);
-    const margin = mtd.netSales > 0 ? round2((grossProfit / mtd.netSales) * 100) : null;
-
-    const movers = await this.movers(ids, locFilter, this.range({ from: mtdFrom, to: today }, tz));
-
+  private emptyKpis(): KpiBlock {
     return {
-      timezone: tz,
-      currencyCode: tenants[0]?.currencyCode ?? 'INR',
-      period: { mtdFrom, today },
-      kpis: {
-        todaySales: todayS.netSales,
-        yesterdaySales: yestS.netSales,
-        mtdSales: mtd.netSales,
-        ytdSales: ytd.netSales,
-        grossProfit,
-        grossMarginPct: margin,
-        expenses,
-        netProfit,
-        cash: cash,
-        unclearedPayments: uncleared,
-        accountsReceivable: ar,
-        accountsPayable: ap,
-        inventoryValue: inv.value,
-        taxAccrued: tax,
-        lowStock: low,
-        deadStock: dead,
-        fastMoving: movers.fast,
-        slowMoving: movers.slow,
-      },
-      businesses: tenants.length,
+      todaySales: 0,
+      yesterdaySales: 0,
+      mtdSales: 0,
+      ytdSales: 0,
+      grossProfit: 0,
+      grossMarginPct: null,
+      expenses: 0,
+      netProfit: 0,
+      cash: 0,
+      unclearedPayments: 0,
+      accountsReceivable: 0,
+      accountsPayable: 0,
+      inventoryValue: 0,
+      taxAccrued: 0,
+      lowStock: 0,
+      deadStock: 0,
+      fastMoving: 0,
+      slowMoving: 0,
     };
   }
 
-  async groupPnl(p: EnterprisePrincipal, query: MetricsQuery) {
-    if (!hasEntitlement(p.entitlements, 'GROUP_PNL')) {
-      throw new ForbiddenException('GROUP_PNL entitlement required');
-    }
-    if (!canSeeGroupFinance(p)) {
-      throw new ForbiddenException('Finance access required for group P&L');
-    }
-    const tenants = await this.tenantScope(p, query);
-    const tz = tenants[0]?.timezone || 'Asia/Kolkata';
-    const range = this.range(query, tz);
-    const ids = tenants.map((t) => t.id);
-    const locFilter = await this.locationFilter(ids, query);
+  private aggregateBusinessKpis(
+    rows: Array<
+      Pick<
+        BusinessRow,
+        | 'todaySales'
+        | 'yesterdaySales'
+        | 'periodSales'
+        | 'mtdSales'
+        | 'ytdSales'
+        | 'grossProfit'
+        | 'expenses'
+        | 'netProfit'
+        | 'cash'
+        | 'unclearedPayments'
+        | 'accountsReceivable'
+        | 'accountsPayable'
+        | 'inventoryValue'
+        | 'taxAccrued'
+        | 'lowStock'
+        | 'deadStock'
+        | 'fastMoving'
+        | 'slowMoving'
+      >
+    >,
+  ): KpiBlock {
+    const sum = (fn: (r: (typeof rows)[number]) => number) =>
+      round2(rows.reduce((a, r) => a + fn(r), 0));
+    const periodSales = sum((r) => r.periodSales);
+    const grossProfit = sum((r) => r.grossProfit);
+    return {
+      todaySales: sum((r) => r.todaySales),
+      yesterdaySales: sum((r) => r.yesterdaySales),
+      mtdSales: sum((r) => r.mtdSales),
+      ytdSales: sum((r) => r.ytdSales),
+      grossProfit,
+      grossMarginPct:
+        periodSales > 0 ? round2((grossProfit / periodSales) * 100) : null,
+      expenses: sum((r) => r.expenses),
+      netProfit: sum((r) => r.netProfit),
+      cash: sum((r) => r.cash),
+      unclearedPayments: sum((r) => r.unclearedPayments),
+      accountsReceivable: sum((r) => r.accountsReceivable),
+      accountsPayable: sum((r) => r.accountsPayable),
+      inventoryValue: sum((r) => r.inventoryValue),
+      taxAccrued: sum((r) => r.taxAccrued),
+      lowStock: sum((r) => r.lowStock),
+      deadStock: sum((r) => r.deadStock),
+      fastMoving: sum((r) => r.fastMoving),
+      slowMoving: sum((r) => r.slowMoving),
+    };
+  }
 
-    const rows = [];
-    for (const t of tenants) {
-      const loc = query.locationId
-        ? locFilter
-        : await this.locationFilter([t.id], query);
-      const sales = await this.salesSum([t.id], loc, range, query);
-      const cogs = await this.cogsSum([t.id], loc, range);
-      const opex = await this.expenseSum([t.id], loc, range);
-      const gross = round2(sales.netSales - cogs);
-      rows.push({
-        tenantId: t.id,
-        name: t.name,
-        revenue: sales.netSales,
-        cogs,
-        grossProfit: gross,
-        grossMarginPct:
-          sales.netSales > 0 ? round2((gross / sales.netSales) * 100) : null,
-        expenses: opex,
-        netProfit: round2(gross - opex),
-      });
-    }
+  private aggregatePnl(rows: PnlRow[]) {
     const totals = rows.reduce(
       (a, r) => ({
         revenue: a.revenue + r.revenue,
@@ -178,15 +216,270 @@ export class EnterpriseMetricsService {
       { revenue: 0, cogs: 0, grossProfit: 0, expenses: 0, netProfit: 0 },
     );
     return {
-      note: 'Reporting rollup only — legal books stay per tenant.',
-      period: { from: range.fromYmd, to: range.toYmd },
-      group: {
+      revenue: round2(totals.revenue),
+      cogs: round2(totals.cogs),
+      grossProfit: round2(totals.grossProfit),
+      expenses: round2(totals.expenses),
+      netProfit: round2(totals.netProfit),
+      grossMarginPct:
+        totals.revenue > 0
+          ? round2((totals.grossProfit / totals.revenue) * 100)
+          : null,
+    };
+  }
+
+  async dashboard(p: EnterprisePrincipal, query: MetricsQuery) {
+    if (!hasEntitlement(p.entitlements, 'GROUP_DASHBOARD')) {
+      throw new ForbiddenException('GROUP_DASHBOARD entitlement required');
+    }
+    const tenants = await this.tenantScope(p, query);
+    if (!tenants.length) {
+      return {
+        mixedCurrency: false,
+        currencies: [] as string[],
+        currencyCode: null as string | null,
+        timezone: 'Asia/Kolkata',
+        period: null as { mtdFrom: string; today: string; custom: boolean } | null,
+        note: 'No businesses in scope.',
+        kpis: null as Record<string, number | null> | null,
+        byCurrency: [] as Array<{
+          currencyCode: string;
+          kpis: Record<string, number | null>;
+        }>,
+        businesses: [] as unknown[],
+        businessCount: 0,
+      };
+    }
+
+    const customPeriod = Boolean(query.from || query.to);
+    const rows = await Promise.all(
+      tenants.map(async (t) => {
+        const tz = t.timezone || 'Asia/Kolkata';
+        const today = ymdInZone(new Date(), tz);
+        const yesterday = this.addCalendarDays(today, -1);
+        const mtdFrom = `${today.slice(0, 7)}-01`;
+        const ytdFrom = `${today.slice(0, 4)}-01-01`;
+        const periodFrom = query.from || mtdFrom;
+        const periodTo = query.to || today;
+        const period = this.range({ from: periodFrom, to: periodTo }, tz);
+        const loc = await this.locationFilter([t.id], query);
+
+        const [
+          todayS,
+          yestS,
+          periodSales,
+          ytd,
+          expenses,
+          cogs,
+          cash,
+          uncleared,
+          ar,
+          ap,
+          inv,
+          tax,
+          low,
+          dead,
+          movers,
+        ] = await Promise.all([
+          this.salesSum([t.id], loc, this.day(today, tz), query),
+          this.salesSum([t.id], loc, this.day(yesterday, tz), query),
+          this.salesSum([t.id], loc, period, query),
+          this.salesSum(
+            [t.id],
+            loc,
+            this.range({ from: ytdFrom, to: today }, tz),
+            query,
+          ),
+          this.expenseSum([t.id], loc, period),
+          this.cogsSum([t.id], loc, period),
+          this.cashOnHand([t.id], loc),
+          this.unclearedPayments([t.id], loc),
+          this.arSum([t.id], loc),
+          this.apSum([t.id]),
+          this.inventoryValue([t.id], loc),
+          this.taxAccrued([t.id], loc, period),
+          this.lowStockCount([t.id], loc),
+          this.deadStockCount([t.id], loc),
+          this.movers([t.id], loc, period),
+        ]);
+
+        const grossProfit = round2(periodSales.netSales - cogs);
+        const netProfit = round2(grossProfit - expenses);
+        return {
+          tenantId: t.id,
+          name: t.name,
+          currencyCode: t.currencyCode || 'INR',
+          timezone: tz,
+          todaySales: todayS.netSales,
+          yesterdaySales: yestS.netSales,
+          periodSales: periodSales.netSales,
+          mtdSales: periodSales.netSales,
+          ytdSales: ytd.netSales,
+          grossProfit,
+          expenses,
+          netProfit,
+          cash,
+          unclearedPayments: uncleared,
+          accountsReceivable: ar,
+          accountsPayable: ap,
+          inventoryValue: inv.value,
+          taxAccrued: tax,
+          lowStock: low,
+          deadStock: dead,
+          fastMoving: movers.fast,
+          slowMoving: movers.slow,
+          period: { from: periodFrom, to: periodTo },
+        };
+      }),
+    );
+
+    const currencies = [
+      ...new Set(rows.map((r) => r.currencyCode).filter(Boolean)),
+    ];
+    const mixedCurrency = currencies.length > 1;
+
+    const byCurrency = currencies.map((currencyCode) => {
+      const subset = rows.filter((r) => r.currencyCode === currencyCode);
+      const sum = (key: keyof (typeof rows)[0]) =>
+        round2(subset.reduce((a, r) => a + Number(r[key] ?? 0), 0));
+      const periodSales = sum('periodSales');
+      const grossProfit = sum('grossProfit');
+      const expenses = sum('expenses');
+      return {
+        currencyCode,
+        kpis: {
+          todaySales: sum('todaySales'),
+          yesterdaySales: sum('yesterdaySales'),
+          mtdSales: periodSales,
+          ytdSales: sum('ytdSales'),
+          grossProfit,
+          grossMarginPct:
+            periodSales > 0 ? round2((grossProfit / periodSales) * 100) : null,
+          expenses,
+          netProfit: round2(grossProfit - expenses),
+          cash: sum('cash'),
+          unclearedPayments: sum('unclearedPayments'),
+          accountsReceivable: sum('accountsReceivable'),
+          accountsPayable: sum('accountsPayable'),
+          inventoryValue: sum('inventoryValue'),
+          taxAccrued: sum('taxAccrued'),
+          lowStock: sum('lowStock'),
+          deadStock: sum('deadStock'),
+          fastMoving: sum('fastMoving'),
+          slowMoving: sum('slowMoving'),
+        },
+      };
+    });
+
+    const primaryTz = tenants[0]?.timezone || 'Asia/Kolkata';
+    const anchorToday = ymdInZone(new Date(), primaryTz);
+
+    return {
+      mixedCurrency,
+      currencies,
+      currencyCode: mixedCurrency ? null : (currencies[0] ?? null),
+      timezone: primaryTz,
+      period: {
+        mtdFrom: query.from || `${anchorToday.slice(0, 7)}-01`,
+        today: query.to || anchorToday,
+        custom: customPeriod,
+      },
+      note: mixedCurrency
+        ? 'Mixed currencies — totals are shown per currency. Never summed across FX.'
+        : customPeriod
+          ? 'Period metrics use each shop’s local calendar; legal books stay per tenant.'
+          : 'Each shop’s today/MTD uses its own timezone. Reporting rollup only.',
+      kpis: mixedCurrency ? null : (byCurrency[0]?.kpis ?? null),
+      byCurrency,
+      businesses: rows,
+      businessCount: rows.length,
+    };
+  }
+
+  async groupPnl(p: EnterprisePrincipal, query: MetricsQuery) {
+    if (!hasEntitlement(p.entitlements, 'GROUP_PNL')) {
+      throw new ForbiddenException('GROUP_PNL entitlement required');
+    }
+    if (!canSeeGroupFinance(p)) {
+      throw new ForbiddenException('Finance access required for group P&L');
+    }
+    const tenants = await this.tenantScope(p, query);
+    const rows: Array<{
+      tenantId: string;
+      name: string;
+      currencyCode: string;
+      timezone: string;
+      revenue: number;
+      cogs: number;
+      grossProfit: number;
+      grossMarginPct: number | null;
+      expenses: number;
+      netProfit: number;
+      period: { from: string; to: string };
+    }> = [];
+    for (const t of tenants) {
+      const tz = t.timezone || 'Asia/Kolkata';
+      const range = this.range(query, tz);
+      const loc = await this.locationFilter([t.id], query);
+      const sales = await this.salesSum([t.id], loc, range, query);
+      const cogs = await this.cogsSum([t.id], loc, range);
+      const opex = await this.expenseSum([t.id], loc, range);
+      const gross = round2(sales.netSales - cogs);
+      rows.push({
+        tenantId: t.id,
+        name: t.name,
+        currencyCode: t.currencyCode || 'INR',
+        timezone: tz,
+        revenue: sales.netSales,
+        cogs,
+        grossProfit: gross,
+        grossMarginPct:
+          sales.netSales > 0 ? round2((gross / sales.netSales) * 100) : null,
+        expenses: opex,
+        netProfit: round2(gross - opex),
+        period: { from: range.fromYmd, to: range.toYmd },
+      });
+    }
+
+    const currencies = [
+      ...new Set(rows.map((r) => r.currencyCode).filter(Boolean)),
+    ];
+    const mixedCurrency = currencies.length > 1;
+
+    const byCurrency = currencies.map((currencyCode) => {
+      const subset = rows.filter((r) => r.currencyCode === currencyCode);
+      const totals = subset.reduce(
+        (a, r) => ({
+          revenue: a.revenue + r.revenue,
+          cogs: a.cogs + r.cogs,
+          grossProfit: a.grossProfit + r.grossProfit,
+          expenses: a.expenses + r.expenses,
+          netProfit: a.netProfit + r.netProfit,
+        }),
+        { revenue: 0, cogs: 0, grossProfit: 0, expenses: 0, netProfit: 0 },
+      );
+      return {
+        currencyCode,
         ...totals,
         grossMarginPct:
           totals.revenue > 0
             ? round2((totals.grossProfit / totals.revenue) * 100)
             : null,
-      },
+      };
+    });
+
+    const tz = tenants[0]?.timezone || 'Asia/Kolkata';
+    const range = this.range(query, tz);
+
+    return {
+      note: mixedCurrency
+        ? 'Mixed currencies — group totals are per currency only. Legal books stay per tenant.'
+        : 'Reporting rollup only — legal books stay per tenant.',
+      mixedCurrency,
+      currencies,
+      period: { from: range.fromYmd, to: range.toYmd },
+      group: mixedCurrency ? null : (byCurrency[0] ?? null),
+      byCurrency,
       businesses: rows,
     };
   }
@@ -213,7 +506,9 @@ export class EnterpriseMetricsService {
       from: this.shiftPeriod(query.from, query.to, tenants[0]?.timezone).from,
       to: this.shiftPeriod(query.from, query.to, tenants[0]?.timezone).to,
     });
-    const prevMap = new Map(prev.businesses.map((b) => [b.tenantId, b.netProfit]));
+    const prevMap = new Map(
+      prev.businesses.map((b) => [b.tenantId, b.netProfit]),
+    );
     const rows = pnl.businesses.map((b) => {
       const prevNet = prevMap.get(b.tenantId) ?? 0;
       return {
@@ -230,7 +525,13 @@ export class EnterpriseMetricsService {
             : round2(((b.netProfit - prevNet) / Math.abs(prevNet)) * 100),
       };
     });
-    return { period: pnl.period, rows };
+    return {
+      period: pnl.period,
+      mixedCurrency: pnl.mixedCurrency,
+      currencies: pnl.currencies,
+      note: pnl.note,
+      rows,
+    };
   }
 
   async drillOrders(
@@ -238,16 +539,19 @@ export class EnterpriseMetricsService {
     tenantId: string,
     query: MetricsQuery & { page?: number; limit?: number },
   ) {
-    if (!canSeeGroupFinance(p) && !p.tenantIds.includes(tenantId)) {
+    if (
+      !canSeeGroupFinance(p) &&
+      p.groupRole !== 'auditor' &&
+      !p.tenantIds.includes(tenantId)
+    ) {
       throw new ForbiddenException('No access to this business');
     }
     await this.tenantScope(p, { tenantId });
-    const tz = 'Asia/Kolkata';
     const tenant = await this.prisma.tenant.findUnique({
       where: { id: tenantId },
       select: { timezone: true },
     });
-    const range = this.range(query, tenant?.timezone || tz);
+    const range = this.range(query, tenant?.timezone || 'Asia/Kolkata');
     const page = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, Math.max(1, query.limit ?? 25));
     const where: Prisma.OrderWhereInput = {

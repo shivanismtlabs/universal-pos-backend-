@@ -58,7 +58,7 @@ export class EnterpriseAlertsService {
           title: `Exception: ${rule.type.replace(/_/g, ' ')}`,
           body: `${tenant.name}: ${hit}`,
           severity: 'critical',
-          href: '/group',
+          href: '/group?tab=dashboard',
           recipientRoles: ['admin', 'manager', 'accountant'],
           dedupeKey: `ent:${rule.id}:${tenant.id}`,
           payload: { ruleId: rule.id, type: rule.type },

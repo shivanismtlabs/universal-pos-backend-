@@ -12,7 +12,10 @@ import { MailService } from '../mail/mail.service';
 import { isPrismaSchemaMismatch } from './auth-db-error';
 import { assertPinAllowed } from './pin.policy';
 import { AuthSessionService } from './auth-session.service';
-import { shouldExposeDevOtp } from '../../common/cors-origins';
+import {
+  isNonDeliverableEmail,
+  shouldExposeDevOtp,
+} from '../../common/cors-origins';
 
 const BCRYPT_ROUNDS = 12;
 const OTP_TTL_MS = 10 * 60_000;
@@ -219,22 +222,29 @@ export class AuthRecoveryService {
       );
     }
 
-    try {
-      const mailed = await this.mail.sendOtp({
-        to: args.email,
-        purpose: args.purpose,
-        code,
-        expiresMinutes: Math.round(OTP_TTL_MS / 60_000),
-      });
-      if (mailed) {
-        this.log.log(`OTP email sent to ${this.maskEmail(args.email)}`);
-      } else if (isProd) {
-        this.log.error(
-          'SMTP is not configured — OTP email was not sent. Set SMTP_HOST, SMTP_USER, SMTP_PASS.',
-        );
+    const nonDeliverable = isNonDeliverableEmail(args.email);
+    if (nonDeliverable) {
+      this.log.warn(
+        `Skipped SMTP for non-deliverable mailbox ${this.maskEmail(args.email)} — use on-screen / logged OTP`,
+      );
+    } else {
+      try {
+        const mailed = await this.mail.sendOtp({
+          to: args.email,
+          purpose: args.purpose,
+          code,
+          expiresMinutes: Math.round(OTP_TTL_MS / 60_000),
+        });
+        if (mailed) {
+          this.log.log(`OTP email sent to ${this.maskEmail(args.email)}`);
+        } else if (isProd) {
+          this.log.error(
+            'SMTP is not configured — OTP email was not sent. Set SMTP_HOST, SMTP_USER, SMTP_PASS.',
+          );
+        }
+      } catch (e) {
+        this.log.error(`OTP email failed: ${String(e)}`);
       }
-    } catch (e) {
-      this.log.error(`OTP email failed: ${String(e)}`);
     }
 
     const smtpHook = this.config.get<string>('AUTH_OTP_WEBHOOK_URL')?.trim();
@@ -315,15 +325,21 @@ export class AuthRecoveryService {
   }
 
   private publicOtpResponse(email: string, devCode?: string) {
-    const expose = shouldExposeDevOtp({
-      NODE_ENV: this.config.get<string>('NODE_ENV'),
-      AUTH_OTP_RETURN_CODE: this.config.get<string>('AUTH_OTP_RETURN_CODE'),
-    });
+    const nonDeliverable = isNonDeliverableEmail(email);
+    const expose =
+      nonDeliverable ||
+      shouldExposeDevOtp({
+        NODE_ENV: this.config.get<string>('NODE_ENV'),
+        AUTH_OTP_RETURN_CODE: this.config.get<string>('AUTH_OTP_RETURN_CODE'),
+      });
+
+    const message = nonDeliverable
+      ? 'Demo / test addresses cannot receive email. Use the on-screen OTP (valid 10 minutes).'
+      : 'If an account exists for that email, a 6-digit OTP was sent. It is valid for 10 minutes.';
 
     return {
       ok: true as const,
-      message:
-        'If an account exists for that email, a 6-digit OTP was sent. It is valid for 10 minutes.',
+      message,
       maskedEmail: this.maskEmail(email),
       ...(expose && devCode ? { devCode } : {}),
     };

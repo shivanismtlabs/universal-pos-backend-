@@ -92,7 +92,28 @@ export class StockMutationEngine {
     }
 
     if (input.idempotencyKey) {
+      const existing = await tx.inventoryIdempotency.findUnique({
+        where: {
+          tenantId_key: {
+            tenantId: input.tenantId,
+            key: input.idempotencyKey,
+          },
+        },
+      });
+      if (existing) {
+        if ((existing.result as { pending?: boolean })?.pending) {
+          throw new BadRequestException(
+            'Duplicate in-flight inventory request — retry',
+          );
+        }
+        return {
+          ...(existing.result as MutationResult),
+          replayed: true,
+        };
+      }
+      // Unique insert can abort a Postgres txn; savepoint keeps receive atomic.
       try {
+        await tx.$executeRaw`SAVEPOINT inv_idemp`;
         await tx.inventoryIdempotency.create({
           data: {
             tenantId: input.tenantId,
@@ -101,12 +122,18 @@ export class StockMutationEngine {
             result: { pending: true },
           },
         });
+        await tx.$executeRaw`RELEASE SAVEPOINT inv_idemp`;
       } catch (e) {
+        try {
+          await tx.$executeRaw`ROLLBACK TO SAVEPOINT inv_idemp`;
+        } catch {
+          /* savepoint already gone */
+        }
         if (
           e instanceof Prisma.PrismaClientKnownRequestError &&
           e.code === 'P2002'
         ) {
-          const existing = await tx.inventoryIdempotency.findUnique({
+          const raced = await tx.inventoryIdempotency.findUnique({
             where: {
               tenantId_key: {
                 tenantId: input.tenantId,
@@ -114,18 +141,17 @@ export class StockMutationEngine {
               },
             },
           });
-          if (existing) {
-            if ((existing.result as { pending?: boolean })?.pending) {
+          if (raced) {
+            if ((raced.result as { pending?: boolean })?.pending) {
               throw new BadRequestException(
                 'Duplicate in-flight inventory request — retry',
               );
             }
             return {
-              ...(existing.result as MutationResult),
+              ...(raced.result as MutationResult),
               replayed: true,
             };
           }
-          throw e;
         }
         throw e;
       }

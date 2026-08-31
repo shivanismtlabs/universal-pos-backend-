@@ -3,7 +3,15 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { PoType, Prisma, StockLedgerType, SupplierStatus } from '@prisma/client';
+import {
+  assertPoStatusChange,
+  assertReceiveFits,
+  computePoTotals,
+  parsePositiveQty,
+  remainingQty,
+} from './po-ops';
 import {
   buildTaxProfile,
   computeInvoiceTax,
@@ -35,6 +43,32 @@ const PO_BLOCKED: SupplierStatus[] = [
   SupplierStatus.inactive,
   SupplierStatus.on_hold,
 ];
+
+const PO_INCLUDE = {
+  supplier: {
+    select: {
+      id: true,
+      name: true,
+      code: true,
+      supplierType: true,
+      status: true,
+    },
+  },
+  location: { select: { id: true, name: true, code: true } },
+  lines: {
+    include: {
+      stockLevel: {
+        select: {
+          id: true,
+          sku: true,
+          qtyOnHand: true,
+          locationId: true,
+          product: { select: { name: true } },
+        },
+      },
+    },
+  },
+} satisfies Prisma.PurchaseOrderInclude;
 
 function canSeeBank(user: AuthUser) {
   const roles = user.roles ?? [];
@@ -409,6 +443,60 @@ export class SuppliersService {
     });
   }
 
+  private asHttpError(e: unknown): never {
+    throw e instanceof BadRequestException || e instanceof NotFoundException
+      ? e
+      : new BadRequestException(e instanceof Error ? e.message : 'Invalid request');
+  }
+
+  private presentPo<T extends Record<string, unknown>>(po: T) {
+    const row = po as T & {
+      subtotal?: unknown;
+      discountAmount?: unknown;
+      taxPercent?: unknown;
+      taxTotal?: unknown;
+      grandTotal?: unknown;
+      lines?: Array<{
+        qtyOrdered: unknown;
+        qtyReceived: unknown;
+        unitCost?: unknown;
+      }>;
+    };
+    return {
+      ...row,
+      subtotal: row.subtotal != null ? Number(row.subtotal) : 0,
+      discountAmount: row.discountAmount != null ? Number(row.discountAmount) : 0,
+      taxPercent: row.taxPercent != null ? Number(row.taxPercent) : 0,
+      taxTotal: row.taxTotal != null ? Number(row.taxTotal) : 0,
+      grandTotal: row.grandTotal != null ? Number(row.grandTotal) : 0,
+      lines: (row.lines ?? []).map((l) => ({
+        ...l,
+        qtyOrdered: Number(l.qtyOrdered),
+        qtyReceived: Number(l.qtyReceived),
+        unitCost: l.unitCost != null ? Number(l.unitCost) : null,
+      })),
+    };
+  }
+
+  private async resolvePoLocation(user: AuthUser, locationId?: string) {
+    const id = locationId || user.locationId || undefined;
+    if (id) {
+      const loc = await this.prisma.location.findFirst({
+        where: { id, tenantId: user.tenantId, isActive: true },
+        select: { id: true },
+      });
+      if (!loc) throw new NotFoundException('Location not found');
+      return loc.id;
+    }
+    const first = await this.prisma.location.findFirst({
+      where: { tenantId: user.tenantId, isActive: true },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+    if (!first) throw new BadRequestException('No location configured');
+    return first.id;
+  }
+
   async createPo(user: AuthUser, dto: CreatePurchaseOrderDto) {
     const supplier = await this.prisma.supplier.findFirst({
       where: { id: dto.supplierId, tenantId: user.tenantId },
@@ -432,126 +520,118 @@ export class SuppliersService {
       if (!order) throw new NotFoundException('Linked order not found');
     }
 
+    const locationId = await this.resolvePoLocation(user, dto.locationId);
     const lines = dto.lines ?? [];
+    for (const l of lines) {
+      try {
+        parsePositiveQty(l.qtyOrdered, 'Line qty');
+      } catch (e) {
+        this.asHttpError(e);
+      }
+    }
     if (lines.length) {
       const ids = lines.map((l) => l.stockLevelId);
       const levels = await this.prisma.stockLevel.findMany({
         where: { tenantId: user.tenantId, id: { in: ids } },
-        select: { id: true },
+        select: { id: true, locationId: true, sku: true },
       });
       if (levels.length !== new Set(ids).size) {
         throw new BadRequestException('One or more stock levels not found');
       }
+      const wrong = levels.find((lv) => lv.locationId !== locationId);
+      if (wrong) {
+        throw new BadRequestException(
+          `SKU ${wrong.sku} is not stocked at the selected location`,
+        );
+      }
+    } else if (!(Number(dto.serviceSubtotal) > 0)) {
+      throw new BadRequestException(
+        'Add at least one stock line, or enter a service amount for a non-stock PO',
+      );
     }
 
-    const estimated = lines.reduce(
-      (s, l) => s + Number(l.unitCost ?? 0) * Number(l.qtyOrdered ?? 0),
-      0,
-    );
-    await this.assertCreditLimit(user, dto.supplierId, estimated);
+    const totals = computePoTotals({
+      lines: lines.map((l) => ({
+        qtyOrdered: l.qtyOrdered,
+        unitCost: l.unitCost,
+      })),
+      discountAmount: dto.discountAmount,
+      taxPercent: dto.taxPercent,
+      serviceSubtotal: dto.serviceSubtotal,
+    });
+    await this.assertCreditLimit(user, dto.supplierId, totals.grandTotal);
 
-    return this.prisma.purchaseOrder.create({
-      data: {
-        tenantId: user.tenantId,
-        supplierId: dto.supplierId,
-        poType: dto.poType ?? PoType.purchase,
-        linkedOrderId: dto.linkedOrderId,
-        poNumber: await this.nextDocNumber(user.tenantId, 'PO'),
-        expectedDelivery: dto.expectedDelivery
-          ? new Date(dto.expectedDelivery)
-          : undefined,
-        status: 'draft',
-        notes: dto.notes?.trim() || null,
-        lines: lines.length
-          ? {
-              create: lines.map((l) => ({
-                tenantId: user.tenantId,
-                stockLevelId: l.stockLevelId,
-                qtyOrdered: l.qtyOrdered,
-                unitCost:
-                  l.unitCost !== undefined && l.unitCost !== null
-                    ? l.unitCost
-                    : undefined,
-              })),
-            }
-          : undefined,
-      },
-      include: {
-        supplier: true,
-        lines: {
-          include: {
-            stockLevel: {
-              select: {
-                id: true,
-                sku: true,
-                qtyOnHand: true,
-                product: { select: { name: true } },
-              },
-            },
-          },
+    try {
+      const created = await this.prisma.purchaseOrder.create({
+        data: {
+          tenantId: user.tenantId,
+          supplierId: dto.supplierId,
+          locationId,
+          poType: dto.poType ?? PoType.purchase,
+          linkedOrderId: dto.linkedOrderId,
+          poNumber: await this.nextDocNumber(user.tenantId, 'PO'),
+          expectedDelivery: dto.expectedDelivery
+            ? new Date(dto.expectedDelivery)
+            : undefined,
+          status: 'draft',
+          notes: dto.notes?.trim() || null,
+          subtotal: totals.subtotal,
+          discountAmount: totals.discountAmount,
+          taxPercent: totals.taxPercent,
+          taxTotal: totals.taxTotal,
+          grandTotal: totals.grandTotal,
+          lines: lines.length
+            ? {
+                create: lines.map((l) => ({
+                  tenantId: user.tenantId,
+                  stockLevelId: l.stockLevelId,
+                  qtyOrdered: l.qtyOrdered,
+                  unitCost:
+                    l.unitCost !== undefined && l.unitCost !== null
+                      ? l.unitCost
+                      : undefined,
+                })),
+              }
+            : undefined,
         },
-      },
-    }).catch((err: unknown) => {
+        include: PO_INCLUDE,
+      });
+      return this.presentPo(created);
+    } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (
         /po_number|purchase_order_lines|column .* does not exist/i.test(msg)
       ) {
         throw new BadRequestException(
-          'Purchase order schema is outdated on this server. Apply migration 20260813193000_purchase_order_number_lines (po_number, notes, purchase_order_lines), then retry.',
+          'Purchase order schema is outdated on this server. Apply latest purchase_orders migrations, then retry.',
         );
       }
       throw err;
-    });
+    }
   }
 
-  listPos(user: AuthUser) {
-    return this.prisma.purchaseOrder.findMany({
+  async listPos(user: AuthUser) {
+    const rows = await this.prisma.purchaseOrder.findMany({
       where: { tenantId: user.tenantId },
-      include: {
-        supplier: true,
-        lines: {
-          include: {
-            stockLevel: {
-              select: {
-                id: true,
-                sku: true,
-                qtyOnHand: true,
-                product: { select: { name: true } },
-              },
-            },
-          },
-        },
-      },
+      include: PO_INCLUDE,
       orderBy: { createdAt: 'desc' },
     });
+    return rows.map((r) => this.presentPo(r));
   }
 
   async getPo(user: AuthUser, id: string) {
     const po = await this.prisma.purchaseOrder.findFirst({
       where: { id, tenantId: user.tenantId },
-      include: {
-        supplier: true,
-        lines: {
-          include: {
-            stockLevel: {
-              select: {
-                id: true,
-                sku: true,
-                qtyOnHand: true,
-                product: { select: { name: true } },
-              },
-            },
-          },
-        },
-      },
+      include: PO_INCLUDE,
     });
     if (!po) throw new NotFoundException('Purchase order not found');
-    return po;
+    return this.presentPo(po);
   }
 
   async updatePo(user: AuthUser, id: string, dto: UpdatePurchaseOrderDto) {
     const po = await this.prisma.purchaseOrder.findFirst({
       where: { id, tenantId: user.tenantId },
+      include: { lines: { select: { qtyReceived: true } } },
     });
     if (!po) throw new NotFoundException('Purchase order not found');
 
@@ -559,13 +639,16 @@ export class SuppliersService {
     if (dto.status && !allowed.includes(dto.status)) {
       throw new BadRequestException(`Invalid status. Use: ${allowed.join(', ')}`);
     }
-    if (dto.status === 'received') {
-      throw new BadRequestException(
-        'Use POST /purchase-orders/:id/receive to put stock on the shelf',
-      );
+    const anyReceived = po.lines.some((l) => Number(l.qtyReceived) > 0);
+    if (dto.status) {
+      try {
+        assertPoStatusChange(po.status, dto.status, anyReceived);
+      } catch (e) {
+        this.asHttpError(e);
+      }
     }
 
-    return this.prisma.purchaseOrder.update({
+    const updated = await this.prisma.purchaseOrder.update({
       where: { id },
       data: {
         status: dto.status,
@@ -573,26 +656,14 @@ export class SuppliersService {
           ? new Date(dto.expectedDelivery)
           : undefined,
       },
-      include: {
-        supplier: true,
-        lines: {
-          include: {
-            stockLevel: {
-              select: {
-                id: true,
-                sku: true,
-                qtyOnHand: true,
-                product: { select: { name: true } },
-              },
-            },
-          },
-        },
-      },
+      include: PO_INCLUDE,
     });
+    return this.presentPo(updated);
   }
 
   /**
    * Receive goods → increase StockLevel.qtyOnHand (atomic).
+   * Qty cannot exceed remaining ordered; SKU must already be on the PO.
    */
   async receivePo(user: AuthUser, id: string, dto: ReceivePurchaseOrderDto) {
     const po = await this.prisma.purchaseOrder.findFirst({
@@ -603,8 +674,52 @@ export class SuppliersService {
     if (po.status === 'cancelled') {
       throw new BadRequestException('Cannot receive a cancelled PO');
     }
+    if (!po.lines.length) {
+      throw new BadRequestException(
+        'This PO has no stock lines to receive — record a supplier invoice instead',
+      );
+    }
+
+    const idempotencyKey = dto.idempotencyKey?.trim() || randomUUID();
+    const docKey = `po-receive-doc:${idempotencyKey}`;
+    const prior = await this.prisma.inventoryIdempotency.findUnique({
+      where: {
+        tenantId_key: { tenantId: user.tenantId, key: docKey },
+      },
+    });
+    if (prior) {
+      if ((prior.result as { pending?: boolean })?.pending) {
+        throw new BadRequestException(
+          'Duplicate in-flight receive — retry in a moment',
+        );
+      }
+      return prior.result;
+    }
+
+    const merged = new Map<string, number>();
+    for (const incoming of dto.lines) {
+      let qty: number;
+      try {
+        qty = parsePositiveQty(incoming.qty, 'Receive qty');
+      } catch (e) {
+        this.asHttpError(e);
+      }
+      merged.set(
+        incoming.stockLevelId,
+        (merged.get(incoming.stockLevelId) ?? 0) + qty,
+      );
+    }
 
     return this.prisma.$transaction(async (tx) => {
+      await tx.inventoryIdempotency.create({
+        data: {
+          tenantId: user.tenantId,
+          key: docKey,
+          operation: 'purchase_receive',
+          result: { pending: true },
+        },
+      });
+
       const results: Array<{
         stockLevelId: string;
         sku: string;
@@ -614,35 +729,38 @@ export class SuppliersService {
         purchaseOrderLineId: string;
       }> = [];
 
-      for (const incoming of dto.lines) {
-        if (incoming.qty < 1) {
-          throw new BadRequestException('Receive qty must be ≥ 1');
-        }
+      for (const [stockLevelId, qty] of merged) {
         const level = await tx.stockLevel.findFirst({
-          where: { id: incoming.stockLevelId, tenantId: user.tenantId },
+          where: { id: stockLevelId, tenantId: user.tenantId },
         });
         if (!level) {
-          throw new NotFoundException(
-            `Stock level ${incoming.stockLevelId} not found`,
+          throw new NotFoundException(`Stock level ${stockLevelId} not found`);
+        }
+        if (po.locationId && level.locationId !== po.locationId) {
+          throw new BadRequestException(
+            `${level.sku} is not at this PO's location`,
           );
         }
 
-        let line = po.lines.find((l) => l.stockLevelId === incoming.stockLevelId);
+        const line = po.lines.find((l) => l.stockLevelId === stockLevelId);
         if (!line) {
-          line = await tx.purchaseOrderLine.create({
-            data: {
-              tenantId: user.tenantId,
-              purchaseOrderId: po.id,
-              stockLevelId: incoming.stockLevelId,
-              qtyOrdered: incoming.qty,
-              qtyReceived: 0,
-            },
-          });
+          throw new BadRequestException(
+            `${level.sku} is not on this purchase order`,
+          );
+        }
+        const remaining = remainingQty(
+          Number(line.qtyOrdered),
+          Number(line.qtyReceived),
+        );
+        try {
+          assertReceiveFits(qty, remaining, level.sku);
+        } catch (e) {
+          this.asHttpError(e);
         }
 
         await tx.purchaseOrderLine.update({
           where: { id: line.id },
-          data: { qtyReceived: { increment: incoming.qty } },
+          data: { qtyReceived: { increment: qty } },
         });
 
         await this.stock.mutateInTx(tx, {
@@ -650,13 +768,13 @@ export class SuppliersService {
           actorUserId: user.userId,
           locationId: level.locationId,
           stockLevelId: level.id,
-          qty: incoming.qty,
+          qty,
           type: StockLedgerType.purchase_receive,
           reason: `PO ${po.poNumber ?? po.id}`,
           referenceType: 'purchase_order',
           referenceId: po.id,
           skipComponentExplosion: true,
-          idempotencyKey: `po-receive:${po.id}:${level.id}:${incoming.qty}`,
+          idempotencyKey: `po-rcv:${po.id}:${idempotencyKey}:${level.id}`,
         });
         const updated = await tx.stockLevel.findFirstOrThrow({
           where: { id: level.id },
@@ -665,7 +783,7 @@ export class SuppliersService {
         results.push({
           stockLevelId: level.id,
           sku: level.sku,
-          qtyAdded: incoming.qty,
+          qtyAdded: qty,
           qtyOnHand: Number(updated.qtyOnHand),
           unitCost: line.unitCost != null ? Number(line.unitCost) : null,
           purchaseOrderLineId: line.id,
@@ -710,7 +828,9 @@ export class SuppliersService {
       });
       const allReceived =
         refreshed.length > 0 &&
-        refreshed.every((l) => l.qtyReceived >= l.qtyOrdered);
+        refreshed.every(
+          (l) => remainingQty(Number(l.qtyOrdered), Number(l.qtyReceived)) === 0,
+        );
       const anyReceived = refreshed.some((l) => Number(l.qtyReceived) > 0);
 
       const status = allReceived
@@ -724,28 +844,25 @@ export class SuppliersService {
       const updatedPo = await tx.purchaseOrder.update({
         where: { id: po.id },
         data: { status },
-        include: {
-          supplier: true,
-          lines: {
-            include: {
-              stockLevel: {
-                select: {
-                  id: true,
-                  sku: true,
-                  qtyOnHand: true,
-                  product: { select: { name: true } },
-                },
-              },
-            },
-          },
-        },
+        include: PO_INCLUDE,
       });
 
-      return {
-        purchaseOrder: updatedPo,
+      const payload = {
+        purchaseOrder: this.presentPo(updatedPo),
         goodsReceipt: this.mapGrn(grn),
-        received: results.map(({ purchaseOrderLineId: _p, unitCost: _u, ...r }) => r),
+        received: results.map(
+          ({ purchaseOrderLineId: _p, unitCost: _u, ...r }) => r,
+        ),
       };
+      await tx.inventoryIdempotency.update({
+        where: {
+          tenantId_key: { tenantId: user.tenantId, key: docKey },
+        },
+        data: {
+          result: JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue,
+        },
+      });
+      return payload;
     });
   }
 
@@ -840,8 +957,11 @@ export class SuppliersService {
       let creditValue = 0;
 
       for (const line of dto.lines) {
-        if (line.qty < 1) {
-          throw new BadRequestException('Return qty must be ≥ 1');
+        let qty: number;
+        try {
+          qty = parsePositiveQty(line.qty, 'Return qty');
+        } catch (e) {
+          this.asHttpError(e);
         }
         const poLine = po.lines.find(
           (l) => l.stockLevelId === line.stockLevelId,
@@ -852,9 +972,9 @@ export class SuppliersService {
           );
         }
         const received = Number(poLine.qtyReceived);
-        if (line.qty > received) {
+        if (qty > received + 1e-8) {
           throw new BadRequestException(
-            `Cannot return ${line.qty} (only ${received} received)`,
+            `Cannot return ${qty} (only ${received} received)`,
           );
         }
 
@@ -862,26 +982,26 @@ export class SuppliersService {
           where: { id: line.stockLevelId, tenantId: user.tenantId },
         });
         if (!level) throw new NotFoundException('Stock level not found');
-        if (Number(level.qtyOnHand) < line.qty) {
+        if (Number(level.qtyOnHand) < qty) {
           throw new BadRequestException(
             `Insufficient on-hand stock for ${level.sku}`,
           );
         }
 
         const unitCost = Number(poLine.unitCost ?? 0);
-        const lineValue = Number((unitCost * line.qty).toFixed(2));
+        const lineValue = Number((unitCost * qty).toFixed(2));
         creditValue += lineValue;
 
         await tx.purchaseOrderLine.update({
           where: { id: poLine.id },
-          data: { qtyReceived: { decrement: line.qty } },
+          data: { qtyReceived: { decrement: qty } },
         });
         await this.stock.mutateInTx(tx, {
           tenantId: user.tenantId,
           actorUserId: user.userId,
           locationId: level.locationId,
           stockLevelId: level.id,
-          qty: -line.qty,
+          qty: -qty,
           type: StockLedgerType.purchase_return,
           referenceType: 'purchase_return',
           referenceId: po.id,
@@ -893,7 +1013,7 @@ export class SuppliersService {
         results.push({
           stockLevelId: level.id,
           sku: level.sku,
-          qtyReturned: line.qty,
+          qtyReturned: qty,
           qtyOnHand: Number(updated.qtyOnHand),
           unitCost,
           lineValue,

@@ -208,7 +208,7 @@ export class EnterpriseApprovalsService {
       title: `Approval needed: ${input.type}`,
       body: input.reason || `${input.type} awaiting approval`,
       severity: 'critical',
-      href: '/group/approvals',
+      href: '/group?tab=approvals',
       recipientRoles: ['manager', 'admin'],
       payload: { approvalRequestId: row.id, type: input.type },
     });
@@ -227,11 +227,19 @@ export class EnterpriseApprovalsService {
     });
   }
 
-  async listGroup(groupId: string, status?: string) {
+  async listGroup(
+    groupId: string,
+    status?: string,
+    visibleTenantIds?: string[],
+  ) {
+    if (visibleTenantIds && visibleTenantIds.length === 0) return [];
     return this.prisma.approvalRequest.findMany({
       where: {
         businessGroupId: groupId,
         ...(status ? { status } : {}),
+        ...(visibleTenantIds
+          ? { tenantId: { in: visibleTenantIds } }
+          : {}),
       },
       include: { steps: { orderBy: { stepIndex: 'asc' } } },
       orderBy: { createdAt: 'desc' },

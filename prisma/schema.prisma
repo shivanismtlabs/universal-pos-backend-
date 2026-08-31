@@ -626,6 +626,7 @@ model Location {
   accountMappings   AccountMapping[]
   accountingTaxFacts AccountingTaxFact[]
   payments          Payment[]
+  purchaseOrders    PurchaseOrder[]
   restaurantConfigs RestaurantConfig[]
   restaurantFloors  RestaurantFloor[]
   restaurantTables  RestaurantTable[]
@@ -2094,6 +2095,7 @@ model PurchaseOrder {
   id               String    @id @default(uuid()) @db.Uuid
   tenantId         String    @map("tenant_id") @db.Uuid
   supplierId       String    @map("supplier_id") @db.Uuid
+  locationId       String?   @map("location_id") @db.Uuid
   linkedOrderId    String?   @map("linked_order_id") @db.Uuid
   poType           PoType    @default(purchase) @map("po_type")
   /// Human-readable PO number (tenant-scoped)
@@ -2101,16 +2103,23 @@ model PurchaseOrder {
   expectedDelivery DateTime? @map("expected_delivery") @db.Date
   status           String    @default("draft")
   notes            String?
+  subtotal         Decimal   @default(0) @db.Decimal(14, 2)
+  discountAmount   Decimal   @default(0) @map("discount_amount") @db.Decimal(14, 2)
+  taxPercent       Decimal   @default(0) @map("tax_percent") @db.Decimal(8, 4)
+  taxTotal         Decimal   @default(0) @map("tax_total") @db.Decimal(14, 2)
+  grandTotal       Decimal   @default(0) @map("grand_total") @db.Decimal(14, 2)
   createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant        Tenant              @relation(fields: [tenantId], references: [id])
   supplier      Supplier            @relation(fields: [supplierId], references: [id])
+  location      Location?           @relation(fields: [locationId], references: [id])
   lines         PurchaseOrderLine[]
   goodsReceipts GoodsReceipt[]
   invoices      SupplierInvoice[]
 
   @@index([tenantId, poNumber])
+  @@index([tenantId, locationId])
   @@map("purchase_orders")
 }
 

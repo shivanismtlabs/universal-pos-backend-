@@ -88,9 +88,16 @@ export class EnterpriseGroupService {
         shareInventory: t.shareInventory,
         shareSuppliers: t.shareSuppliers,
         shareCustomers: t.shareCustomers,
-        canEnter: p.tenantIds.includes(t.id),
+        canEnter:
+          p.groupRole === 'owner' ||
+          p.groupRole === 'finance' ||
+          p.tenantIds.includes(t.id),
       };
     });
+
+    const currencies = [
+      ...new Set(businesses.map((b) => b.currencyCode).filter(Boolean)),
+    ];
 
     return {
       group: {
@@ -101,6 +108,9 @@ export class EnterpriseGroupService {
         entitlements: p.entitlements,
         hideLayer: businesses.length < 2,
         pricingModel: 'platform_plus_registers',
+        currencyCode: currencies.length === 1 ? currencies[0] : undefined,
+        currencies,
+        mixedCurrency: currencies.length > 1,
       },
       businesses,
     };
@@ -164,7 +174,12 @@ export class EnterpriseGroupService {
   }
 
   assertTenantInGroup(p: EnterprisePrincipal, tenantId: string) {
-    if (!p.tenantIds.includes(tenantId) && p.groupRole !== 'owner') {
+    if (
+      !p.tenantIds.includes(tenantId) &&
+      p.groupRole !== 'owner' &&
+      p.groupRole !== 'finance' &&
+      p.groupRole !== 'auditor'
+    ) {
       throw new ForbiddenException('No access to this business');
     }
   }
@@ -177,9 +192,20 @@ export class EnterpriseGroupService {
 
   async staffProfile(p: EnterprisePrincipal) {
     const memberships = await this.prisma.identityTenantMembership.findMany({
-      where: { identityId: p.identityId },
+      where: {
+        identityId: p.identityId,
+        tenant: { businessGroupId: p.groupId, status: 'active' },
+      },
       include: {
-        tenant: { select: { id: true, name: true, slug: true, status: true } },
+        tenant: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            status: true,
+            businessGroupId: true,
+          },
+        },
         user: {
           include: {
             userRoles: { include: { role: { select: { code: true, name: true } } } },
@@ -194,27 +220,29 @@ export class EnterpriseGroupService {
         fullName: p.fullName,
         groupRole: p.groupRole,
       },
-      memberships: memberships
-        .filter((m) => m.tenant.status === 'active')
-        .map((m) => ({
-          tenantId: m.tenant.id,
-          name: m.tenant.name,
-          slug: m.tenant.slug,
-          userId: m.user.id,
-          roles: m.user.userRoles.map((r) => r.role.code),
-          inGroup: m.tenant.id && p.tenantIds.includes(m.tenantId),
-        })),
+      memberships: memberships.map((m) => ({
+        tenantId: m.tenant.id,
+        name: m.tenant.name,
+        slug: m.tenant.slug,
+        userId: m.user.id,
+        roles: m.user.userRoles.map((r) => r.role.code),
+        inGroup: true,
+      })),
     };
   }
 
   async groupCustomers(p: EnterprisePrincipal, q?: string) {
     this.requireEntitlement(p, 'GROUP_CUSTOMERS');
+    const visibleIds = await this.resolveVisibleTenantIds(p);
+    if (!visibleIds.length) {
+      return { enabled: false, matches: [] as unknown[] };
+    }
     const tenants = await this.prisma.tenant.findMany({
       where: {
         businessGroupId: p.groupId,
         shareCustomers: true,
         status: 'active',
-        id: { in: this.visibleTenantIds(p) },
+        id: { in: visibleIds },
       },
       select: { id: true, name: true },
     });
@@ -272,7 +300,7 @@ export class EnterpriseGroupService {
 
   async groupSuppliers(p: EnterprisePrincipal, q?: string) {
     this.requireEntitlement(p, 'GROUP_PROCUREMENT');
-    const tenantIds = this.visibleTenantIds(p);
+    const tenantIds = await this.resolveVisibleTenantIds(p);
     const shared = await this.prisma.tenant.findMany({
       where: {
         id: { in: tenantIds },
@@ -323,7 +351,7 @@ export class EnterpriseGroupService {
 
   async procurementSummary(p: EnterprisePrincipal) {
     this.requireEntitlement(p, 'GROUP_PROCUREMENT');
-    const tenantIds = this.visibleTenantIds(p);
+    const tenantIds = await this.resolveVisibleTenantIds(p);
     const [byTenant, bySupplier] = await Promise.all([
       this.prisma.supplierInvoice.groupBy({
         by: ['tenantId'],
@@ -477,11 +505,17 @@ export class EnterpriseGroupService {
     return { ...done, newGroupId: newGroup.id };
   }
 
-  visibleTenantIds(p: EnterprisePrincipal) {
-    if (p.groupRole === 'owner' || p.groupRole === 'finance' || p.groupRole === 'auditor') {
-      return p.tenantIds.length
-        ? undefined
-        : [];
+  /**
+   * Owner / finance / auditor see every active shop in the group.
+   * Members only see shops they have an identity membership for.
+   */
+  async resolveVisibleTenantIds(p: EnterprisePrincipal) {
+    if (
+      p.groupRole === 'owner' ||
+      p.groupRole === 'finance' ||
+      p.groupRole === 'auditor'
+    ) {
+      return this.allTenantIdsInGroup(p.groupId);
     }
     return p.tenantIds;
   }

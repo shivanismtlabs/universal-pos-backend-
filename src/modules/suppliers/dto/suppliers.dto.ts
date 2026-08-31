@@ -318,14 +318,14 @@ export class UploadSupplierDocumentDto {
 }
 
 export class CreatePoLineDto {
-  @ApiProperty({ description: 'Sale stock level (SKU) to restock' })
+  @ApiProperty({ description: 'Stock level (SKU) to restock at the PO location' })
   @IsUUID()
   stockLevelId!: string;
 
-  @ApiProperty({ example: 20 })
+  @ApiProperty({ example: 20, description: 'Decimal qty (kg, litre, piece, hour)' })
   @Type(() => Number)
-  @IsInt()
-  @Min(1)
+  @IsNumber()
+  @Min(0.00000001)
   qtyOrdered!: number;
 
   @ApiPropertyOptional({ example: 45.5 })
@@ -356,11 +356,39 @@ export class CreatePurchaseOrderDto {
   @IsDateString()
   expectedDelivery?: string;
 
-  @ApiPropertyOptional({ example: 'Tax 18% · Coupon SUMMER10' })
+  @ApiPropertyOptional()
   @IsOptional()
   @IsString()
   @MaxLength(500)
   notes?: string;
+
+  @ApiPropertyOptional({ description: 'Receive location (defaults to session branch)' })
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
+
+  @ApiPropertyOptional({ description: 'Supplier discount on this PO (not a sales coupon)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  discountAmount?: number;
+
+  @ApiPropertyOptional({ example: 18 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  taxPercent?: number;
+
+  @ApiPropertyOptional({
+    description: 'Service / expense amount when there are no stock lines',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  serviceSubtotal?: number;
 
   @ApiPropertyOptional({ type: [CreatePoLineDto] })
   @IsOptional()
@@ -389,10 +417,10 @@ export class ReceivePoLineDto {
   @IsUUID()
   stockLevelId!: string;
 
-  @ApiProperty({ example: 10 })
+  @ApiProperty({ example: 10, description: 'Decimal qty; cannot exceed remaining ordered' })
   @Type(() => Number)
-  @IsInt()
-  @Min(1)
+  @IsNumber()
+  @Min(0.00000001)
   qty!: number;
 }
 
@@ -403,6 +431,13 @@ export class ReceivePurchaseOrderDto {
   @ValidateNested({ each: true })
   @Type(() => ReceivePoLineDto)
   lines!: ReceivePoLineDto[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(255)
+  idempotencyKey?: string;
 }
 
 export class ReturnPurchaseOrderDto {

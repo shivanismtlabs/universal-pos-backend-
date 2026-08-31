@@ -197,6 +197,8 @@ export class TenantsService {
       if (dto.tax.inclusive !== undefined) prevTax.inclusive = dto.tax.inclusive;
       if (dto.tax.receiptFooter !== undefined)
         prevTax.receiptFooter = dto.tax.receiptFooter;
+      const nextMode = dto.taxMode ?? (existing.taxMode as TaxMode);
+      if (nextMode === TaxMode.in_gst) prevTax.inclusive = false;
       prevSettings.tax = prevTax;
     }
     if (
@@ -225,9 +227,19 @@ export class TenantsService {
       }
       prevSettings.pos = prevPos;
     }
+    const nextTaxMode = (dto.taxMode ?? existing.taxMode) as TaxMode;
+    if (nextTaxMode === TaxMode.in_gst) {
+      const taxBag =
+        prevSettings.tax && typeof prevSettings.tax === 'object'
+          ? { ...(prevSettings.tax as Record<string, unknown>) }
+          : {};
+      taxBag.inclusive = false;
+      prevSettings.tax = taxBag;
+    }
     if (
       dto.settings !== undefined ||
       dto.tax !== undefined ||
+      dto.taxMode !== undefined ||
       dto.maxCashierDiscountPercent !== undefined ||
       dto.pinSwitchEnabled !== undefined ||
       dto.upiVpa !== undefined ||

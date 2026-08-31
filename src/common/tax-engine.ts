@@ -101,7 +101,7 @@ export function ensureTenantTaxSettings(
   root.tax = {
     ...prev,
     ratePercent: taxMode === TaxMode.none ? 0 : ratePercent,
-    inclusive: parsed.inclusive === true,
+    inclusive: taxMode === TaxMode.in_gst ? false : parsed.inclusive === true,
     ...(typeof prev.receiptFooter === 'string'
       ? { receiptFooter: prev.receiptFooter }
       : typeof parsed.receiptFooter === 'string'

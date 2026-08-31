@@ -33,6 +33,7 @@ export const DEFAULT_MEASURE_UNITS: MeasureUnit[] = [
   { code: 'm', name: 'Metre', decimalQty: true, active: true, system: true },
   { code: 'cm', name: 'Centimetre', decimalQty: true, active: true, system: true },
   { code: 'm2', name: 'Square metre', decimalQty: true, active: true, system: true },
+  { code: 'min', name: 'Minute', decimalQty: false, active: true, system: true },
   { code: 'hour', name: 'Hour', decimalQty: true, active: true, system: true },
   { code: 'day', name: 'Day', decimalQty: false, active: true, system: true },
   { code: 'week', name: 'Week', decimalQty: true, active: true, system: true },

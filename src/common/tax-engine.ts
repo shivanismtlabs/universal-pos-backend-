@@ -139,7 +139,9 @@ export function buildTaxProfile(input: {
     taxMode: input.taxMode,
     taxId: input.taxId ?? null,
     rate,
-    inclusive: parsed.inclusive === true,
+    // India GST: listed catalog price is exclusive — CGST/SGST added on due.
+    inclusive:
+      input.taxMode === TaxMode.in_gst ? false : parsed.inclusive === true,
     receiptFooter:
       typeof taxBag.receiptFooter === 'string'
         ? taxBag.receiptFooter

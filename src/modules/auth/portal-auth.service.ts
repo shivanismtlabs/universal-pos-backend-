@@ -340,6 +340,15 @@ export class PortalAuthService {
           })
         : profile.defaultCommerceModes.filter(isCommerceMode);
     if (!modes.length) modes = ['sale'];
+    // Clothes rental shops that sell accessories live need both modes
+    if (profile.id === 'rental') {
+      if (sells.includes('products') && !modes.includes('sale')) {
+        modes = [...new Set([...modes, 'sale'])];
+      }
+      if (sells.includes('rentals') && !modes.includes('rental')) {
+        modes = [...new Set([...modes, 'rental'])];
+      }
+    }
     const modeModuleCodes = [
       ...new Set(modes.flatMap((m) => [...moduleStackForMode(m)])),
     ];

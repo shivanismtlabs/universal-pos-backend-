@@ -20,6 +20,7 @@ import { PrismaService } from '../../database/database.module';
 import { paginate, pageMeta } from '../../common/dto/pagination.dto';
 import { AccountingPostingService } from '../accounting/posting.service';
 import { StockMutationEngine } from '../inventory/stock-mutation.engine';
+import { UnitPricingService } from '../catalog/unit-pricing.service';
 import { saveProductImage } from '../../common/product-image';
 import { RoleGroup } from '../../common/roles';
 import type { AuthUser } from '../auth/types';
@@ -96,6 +97,7 @@ export class SuppliersService {
     private readonly prisma: PrismaService,
     private readonly accounting: AccountingPostingService,
     private readonly stock: StockMutationEngine,
+    private readonly unitPricing: UnitPricingService,
   ) {}
 
   createSupplier(user: AuthUser, dto: CreateSupplierDto) {
@@ -732,6 +734,7 @@ export class SuppliersService {
       for (const [stockLevelId, qty] of merged) {
         const level = await tx.stockLevel.findFirst({
           where: { id: stockLevelId, tenantId: user.tenantId },
+          include: { product: { select: { id: true } } },
         });
         if (!level) {
           throw new NotFoundException(`Stock level ${stockLevelId} not found`);
@@ -763,12 +766,20 @@ export class SuppliersService {
           data: { qtyReceived: { increment: qty } },
         });
 
+        const { baseQty, usedConversion } =
+          await this.unitPricing.convertPurchaseQtyToBase(
+            user.tenantId,
+            level.productId,
+            qty,
+          );
+        const stockQty = usedConversion ? Number(baseQty.toString()) : qty;
+
         await this.stock.mutateInTx(tx, {
           tenantId: user.tenantId,
           actorUserId: user.userId,
           locationId: level.locationId,
           stockLevelId: level.id,
-          qty,
+          qty: stockQty,
           type: StockLedgerType.purchase_receive,
           reason: `PO ${po.poNumber ?? po.id}`,
           referenceType: 'purchase_order',
@@ -783,7 +794,7 @@ export class SuppliersService {
         results.push({
           stockLevelId: level.id,
           sku: level.sku,
-          qtyAdded: qty,
+          qtyAdded: stockQty,
           qtyOnHand: Number(updated.qtyOnHand),
           unitCost: line.unitCost != null ? Number(line.unitCost) : null,
           purchaseOrderLineId: line.id,

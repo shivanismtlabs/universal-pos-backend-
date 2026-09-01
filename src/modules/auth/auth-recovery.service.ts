@@ -334,8 +334,8 @@ export class AuthRecoveryService {
       });
 
     const message = nonDeliverable
-      ? 'Demo / test addresses cannot receive email. Use the on-screen OTP (valid 10 minutes).'
-      : 'If an account exists for that email, a 6-digit OTP was sent. It is valid for 10 minutes.';
+      ? 'Use the on-screen code to continue.'
+      : 'OTP sent.';
 
     return {
       ok: true as const,

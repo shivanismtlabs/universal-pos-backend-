@@ -31,6 +31,7 @@ import { resolveProductTaxRatePercent } from '../../common/tax-engine';
 import { listSafeImageUrl } from '../../common/product-image';
 import { StockMutationEngine } from '../inventory/stock-mutation.engine';
 import { isRecipePurpose } from '../restaurant/restaurant-policy';
+import { UnitPricingService } from './unit-pricing.service';
 import type { AuthUser } from '../auth/types';
 import {
   CreateBatchDto,
@@ -113,6 +114,7 @@ function mapProduct(p: {
   qrCode: string | null;
   internalCode: string | null;
   kind: ProductKind;
+  fulfillmentMode: FulfillmentMode;
   status: ProductStatus;
   shortDescription: string | null;
   description: string | null;
@@ -175,6 +177,7 @@ function mapProduct(p: {
     qrCode: p.qrCode,
     internalCode: p.internalCode,
     kind: p.kind,
+    fulfillmentMode: p.fulfillmentMode,
     productType: p.kind,
     status: p.status,
     shortDescription: p.shortDescription,
@@ -219,6 +222,7 @@ export class CatalogService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stock: StockMutationEngine,
+    private readonly unitPricing: UnitPricingService,
   ) {}
 
   // ── Brands ──────────────────────────────────────────────────────────────
@@ -811,6 +815,20 @@ export class CatalogService {
 
     const unit = (dto.unitOfMeasure || 'pcs').trim().slice(0, 16) || 'pcs';
     const price = Number(dto.basePrice ?? 0);
+
+    let resolvedBaseUnitId = dto.baseUnitId;
+    let resolvedPricingUnitId = dto.pricingUnitId;
+    if (!resolvedBaseUnitId) {
+      const linked = await this.unitPricing.resolveUnitIdBySymbol(
+        user.tenantId,
+        unit,
+      );
+      if (linked) {
+        resolvedBaseUnitId = linked.id;
+        if (!resolvedPricingUnitId) resolvedPricingUnitId = linked.id;
+      }
+    }
+
     const resolvedImages = await resolveImageList(user.tenantId, [
       ...(dto.photoUrl?.trim() ? [dto.photoUrl.trim()] : []),
       ...((dto.images ?? []).filter(Boolean) as string[]),
@@ -864,11 +882,9 @@ export class CatalogService {
             costPrice: dec(dto.costPrice),
             mrp: dec(dto.mrp),
             unitOfMeasure: unit,
-            ...(dto.baseUnitId
-              ? { baseUnitId: dto.baseUnitId }
-              : {}),
-            ...(dto.pricingUnitId
-              ? { pricingUnitId: dto.pricingUnitId }
+            ...(resolvedBaseUnitId ? { baseUnitId: resolvedBaseUnitId } : {}),
+            ...(resolvedPricingUnitId
+              ? { pricingUnitId: resolvedPricingUnitId }
               : {}),
             ...(dto.pricingStrategy
               ? {
@@ -877,10 +893,12 @@ export class CatalogService {
                       ? PricingStrategy.fixed_tier
                       : PricingStrategy.converted,
                 }
-              : {}),
+              : resolvedBaseUnitId
+                ? { pricingStrategy: PricingStrategy.converted }
+                : {}),
             ...(dto.pricePerPricingUnit != null
               ? { pricePerPricingUnit: dec(dto.pricePerPricingUnit) }
-              : dto.baseUnitId || dto.pricingUnitId
+              : resolvedBaseUnitId || resolvedPricingUnitId
                 ? { pricePerPricingUnit: dec(price) }
                 : {}),
             trackQty,

@@ -581,7 +581,8 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
       },
     ],
     gettingStartedHints: [
-      'Enable rental mode and track units as available / rented / damaged',
+      'Add rental units with size barcodes on Dashboard → Rent → Stock',
+      'Sell accessories on Counter · Sell; rent outfits on Counter · Rent',
       'Collect deposits separately from rental charges',
     ],
     defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.rental,

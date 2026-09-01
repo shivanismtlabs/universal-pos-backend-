@@ -8,7 +8,12 @@ import type { TaxProfile } from '../../common/tax-engine';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import {
+  countryCodeFromTenantSettings,
+  countryUomProfile,
+} from '../../common/country-uom-defaults';
+import {
   calculateLineAmount,
+  convertQuantity,
   d,
   serializeLineCalc,
   UnitPricingError,
@@ -40,6 +45,9 @@ const SYSTEM_UNITS: Array<[string, string, string, boolean, number]> = [
   ['oz', 'Ounce', 'WEIGHT', false, 28.349523125],
   ['ml', 'Millilitre', 'VOLUME', true, 1],
   ['L', 'Litre', 'VOLUME', false, 1000],
+  ['gal', 'Gallon (US)', 'VOLUME', false, 3785.411784],
+  ['fl oz', 'Fluid ounce (US)', 'VOLUME', false, 29.5735295625],
+  ['pt', 'Pint (US)', 'VOLUME', false, 473.176473],
   ['m3', 'Cubic metre', 'VOLUME', false, 1_000_000],
   ['mm', 'Millimetre', 'LENGTH', true, 1],
   ['cm', 'Centimetre', 'LENGTH', false, 10],
@@ -571,5 +579,339 @@ export class UnitPricingService {
     });
     if (!p) throw new NotFoundException('Product not found');
     return p;
+  }
+
+  /** Country → suggested units (config-driven, not if/else in POS). */
+  async getCountryDefaults(countryCode?: string | null) {
+    await this.ensureSystemUnits();
+    const profile = countryUomProfile(countryCode);
+    const units = await this.prisma.unit.findMany({
+      where: {
+        tenantId: null,
+        isActive: true,
+        symbol: { in: profile.suggestedSymbols },
+      },
+      include: { unitGroup: true },
+      orderBy: [{ unitGroup: { name: 'asc' } }, { symbol: 'asc' }],
+    });
+    const bySymbol = new Map(units.map((u) => [u.symbol.toLowerCase(), u]));
+    const suggested = profile.suggestedSymbols
+      .map((sym) => bySymbol.get(sym.toLowerCase()))
+      .filter((u): u is NonNullable<typeof u> => u != null);
+    return {
+      countryCode: profile.countryCode,
+      label: profile.label,
+      measureSystem: profile.measureSystem,
+      suggestedSymbols: profile.suggestedSymbols,
+      suggestedUnits: suggested.map((u) => ({
+        id: u.id,
+        symbol: u.symbol,
+        name: u.name,
+        category: u.unitGroup.code,
+        isBaseUnit: u.isBaseUnit,
+      })),
+    };
+  }
+
+  /** Tenant-scoped unit list (system + custom). Does not replace legacy settings.units. */
+  async listTenantUnits(tenantId: string) {
+    await this.ensureSystemUnits();
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { settings: true },
+    });
+    const disabled = this.disabledUnitSymbols(tenant?.settings);
+    const units = await this.prisma.unit.findMany({
+      where: {
+        isActive: true,
+        OR: [{ tenantId: null }, { tenantId }],
+      },
+      include: { unitGroup: true },
+      orderBy: [{ unitGroup: { code: 'asc' } }, { symbol: 'asc' }],
+    });
+    return units
+      .filter((u) => !disabled.has(u.symbol.toLowerCase()))
+      .map((u) => ({
+        id: u.id,
+        symbol: u.symbol,
+        name: u.name,
+        category: u.unitGroup.code,
+        categoryName: u.unitGroup.name,
+        isBaseUnit: u.isBaseUnit,
+        conversionToGroupBase: u.conversionToGroupBase.toString(),
+        isSystem: u.tenantId == null,
+        measureSystem:
+          u.unitGroup.code === 'WEIGHT' || u.unitGroup.code === 'VOLUME'
+            ? ['lb', 'oz', 'gal', 'fl oz', 'pt', 'in', 'ft'].includes(u.symbol)
+              ? 'imperial'
+              : 'metric'
+            : 'neutral',
+      }));
+  }
+
+  private disabledUnitSymbols(settings: unknown): Set<string> {
+    if (!settings || typeof settings !== 'object') return new Set();
+    const uom = (settings as Record<string, unknown>).uom;
+    if (!uom || typeof uom !== 'object') return new Set();
+    const raw = (uom as Record<string, unknown>).disabledSymbols;
+    if (!Array.isArray(raw)) return new Set();
+    return new Set(
+      raw
+        .map((s) => String(s).trim().toLowerCase())
+        .filter(Boolean),
+    );
+  }
+
+  async setTenantUnitEnabled(
+    user: AuthUser,
+    symbol: string,
+    enabled: boolean,
+  ) {
+    const sym = symbol.trim();
+    if (!sym) throw new BadRequestException('symbol is required');
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: user.tenantId },
+      select: { settings: true },
+    });
+    if (!tenant) throw new NotFoundException('Tenant not found');
+    const root =
+      tenant.settings && typeof tenant.settings === 'object'
+        ? { ...(tenant.settings as Record<string, unknown>) }
+        : {};
+    const uomRoot =
+      root.uom && typeof root.uom === 'object'
+        ? { ...(root.uom as Record<string, unknown>) }
+        : {};
+    const disabled = new Set(this.disabledUnitSymbols(tenant.settings));
+    const key = sym.toLowerCase();
+    if (enabled) disabled.delete(key);
+    else disabled.add(key);
+    if (!enabled && key === 'pcs') {
+      throw new BadRequestException('Piece (pcs) must stay enabled');
+    }
+    await this.prisma.tenant.update({
+      where: { id: user.tenantId },
+      data: {
+        settings: {
+          ...root,
+          uom: {
+            ...uomRoot,
+            disabledSymbols: [...disabled],
+          },
+        } as Prisma.InputJsonValue,
+      },
+    });
+    return { symbol: sym, enabled };
+  }
+
+  async createCustomUnit(
+    user: AuthUser,
+    body: {
+      symbol: string;
+      name: string;
+      unitGroupCode: string;
+      conversionToGroupBase: number | string;
+      isBaseUnit?: boolean;
+    },
+  ) {
+    await this.ensureSystemUnits();
+    const symbol = body.symbol.trim().slice(0, 16);
+    const name = body.name.trim().slice(0, 50);
+    if (!symbol || !name) {
+      throw new BadRequestException('symbol and name are required');
+    }
+    const group = await this.prisma.unitGroup.findFirst({
+      where: { code: body.unitGroupCode.trim().toUpperCase(), isActive: true },
+    });
+    if (!group) throw new NotFoundException('Unit category not found');
+    let factor: Prisma.Decimal;
+    try {
+      factor = d(body.conversionToGroupBase);
+    } catch {
+      throw new BadRequestException('conversionToGroupBase must be > 0');
+    }
+    if (!factor.gt(0)) {
+      throw new BadRequestException('conversionToGroupBase must be > 0');
+    }
+    const clash = await this.prisma.unit.findFirst({
+      where: {
+        unitGroupId: group.id,
+        symbol: { equals: symbol, mode: 'insensitive' },
+        OR: [{ tenantId: null }, { tenantId: user.tenantId }],
+      },
+    });
+    if (clash) {
+      throw new BadRequestException(`Unit "${symbol}" already exists`);
+    }
+    return this.prisma.unit.create({
+      data: {
+        unitGroupId: group.id,
+        tenantId: user.tenantId,
+        name,
+        symbol,
+        isBaseUnit: Boolean(body.isBaseUnit),
+        conversionToGroupBase: factor,
+      },
+      include: { unitGroup: true },
+    });
+  }
+
+  async updateCustomUnit(
+    user: AuthUser,
+    unitId: string,
+    body: { name?: string; isActive?: boolean },
+  ) {
+    const unit = await this.prisma.unit.findFirst({
+      where: { id: unitId, tenantId: user.tenantId },
+    });
+    if (!unit) throw new NotFoundException('Custom unit not found');
+    return this.prisma.unit.update({
+      where: { id: unitId },
+      data: {
+        ...(body.name !== undefined ? { name: body.name.trim().slice(0, 50) } : {}),
+        ...(body.isActive !== undefined ? { isActive: body.isActive } : {}),
+      },
+      include: { unitGroup: true },
+    });
+  }
+
+  /** Resolve system/custom unit id from symbol — for safe new-product linking only. */
+  async resolveUnitIdBySymbol(
+    tenantId: string,
+    symbol?: string | null,
+  ): Promise<{ id: string; symbol: string } | null> {
+    const sym = (symbol ?? '').trim();
+    if (!sym) return null;
+    await this.ensureSystemUnits();
+    const unit = await this.prisma.unit.findFirst({
+      where: {
+        isActive: true,
+        symbol: { equals: sym, mode: 'insensitive' },
+        OR: [{ tenantId: null }, { tenantId }],
+      },
+      select: { id: true, symbol: true },
+    });
+    return unit;
+  }
+
+  async validateConversion(
+    user: AuthUser,
+    body: {
+      fromUnitId: string;
+      toUnitId: string;
+      productId?: string;
+      quantity?: number | string;
+    },
+  ) {
+    const unitsById = await this.loadUnitsMap(user.tenantId);
+    const fromUnit = unitsById.get(body.fromUnitId);
+    const toUnit = unitsById.get(body.toUnitId);
+    if (!fromUnit || !toUnit) {
+      throw new NotFoundException('Unit not found');
+    }
+    let product: ProductPricingRef | undefined;
+    if (body.productId) {
+      const row = await this.prisma.product.findFirst({
+        where: { id: body.productId, tenantId: user.tenantId },
+        include: { productUnits: { where: { effectiveTo: null } } },
+      });
+      if (!row?.baseUnitId) {
+        throw new BadRequestException(
+          'Product has no base unit — configure Unit & Pricing on the item first',
+        );
+      }
+      const edges = await this.loadConversionEdges(
+        user.tenantId,
+        row.id,
+        unitsById,
+      );
+      product = this.toProductRef(row, edges);
+    }
+    const qty = body.quantity != null ? d(body.quantity) : d(1);
+    try {
+      const converted = convertQuantity({
+        quantity: qty,
+        fromUnit,
+        toUnit,
+        product,
+        unitsById,
+        extraEdges: product?.conversionEdges,
+      });
+      return {
+        valid: true,
+        fromUnitId: fromUnit.id,
+        toUnitId: toUnit.id,
+        enteredQty: qty.toFixed(),
+        convertedQty: converted.toFixed(),
+      };
+    } catch (e) {
+      if (e instanceof UnitPricingError) {
+        return { valid: false, message: e.message, code: e.code };
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Purchase receive → inventory base qty.
+   * Legacy-safe: returns input qty unchanged unless product.baseUnitId is set
+   * AND an explicit isPurchaseUnit differs from base.
+   */
+  async convertPurchaseQtyToBase(
+    tenantId: string,
+    productId: string,
+    qty: number | string,
+  ): Promise<{ baseQty: Prisma.Decimal; usedConversion: boolean }> {
+    const entered = d(qty);
+    const product = await this.prisma.product.findFirst({
+      where: { id: productId, tenantId },
+      include: {
+        productUnits: {
+          where: { effectiveTo: null },
+          include: { unit: true },
+        },
+      },
+    });
+    if (!product?.baseUnitId) {
+      return { baseQty: entered, usedConversion: false };
+    }
+    const purchasePu = product.productUnits.find((pu) => pu.isPurchaseUnit);
+    if (!purchasePu || purchasePu.unitId === product.baseUnitId) {
+      return { baseQty: entered, usedConversion: false };
+    }
+    const unitsById = await this.loadUnitsMap(tenantId);
+    const fromUnit = unitsById.get(purchasePu.unitId);
+    if (!fromUnit) {
+      return { baseQty: entered, usedConversion: false };
+    }
+    const edges = await this.loadConversionEdges(tenantId, productId, unitsById);
+    const ref = this.toProductRef(product, edges);
+    try {
+      const line = calculateLineAmount({
+        product: ref,
+        enteredQty: entered.abs(),
+        sellingUnit: fromUnit,
+        unitsById,
+        extraEdges: edges,
+        inventorySign: 1,
+        validate: false,
+      });
+      return {
+        baseQty: entered.isNeg() ? line.baseQuantity.neg() : line.baseQuantity,
+        usedConversion: true,
+      };
+    } catch {
+      return { baseQty: entered, usedConversion: false };
+    }
+  }
+
+  /** Suggested units for tenant country (onboarding hint — never forces units). */
+  async suggestForTenant(tenantId: string) {
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { settings: true },
+    });
+    const code = countryCodeFromTenantSettings(tenant?.settings);
+    return this.getCountryDefaults(code);
   }
 }

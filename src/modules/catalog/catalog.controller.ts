@@ -61,6 +61,100 @@ export class CatalogController {
     return this.unitPricing.listUnitGroups();
   }
 
+  @Get('units/country-defaults')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'Suggested UOMs by country (config-driven)' })
+  countryDefaults(@Query('country') country?: string) {
+    return this.unitPricing.getCountryDefaults(country);
+  }
+
+  @Get('units/tenant')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'Tenant-enabled units (system + custom)' })
+  listTenantUnits(@CurrentUser() user: AuthUser) {
+    return this.unitPricing.listTenantUnits(user.tenantId);
+  }
+
+  @Get('units/suggest')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'Suggested units for tenant country profile' })
+  suggestTenantUnits(@CurrentUser() user: AuthUser) {
+    return this.unitPricing.suggestForTenant(user.tenantId);
+  }
+
+  @Post('units/custom')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Create tenant custom unit' })
+  createCustomUnit(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      symbol: string;
+      name: string;
+      unitGroupCode: string;
+      conversionToGroupBase: number;
+      isBaseUnit?: boolean;
+    },
+  ) {
+    return this.unitPricing.createCustomUnit(user, body);
+  }
+
+  @Patch('units/custom/:id')
+  @Roles(...RoleGroup.catalogWrite)
+  updateCustomUnit(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: { name?: string; isActive?: boolean },
+  ) {
+    return this.unitPricing.updateCustomUnit(user, id, body);
+  }
+
+  @Post('units/:symbol/enabled')
+  @Roles(...RoleGroup.catalogWrite)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Enable/disable a unit for this tenant' })
+  setUnitEnabled(
+    @CurrentUser() user: AuthUser,
+    @Param('symbol') symbol: string,
+    @Body() body: { enabled: boolean },
+  ) {
+    return this.unitPricing.setTenantUnitEnabled(user, symbol, body.enabled);
+  }
+
+  @Post('units/validate-conversion')
+  @Roles(...RoleGroup.catalogRead)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Validate qty conversion between units' })
+  validateConversion(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      fromUnitId: string;
+      toUnitId: string;
+      productId?: string;
+      quantity?: number;
+    },
+  ) {
+    return this.unitPricing.validateConversion(user, body);
+  }
+
+  @Post('units/convert')
+  @Roles(...RoleGroup.catalogRead)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Convert quantity to product base unit' })
+  convertToBase(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: { productId: string; qty: number; fromUnitId: string },
+  ) {
+    return this.unitPricing.convertToBase(
+      user,
+      body.productId,
+      body.qty,
+      body.fromUnitId,
+    );
+  }
+
   @Get('products/:id/units')
   @Roles(...RoleGroup.catalogRead)
   listProductUnits(

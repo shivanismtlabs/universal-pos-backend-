@@ -1,4 +1,4 @@
-/** Shared report date/money helpers */
+import { resolveFiscalStartMonth } from '../../common/fiscal-year';
 
 export function round2(n: number) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -89,53 +89,9 @@ export function monthLabel(year: number, month: number) {
   return `${year}-${pad2(month)}`;
 }
 
-/** Parse fiscal year start month (1–12) from tenant settings. Default April (4) if fiscal string set, else 1 (calendar). */
+/** Parse fiscal year start month (1–12) from tenant settings. */
 export function parseFiscalStartMonth(settings: unknown): number {
-  const s =
-    settings && typeof settings === 'object'
-      ? (settings as Record<string, unknown>)
-      : {};
-  if (typeof s.fiscalYearStartMonth === 'number') {
-    const m = Math.floor(s.fiscalYearStartMonth);
-    if (m >= 1 && m <= 12) return m;
-  }
-  const raw = s.fiscalYearStart;
-  if (typeof raw === 'string' && raw.trim()) {
-    const t = raw.trim();
-    const mdy = t.match(/^(\d{1,2})/);
-    if (mdy) {
-      const m = Number(mdy[1]);
-      if (m >= 1 && m <= 12) return m;
-    }
-    const names: Record<string, number> = {
-      jan: 1,
-      january: 1,
-      feb: 2,
-      february: 2,
-      mar: 3,
-      march: 3,
-      apr: 4,
-      april: 4,
-      may: 5,
-      jun: 6,
-      june: 6,
-      jul: 7,
-      july: 7,
-      aug: 8,
-      august: 8,
-      sep: 9,
-      september: 9,
-      oct: 10,
-      october: 10,
-      nov: 11,
-      november: 11,
-      dec: 12,
-      december: 12,
-    };
-    const key = t.toLowerCase().split(/[^a-z]/)[0];
-    if (names[key]) return names[key];
-  }
-  return 1;
+  return resolveFiscalStartMonth(settings);
 }
 
 export const REPORT_SCHEDULE_KEYS = [

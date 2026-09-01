@@ -970,6 +970,38 @@ export class AddRentalProductDto {
   @Min(0)
   deposit?: number;
 
+  @ApiPropertyOptional({
+    example: 200,
+    description: 'Late fee charged per day past return due (0 = disabled amount)',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  lateFeePerDay?: number;
+
+  @ApiPropertyOptional({ example: true, description: 'When false, never auto-suggest late fees' })
+  @IsOptional()
+  @IsBoolean()
+  lateFeeEnabled?: boolean;
+
+  @ApiPropertyOptional({ example: 150, description: 'Default cleaning fee on return' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  cleaningFee?: number;
+
+  @ApiPropertyOptional({
+    example: 1000,
+    description: 'Default damage / replacement charge suggestion',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  damageFeeDefault?: number;
+
   @ApiProperty({ example: 'BC-001' })
   @IsString()
   @MinLength(1)

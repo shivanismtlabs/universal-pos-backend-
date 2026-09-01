@@ -158,6 +158,17 @@ export class IamController {
     return this.attendance.getOne(user, id);
   }
 
+  @Get('attendance/:id/history')
+  @Roles(...RoleGroup.all)
+  @Permissions('attendance.self', 'attendance.manage')
+  @ApiOperation({ summary: 'Attendance correction history (audit log)' })
+  attendanceHistory(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.attendance.getHistory(user, id);
+  }
+
   @Patch('attendance/:id')
   @Roles(...RoleGroup.lead)
   @Permissions('attendance.manage')

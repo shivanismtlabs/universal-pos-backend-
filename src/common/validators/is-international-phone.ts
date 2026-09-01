@@ -16,7 +16,7 @@ export function IsInternationalPhone(validationOptions?: ValidationOptions) {
       validator: {
         validate: (value: unknown) => isInternationalPhoneValue(value),
         defaultMessage: () =>
-          'must be a valid phone number for the selected country',
+          'Enter a valid phone number for the selected country',
       },
     });
   };

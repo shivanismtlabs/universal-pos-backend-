@@ -145,6 +145,7 @@ import {
   UploadSaleImageDto,
 } from './dto/pos.dto';
 import { ImportSaleProductsDto } from './dto/import-sale-products.dto';
+import { resolveCashRoundOffAmount } from './payment-rounding';
 
 const READY_FROM: OrderStatus[] = [
   OrderStatus.confirmed,
@@ -1496,6 +1497,41 @@ export class PosService {
     }
   }
 
+  /** Persist originalAmount / roundOffAmount / finalAmount on order meta. */
+  private async persistPaymentRoundingMeta(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    orderId: string,
+    input: {
+      originalAmount: number;
+      roundOffAmount: number;
+      finalAmount: number;
+    },
+  ) {
+    const order = await tx.order.findFirstOrThrow({
+      where: { id: orderId, tenantId },
+      select: { meta: true },
+    });
+    const prevMeta = asMeta(order.meta);
+    const originalAmount = Number(input.originalAmount.toFixed(2));
+    const roundOffAmount = Number(input.roundOffAmount.toFixed(2));
+    const finalAmount = Number(input.finalAmount.toFixed(2));
+    await tx.order.update({
+      where: { id: orderId },
+      data: {
+        meta: {
+          ...prevMeta,
+          roundOff: roundOffAmount,
+          roundOffAmount,
+          originalAmount,
+          finalAmount,
+          exactTotal: originalAmount,
+          roundedTotal: finalAmount,
+        },
+      },
+    });
+  }
+
   /**
    * Apply nearest-rupee half-up round-off so balanceDue matches collectable ₹.
    * Positive → Round off fee; negative → write-off into discountTotal (not cashier %).
@@ -1505,51 +1541,71 @@ export class PosService {
     tenantId: string,
     orderId: string,
     roundOffAmount: number | undefined,
+    exactBalanceDue: number,
   ) {
     const ro = Number(roundOffAmount ?? 0);
-    if (!Number.isFinite(ro) || Math.abs(ro) < 0.005) return;
-    if (Math.abs(ro) > 0.99) {
-      throw new BadRequestException('Round off must be within ±0.99');
+    const originalAmount = Number(exactBalanceDue);
+
+    if (Number.isFinite(ro) && Math.abs(ro) >= 0.005) {
+      if (Math.abs(ro) > 0.99) {
+        throw new BadRequestException('Round off must be within ±0.99');
+      }
+
+      const order = await tx.order.findFirstOrThrow({
+        where: { id: orderId, tenantId },
+        select: { discountTotal: true },
+      });
+
+      if (ro > 0) {
+        await tx.orderFee.create({
+          data: {
+            tenantId,
+            orderId,
+            feeCode: 'round_off',
+            reason: 'Round off',
+            amount: money(ro).toFixed(2),
+          },
+        });
+      } else {
+        const nextDisc = money(order.discountTotal).plus(Math.abs(ro));
+        await tx.order.update({
+          where: { id: orderId },
+          data: { discountTotal: nextDisc.toFixed(2) },
+        });
+      }
+
+      await this.ordersService.recalculateTotals(tx, tenantId, orderId);
     }
 
-    const order = await tx.order.findFirstOrThrow({
+    const after = await tx.order.findFirstOrThrow({
       where: { id: orderId, tenantId },
-      select: { discountTotal: true, meta: true },
+      select: { balanceDue: true },
     });
-    const prevMeta =
-      order.meta && typeof order.meta === 'object'
-        ? (order.meta as Record<string, unknown>)
-        : {};
 
-    if (ro > 0) {
-      await tx.orderFee.create({
-        data: {
-          tenantId,
-          orderId,
-          feeCode: 'round_off',
-          reason: 'Round off',
-          amount: money(ro).toFixed(2),
-        },
-      });
-    } else {
-      const nextDisc = money(order.discountTotal).plus(Math.abs(ro));
-      await tx.order.update({
-        where: { id: orderId },
-        data: { discountTotal: nextDisc.toFixed(2) },
-      });
+    await this.persistPaymentRoundingMeta(tx, tenantId, orderId, {
+      originalAmount,
+      roundOffAmount: Math.abs(ro) >= 0.005 ? ro : 0,
+      finalAmount: Number(after.balanceDue),
+    });
+  }
+
+  /** Cash-only: auto-compute or validate round-off; digital/split → reject. */
+  private resolveCashRoundOff(
+    roundOffAmount: number | undefined,
+    payments: Array<{ method: PaymentMethod }> | undefined,
+    exactBalanceDue: number,
+  ): number | undefined {
+    try {
+      return resolveCashRoundOffAmount(
+        roundOffAmount,
+        payments,
+        exactBalanceDue,
+      );
+    } catch (e) {
+      throw new BadRequestException(
+        e instanceof Error ? e.message : 'Invalid round off',
+      );
     }
-
-    await tx.order.update({
-      where: { id: orderId },
-      data: {
-        meta: {
-          ...prevMeta,
-          roundOff: Number(ro.toFixed(2)),
-        },
-      },
-    });
-
-    await this.ordersService.recalculateTotals(tx, tenantId, orderId);
   }
 
   /**
@@ -2396,6 +2452,15 @@ export class PosService {
   async prepareSaleCheckout(user: AuthUser, dto: PrepareSaleCheckoutDto) {
     await this.assertSaleShop(user.tenantId);
 
+    if (
+      dto.roundOffAmount !== undefined &&
+      Math.abs(Number(dto.roundOffAmount)) >= 0.005
+    ) {
+      throw new BadRequestException(
+        'Round off applies only to cash checkout — card/UPI/QR pay the exact amount',
+      );
+    }
+
     const loc = await this.prisma.location.findFirst({
       where: {
         id: dto.locationId,
@@ -2622,12 +2687,16 @@ export class PosService {
         created.id,
       );
 
-      await this.applyCheckoutRoundOff(
-        tx,
-        user.tenantId,
-        created.id,
-        dto.roundOffAmount,
-      );
+      const preRound = await tx.order.findFirstOrThrow({
+        where: { id: created.id },
+        select: { balanceDue: true },
+      });
+      const exactDue = Number(preRound.balanceDue);
+      await this.persistPaymentRoundingMeta(tx, user.tenantId, created.id, {
+        originalAmount: exactDue,
+        roundOffAmount: 0,
+        finalAmount: exactDue,
+      });
 
       const after = await tx.order.findFirstOrThrow({
         where: { id: created.id },
@@ -3293,11 +3362,28 @@ export class PosService {
         }
       }
 
+      const preRoundRow = await tx.order.findFirstOrThrow({
+        where: { id: created.id },
+        select: { balanceDue: true },
+      });
+      const exactDue = Number(preRoundRow.balanceDue);
+
+      const paymentLines = dto.payments.map((p) => ({
+        ...p,
+        amount: Number(p.amount),
+      }));
+      const cashRoundOff = this.resolveCashRoundOff(
+        dto.roundOffAmount,
+        paymentLines,
+        exactDue,
+      );
+
       await this.applyCheckoutRoundOff(
         tx,
         user.tenantId,
         created.id,
-        dto.roundOffAmount,
+        cashRoundOff,
+        exactDue,
       );
 
       const dueRow = await tx.order.findFirstOrThrow({
@@ -3310,10 +3396,6 @@ export class PosService {
       }
 
       // Do not force single-cash to full due — supports partial payments
-      const paymentLines = dto.payments.map((p) => ({
-        ...p,
-        amount: Number(p.amount),
-      }));
       const clientPayHint = paymentLines.reduce((s, p) => s + p.amount, 0);
       // Full-ticket cash: lift to server Due only when cashier is already
       // collecting ~the whole ticket (tax/settings drift). Never silently
@@ -4095,6 +4177,24 @@ export class PosService {
         reason: f.reason,
         amount: f.amount,
       })),
+      paymentRounding: {
+        originalAmount:
+          typeof meta.originalAmount === 'number'
+            ? meta.originalAmount
+            : typeof meta.exactTotal === 'number'
+              ? meta.exactTotal
+              : Number(order.balanceDue),
+        roundOffAmount:
+          typeof meta.roundOffAmount === 'number'
+            ? meta.roundOffAmount
+            : typeof meta.roundOff === 'number'
+              ? meta.roundOff
+              : 0,
+        finalAmount:
+          typeof meta.finalAmount === 'number'
+            ? meta.finalAmount
+            : Number(order.balanceDue),
+      },
       payments: order.payments.map((p) => ({
         id: p.id,
         type: p.type,

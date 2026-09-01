@@ -236,7 +236,7 @@ export class UsersService {
   async update(user: AuthUser, id: string, dto: UpdateUserDto) {
     const existing = await this.prisma.user.findFirst({
       where: { id, tenantId: user.tenantId },
-      select: { id: true },
+      select: { id: true, primaryLocationId: true },
     });
     if (!existing) throw new NotFoundException('User not found');
 
@@ -287,6 +287,76 @@ export class UsersService {
       await this.prisma.employee.updateMany({
         where: { userId: id, tenantId: user.tenantId },
         data: { jobTitle: dto.jobTitle.trim() },
+      });
+    }
+
+    if (dto.roleCode !== undefined) {
+      const roleCode = dto.roleCode.trim().toLowerCase();
+      this.assertCanAssignRole(user, roleCode);
+      const scopeLocationId =
+        locationId !== undefined ? locationId : existing.primaryLocationId;
+
+      await this.prisma.$transaction(async (tx) => {
+        let role = await tx.role.findUnique({
+          where: {
+            tenantId_code: { tenantId: user.tenantId, code: roleCode },
+          },
+        });
+        if (!role) {
+          if (!ASSIGNABLE_BY_MANAGER.has(roleCode) && roleCode !== 'admin') {
+            throw new BadRequestException(
+              `Unknown role: ${roleCode}. Create it under Roles & permissions first.`,
+            );
+          }
+          role = await tx.role.create({
+            data: {
+              tenantId: user.tenantId,
+              code: roleCode,
+              name: roleCode,
+              isSystem: true,
+            },
+          });
+        }
+        if (
+          role.isSystem &&
+          role.code === 'admin' &&
+          !user.roles.includes('admin')
+        ) {
+          throw new BadRequestException(
+            'Only the shop owner (admin) can grant admin access',
+          );
+        }
+        if (
+          !user.roles.includes('admin') &&
+          role.isSystem &&
+          !ASSIGNABLE_BY_MANAGER.has(role.code)
+        ) {
+          throw new BadRequestException(`Cannot assign role: ${role.code}`);
+        }
+
+        await tx.userRole.deleteMany({ where: { userId: id } });
+        await tx.userRole.create({
+          data: {
+            userId: id,
+            roleId: role.id,
+            locationId: scopeLocationId ?? null,
+          },
+        });
+
+        await tx.membership.deleteMany({
+          where: { userId: id, tenantId: user.tenantId },
+        });
+        if (scopeLocationId) {
+          await tx.membership.create({
+            data: {
+              tenantId: user.tenantId,
+              userId: id,
+              locationId: scopeLocationId,
+              roleId: role.id,
+              status: 'active',
+            },
+          });
+        }
       });
     }
 

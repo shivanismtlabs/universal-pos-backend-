@@ -658,6 +658,18 @@ export class PosController {
     });
   }
 
+  @Get('rental/orders/:orderId/late-fee-preview')
+  @Roles(...RoleGroup.pos, Role.inventory, Role.manager, Role.admin)
+  @ApiOperation({
+    summary: 'Preview late fee for a rental ticket (no charge)',
+  })
+  lateFeePreview(
+    @CurrentUser() user: AuthUser,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    return this.rentalPos.lateFeePreview(user, orderId);
+  }
+
   @Get('rental/units')
   @Roles(...RoleGroup.pos, Role.inventory)
   listRentalUnits(

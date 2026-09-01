@@ -101,6 +101,13 @@ export class UpdateUserDto {
   @IsString()
   @MaxLength(100)
   jobTitle?: string;
+
+  @ApiPropertyOptional({ example: 'cashier' })
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(50)
+  roleCode?: string;
 }
 
 export class AssignRoleDto {

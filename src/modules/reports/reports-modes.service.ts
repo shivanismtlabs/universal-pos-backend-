@@ -3,6 +3,8 @@ import {
   CustomerSubscriptionStatus,
   OrderKind,
   OrderStatus,
+  PaymentStatus,
+  PaymentType,
   Prisma,
   StockUnitStatus,
 } from '@prisma/client';
@@ -51,6 +53,9 @@ export class ReportsModesService {
 
     const [
       revenue,
+      rentPayments,
+      depositPayments,
+      depositRefunds,
       byLifecycle,
       overdue,
       units,
@@ -62,6 +67,46 @@ export class ReportsModesService {
         where: orderWhere,
         _sum: { subtotal: true, taxTotal: true, balanceDue: true },
         _count: { _all: true },
+      }),
+      this.prisma.payment.aggregate({
+        where: {
+          tenantId: user.tenantId,
+          status: PaymentStatus.succeeded,
+          type: PaymentType.payment,
+          order: {
+            kind: OrderKind.rental,
+            status: { notIn: [OrderStatus.cancelled, OrderStatus.draft] },
+            ...(createdAt ? { createdAt } : {}),
+            ...(loc ? { locationId: loc } : {}),
+          },
+        },
+        _sum: { amount: true },
+      }),
+      this.prisma.payment.aggregate({
+        where: {
+          tenantId: user.tenantId,
+          status: PaymentStatus.succeeded,
+          type: PaymentType.deposit,
+          order: {
+            kind: OrderKind.rental,
+            ...(createdAt ? { createdAt } : {}),
+            ...(loc ? { locationId: loc } : {}),
+          },
+        },
+        _sum: { amount: true },
+      }),
+      this.prisma.payment.aggregate({
+        where: {
+          tenantId: user.tenantId,
+          status: PaymentStatus.succeeded,
+          type: PaymentType.deposit_refund,
+          order: {
+            kind: OrderKind.rental,
+            ...(createdAt ? { createdAt } : {}),
+            ...(loc ? { locationId: loc } : {}),
+          },
+        },
+        _sum: { amount: true },
       }),
       this.prisma.modRentalOrder.groupBy({
         by: ['lifecycle'],
@@ -138,6 +183,20 @@ export class ReportsModesService {
     const available =
       units.find((r) => r.status === StockUnitStatus.available)?._count._all ??
       0;
+    const reserved =
+      units.find((r) => r.status === StockUnitStatus.reserved)?._count._all ??
+      0;
+    const maintenance =
+      (units.find((r) => r.status === StockUnitStatus.repair)?._count._all ??
+        0) +
+      (units.find((r) => r.status === StockUnitStatus.in_service)?._count
+        ._all ?? 0);
+    const depositsCollected = round2(
+      Number(depositPayments._sum.amount ?? 0),
+    );
+    const depositsRefunded = round2(Number(depositRefunds._sum.amount ?? 0));
+    /** Rent revenue = rent payments only — never include refundable deposits */
+    const rentalRevenue = round2(Number(rentPayments._sum.amount ?? 0));
 
     return {
       from: query.from ?? null,
@@ -145,15 +204,23 @@ export class ReportsModesService {
       locationId: loc ?? null,
       summary: {
         orderCount: revenue._count._all,
-        revenue: round2(Number(revenue._sum.subtotal ?? 0)),
+        /** @deprecated use rentalRevenue — kept for older UI */
+        revenue: rentalRevenue,
+        rentalRevenue,
+        orderSubtotal: round2(Number(revenue._sum.subtotal ?? 0)),
         tax: round2(Number(revenue._sum.taxTotal ?? 0)),
         balanceDue: round2(Number(revenue._sum.balanceDue ?? 0)),
         overdueCount: overdue.length,
         utilizationPct:
           unitTotal > 0 ? round2((outCount / unitTotal) * 100) : null,
         availableUnits: available,
+        reservedUnits: reserved,
         unitsOut: outCount,
+        maintenanceUnits: maintenance,
         unitsTotal: unitTotal,
+        depositsCollected,
+        depositsRefunded,
+        depositsHeldNet: round2(depositsCollected - depositsRefunded),
         openDeposits: round2(Number(openDeposits._sum.depositAmount ?? 0)),
         openDepositUnits: openDeposits._count._all,
         damageEvents: damages._count._all,

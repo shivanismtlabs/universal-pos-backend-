@@ -8,6 +8,7 @@ import { Prisma } from '@prisma/client';
 import { hasPermission } from '../../common/rbac';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
+import { ymdInZone, zonedLocalToUtc } from '../reports/reports.util';
 import {
   AssignShiftDto,
   ClockDto,
@@ -37,20 +38,37 @@ function parseWorkDate(ymd: string): Date {
   return d;
 }
 
-function combineDateTime(ymd: string, hm: string): Date {
-  const d = new Date(`${ymd}T${hm}:00`);
-  if (Number.isNaN(d.getTime())) {
+function combineDateTime(ymd: string, hm: string, timeZone: string): Date {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hm.trim());
+  if (!m) {
     throw new BadRequestException(`Invalid time ${hm}`);
   }
-  return d;
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  if (hour > 23 || minute > 59) {
+    throw new BadRequestException(`Invalid time ${hm}`);
+  }
+  return zonedLocalToUtc(ymd, hour, minute, 0, 0, timeZone);
 }
 
-function ymdFromDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
+function hmInZone(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const hour = parts.find((p) => p.type === 'hour')?.value ?? '00';
+  const minute = parts.find((p) => p.type === 'minute')?.value ?? '00';
+  return `${hour}:${minute}`;
 }
 
-function todayYmd(): string {
-  return ymdFromDate(new Date());
+function ymdFromDate(d: Date, timeZone: string): string {
+  return ymdInZone(d, timeZone);
+}
+
+function todayYmd(timeZone: string): string {
+  return ymdInZone(new Date(), timeZone);
 }
 
 function calcWorkedMinutes(
@@ -85,7 +103,8 @@ export class IamAttendanceService {
       throw new BadRequestException('Already clocked in — clock out first');
     }
 
-    const workDate = parseWorkDate(todayYmd());
+    const tz = await this.tenantTimezone(user.tenantId);
+    const workDate = parseWorkDate(todayYmd(tz));
     const now = new Date();
     const created = await this.prisma.attendanceEntry.create({
       data: {
@@ -108,6 +127,7 @@ export class IamAttendanceService {
         where: { id: created.id },
         include: this.include(),
       }),
+      tz,
     );
   }
 
@@ -135,7 +155,8 @@ export class IamAttendanceService {
       before: this.slim(open),
       after: this.slim(updated),
     });
-    return this.mapRow(updated);
+    const tz = await this.tenantTimezone(user.tenantId);
+    return this.mapRow(updated, tz);
   }
 
   async myOpen(user: AuthUser) {
@@ -148,7 +169,8 @@ export class IamAttendanceService {
       },
       include: this.include(),
     });
-    return row ? this.mapRow(row) : null;
+    const tz = await this.tenantTimezone(user.tenantId);
+    return row ? this.mapRow(row, tz) : null;
   }
 
   async list(user: AuthUser, query: ListAttendanceQueryDto) {
@@ -190,7 +212,8 @@ export class IamAttendanceService {
       take: 300,
       include: this.include(),
     });
-    return rows.map((r) => this.mapRow(r));
+    const tz = await this.tenantTimezone(user.tenantId);
+    return rows.map((r) => this.mapRow(r, tz));
   }
 
   async getOne(user: AuthUser, id: string) {
@@ -198,11 +221,13 @@ export class IamAttendanceService {
     if (!this.canManage(user) && row.userId !== user.userId) {
       throw new ForbiddenException('Not allowed to view this entry');
     }
-    return this.mapRow(row);
+    const tz = await this.tenantTimezone(user.tenantId);
+    return this.mapRow(row, tz);
   }
 
   async createManual(user: AuthUser, dto: CreateAttendanceDto) {
     this.assertManage(user);
+    const tz = await this.tenantTimezone(user.tenantId);
     const workDate = parseWorkDate(dto.workDate);
     await this.assertStaff(user.tenantId, dto.userId);
     if (dto.shiftId) await this.assertShift(user.tenantId, dto.shiftId);
@@ -221,7 +246,7 @@ export class IamAttendanceService {
     }
 
     const { clockInAt, clockOutAt, breakMinutes, status } =
-      this.resolveTimes(dto);
+      this.resolveTimes(dto, tz);
 
     const created = await this.prisma.attendanceEntry.create({
       data: {
@@ -242,11 +267,12 @@ export class IamAttendanceService {
     await this.audit(user, created.id, 'attendance.created', {
       after: this.slim(created),
     });
-    return this.mapRow(created);
+    return this.mapRow(created, tz);
   }
 
   async update(user: AuthUser, id: string, dto: UpdateAttendanceDto) {
     this.assertManage(user);
+    const tz = await this.tenantTimezone(user.tenantId);
     const existing = await this.requireEntry(user, id);
 
     const nextUserId = dto.userId ?? existing.userId;
@@ -254,8 +280,8 @@ export class IamAttendanceService {
       ? parseWorkDate(dto.workDate)
       : existing.workDate ??
         (existing.clockInAt
-          ? parseWorkDate(ymdFromDate(existing.clockInAt))
-          : parseWorkDate(todayYmd()));
+          ? parseWorkDate(ymdFromDate(existing.clockInAt, tz))
+          : parseWorkDate(todayYmd(tz)));
 
     if (dto.userId) await this.assertStaff(user.tenantId, dto.userId);
     if (dto.shiftId) await this.assertShift(user.tenantId, dto.shiftId);
@@ -274,7 +300,7 @@ export class IamAttendanceService {
       );
     }
 
-    const ymd = ymdFromDate(nextWorkDate);
+    const ymd = ymdFromDate(nextWorkDate, tz);
     const status = dto.status ?? existing.status;
     const breakMinutes =
       dto.breakMinutes !== undefined
@@ -287,13 +313,13 @@ export class IamAttendanceService {
       clockInAt =
         dto.clockIn === null || dto.clockIn === ''
           ? null
-          : combineDateTime(ymd, dto.clockIn);
+          : combineDateTime(ymd, dto.clockIn, tz);
     }
     if (dto.clockOut !== undefined) {
       clockOutAt =
         dto.clockOut === null || dto.clockOut === ''
           ? null
-          : combineDateTime(ymd, dto.clockOut);
+          : combineDateTime(ymd, dto.clockOut, tz);
     }
 
     this.validateStatusTimes(status, clockInAt, clockOutAt, breakMinutes);
@@ -318,8 +344,41 @@ export class IamAttendanceService {
     await this.audit(user, id, 'attendance.updated', {
       before: this.slim(existing),
       after: this.slim(updated),
+      reason: dto.correctionReason.trim(),
     });
-    return this.mapRow(updated);
+    return this.mapRow(updated, tz);
+  }
+
+  async getHistory(user: AuthUser, id: string) {
+    const row = await this.requireEntry(user, id);
+    if (!this.canManage(user) && row.userId !== user.userId) {
+      throw new ForbiddenException('Not allowed to view this entry');
+    }
+    const logs = await this.prisma.auditLog.findMany({
+      where: {
+        tenantId: user.tenantId,
+        entityType: 'attendance_entry',
+        entityId: id,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+      include: {
+        actor: { select: { id: true, fullName: true, email: true } },
+      },
+    });
+    return logs.map((log) => ({
+      id: log.id,
+      action: log.action,
+      actor: log.actor
+        ? {
+            id: log.actor.id,
+            fullName: log.actor.fullName,
+            email: log.actor.email,
+          }
+        : null,
+      beforeAfter: log.beforeAfter,
+      createdAt: log.createdAt,
+    }));
   }
 
   async remove(user: AuthUser, id: string) {
@@ -332,7 +391,7 @@ export class IamAttendanceService {
     return { ok: true };
   }
 
-  private resolveTimes(dto: CreateAttendanceDto) {
+  private resolveTimes(dto: CreateAttendanceDto, timeZone: string) {
     const status = dto.status;
     const breakMinutes = Math.max(0, dto.breakMinutes ?? 0);
     let clockInAt: Date | null = null;
@@ -342,13 +401,13 @@ export class IamAttendanceService {
       if (!dto.clockIn) {
         throw new BadRequestException('Clock In is required for this status');
       }
-      clockInAt = combineDateTime(dto.workDate, dto.clockIn);
+      clockInAt = combineDateTime(dto.workDate, dto.clockIn, timeZone);
       if (dto.clockOut) {
-        clockOutAt = combineDateTime(dto.workDate, dto.clockOut);
+        clockOutAt = combineDateTime(dto.workDate, dto.clockOut, timeZone);
       }
     } else {
-      if (dto.clockIn) clockInAt = combineDateTime(dto.workDate, dto.clockIn);
-      if (dto.clockOut) clockOutAt = combineDateTime(dto.workDate, dto.clockOut);
+      if (dto.clockIn) clockInAt = combineDateTime(dto.workDate, dto.clockIn, timeZone);
+      if (dto.clockOut) clockOutAt = combineDateTime(dto.workDate, dto.clockOut, timeZone);
     }
 
     this.validateStatusTimes(status, clockInAt, clockOutAt, breakMinutes);
@@ -388,7 +447,16 @@ export class IamAttendanceService {
     } as const;
   }
 
-  private mapRow(r: {
+  private async tenantTimezone(tenantId: string): Promise<string> {
+    const row = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { timezone: true },
+    });
+    return row?.timezone || 'Asia/Kolkata';
+  }
+
+  private mapRow(
+    r: {
     id: string;
     userId: string;
     locationId: string | null;
@@ -409,22 +477,31 @@ export class IamAttendanceService {
       startTime: string;
       endTime: string;
     } | null;
-  }) {
+  },
+    timeZone: string,
+  ) {
     const workDate =
-      r.workDate ?? (r.clockInAt ? parseWorkDate(ymdFromDate(r.clockInAt)) : null);
+      r.workDate ??
+      (r.clockInAt ? parseWorkDate(ymdFromDate(r.clockInAt, timeZone)) : null);
     const minutes = calcWorkedMinutes(
       r.clockInAt,
       r.clockOutAt,
       r.breakMinutes ?? 0,
     );
     const isOpenSession = Boolean(r.clockInAt && !r.clockOutAt);
+    const displayStatus = this.resolveDisplayStatus({
+      status: r.status || 'present',
+      clockInAt: r.clockInAt,
+      clockOutAt: r.clockOutAt,
+      isOpenSession,
+    });
     return {
       id: r.id,
       userId: r.userId,
       fullName: r.user.fullName,
       email: r.user.email,
       locationId: r.locationId,
-      workDate: workDate ? ymdFromDate(workDate) : null,
+      workDate: workDate ? ymdFromDate(workDate, timeZone) : null,
       shiftId: r.shiftId,
       shift: r.shift
         ? {
@@ -436,14 +513,11 @@ export class IamAttendanceService {
         : null,
       clockInAt: r.clockInAt,
       clockOutAt: r.clockOutAt,
-      clockIn: r.clockInAt
-        ? r.clockInAt.toTimeString().slice(0, 5)
-        : null,
-      clockOut: r.clockOutAt
-        ? r.clockOutAt.toTimeString().slice(0, 5)
-        : null,
+      clockIn: r.clockInAt ? hmInZone(r.clockInAt, timeZone) : null,
+      clockOut: r.clockOutAt ? hmInZone(r.clockOutAt, timeZone) : null,
       breakMinutes: r.breakMinutes ?? 0,
       status: r.status || 'present',
+      displayStatus,
       method: r.method,
       notes: r.notes,
       minutes,
@@ -455,6 +529,29 @@ export class IamAttendanceService {
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     };
+  }
+
+  private resolveDisplayStatus(input: {
+    status: string;
+    clockInAt: Date | null;
+    clockOutAt: Date | null;
+    isOpenSession: boolean;
+  }): string {
+    const dbStatus = input.status || 'present';
+    if (
+      ['absent', 'half_day', 'late', 'leave', 'holiday', 'off_day'].includes(
+        dbStatus,
+      )
+    ) {
+      return dbStatus;
+    }
+    if (input.isOpenSession || (input.clockInAt && !input.clockOutAt)) {
+      return 'checked_in';
+    }
+    if (input.clockInAt && input.clockOutAt) {
+      return 'checked_out';
+    }
+    return dbStatus;
   }
 
   private slim(r: {

@@ -204,6 +204,12 @@ export class UpdateAttendanceDto {
   @IsString()
   @MaxLength(500)
   notes?: string | null;
+
+  /** Required when a manager corrects an existing attendance record */
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  correctionReason!: string;
 }
 
 export class CreateShiftDto {

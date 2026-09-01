@@ -36,6 +36,11 @@ import {
   UpdateRentalUnitDto,
   UploadSaleImageDto,
 } from './dto/pos.dto';
+import {
+  BLOCKED_UNIT_STATUSES,
+  calcLateFee,
+  readRentalFeeConfig,
+} from './rental-unit-lifecycle';
 
 function metaPrice(meta: unknown): number | null {
   if (!meta || typeof meta !== 'object') return null;
@@ -250,6 +255,13 @@ export class RentalPosService {
     if (!cat) throw new NotFoundException('Category not found');
 
     const variant = (dto.variant ?? dto.size)?.trim() || null;
+    const feeMeta = {
+      rentalPrice: Number(dto.rentalPrice),
+      lateFeePerDay: Number(dto.lateFeePerDay ?? 0),
+      lateFeeEnabled: dto.lateFeeEnabled !== false,
+      cleaningFee: Number(dto.cleaningFee ?? 0),
+      damageFeeDefault: Number(dto.damageFeeDefault ?? 0),
+    };
 
     try {
       const product = await this.prisma.product.create({
@@ -264,6 +276,7 @@ export class RentalPosService {
           trackQty: false,
           trackSerial: true,
           basePrice: Number(dto.rentalPrice),
+          meta: feeMeta,
         },
       });
       const unit = await this.prisma.stockUnit.create({
@@ -631,7 +644,7 @@ export class RentalPosService {
       where: {
         tenantId: user.tenantId,
         locationId,
-        status: StockUnitStatus.available,
+        status: { notIn: BLOCKED_UNIT_STATUSES },
         ...(opts.productId ? { productId: opts.productId } : {}),
         product: { fulfillmentMode: FulfillmentMode.rental, isActive: true },
       },
@@ -648,7 +661,9 @@ export class RentalPosService {
         },
         reservations: {
           where: {
-            status: ReservationStatus.held,
+            status: {
+              in: [ReservationStatus.held, ReservationStatus.checked_out],
+            },
             startDate: { lte: to },
             endDate: { gte: from },
           },
@@ -670,6 +685,64 @@ export class RentalPosService {
       productId: opts.productId ?? null,
       availableCount: available.length,
       items: available,
+    };
+  }
+
+  /**
+   * Preview late fee for a rental ticket (does not charge).
+   * Uses product meta.lateFeePerDay / lateFeeEnabled from line units.
+   */
+  async lateFeePreview(user: AuthUser, orderId: string) {
+    await this.assertRentalShop(user.tenantId);
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, tenantId: user.tenantId, kind: OrderKind.rental },
+      include: {
+        rentalExt: true,
+        items: {
+          include: {
+            stockUnit: {
+              include: { product: { select: { meta: true, id: true } } },
+            },
+          },
+        },
+      },
+    });
+    if (!order) throw new NotFoundException('Rental order not found');
+
+    const due = order.rentalExt?.returnDueDate ?? null;
+    let suggested = 0;
+    let days = 0;
+    let applicable = false;
+    const lines: Array<{
+      stockUnitId: string | null;
+      lateFeePerDay: number;
+      daysLate: number;
+      amount: number;
+    }> = [];
+
+    for (const item of order.items) {
+      const feeConfig = readRentalFeeConfig(item.stockUnit?.product?.meta);
+      const calc = calcLateFee({ returnDue: due, feeConfig });
+      if (calc.applicable) {
+        applicable = true;
+        days = Math.max(days, calc.daysLate);
+        suggested = Math.round((suggested + calc.suggested) * 100) / 100;
+      }
+      lines.push({
+        stockUnitId: item.stockUnitId,
+        lateFeePerDay: feeConfig.lateFeePerDay,
+        daysLate: calc.daysLate,
+        amount: calc.suggested,
+      });
+    }
+
+    return {
+      orderId,
+      returnDueDate: due,
+      daysLate: days,
+      applicable,
+      suggestedLateFee: suggested,
+      lines,
     };
   }
 

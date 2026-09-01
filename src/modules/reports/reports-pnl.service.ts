@@ -314,7 +314,35 @@ export class ReportsPnlService {
         cogs += lineCost;
       }
     }
-    cogs = round2(cogs);
+
+    const completedReturnEvents = await this.prisma.returnEvent.findMany({
+      where: {
+        tenantId,
+        status: 'completed',
+        createdAt: { gte: range.start, lte: range.end },
+      },
+      select: { itemsJson: true },
+    });
+
+    let returnedCogs = 0;
+    for (const ev of completedReturnEvents) {
+      const arr = Array.isArray(ev.itemsJson)
+        ? (ev.itemsJson as Array<Record<string, unknown>>)
+        : [];
+      for (const item of arr) {
+        if (item.kind === 'replace') continue;
+        const cond = String(item.condition ?? 'good');
+        if (cond !== 'good') continue;
+        const pid = typeof item.productId === 'string' ? item.productId : null;
+        const qty = Number(item.quantity ?? item.returnQty ?? 0);
+        if (pid && qty > 0) {
+          const unit = unitCosts.get(pid) ?? 0;
+          returnedCogs += qty * unit;
+        }
+      }
+    }
+
+    cogs = round2(Math.max(0, cogs - returnedCogs));
     costOfService = round2(costOfService);
 
     // Pull labor-like expenses into Cost of Service for service businesses

@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  DocumentType,
   OrderItemKind,
   OrderKind,
   OrderStatus,
@@ -319,6 +320,8 @@ export class SaleReturnsService {
             user.tenantId,
             order.items,
             lines,
+            undefined,
+            order.id,
           ),
           idempotencyKey: dto.idempotencyKey,
           parentPaymentId: dto.parentPaymentId,
@@ -881,6 +884,7 @@ export class SaleReturnsService {
       original.items,
       computed.lines,
       dto.replaceItems,
+      original.id,
     );
 
     const result = await this.prisma.$transaction(
@@ -1015,7 +1019,7 @@ export class SaleReturnsService {
             taxTotal: taxTotal.toFixed(2),
           },
           taxProfile,
-          {},
+          { prefix: 'EX-INV-' },
         );
 
         // --- 4) Settle: exchange credit + collect OR refund surplus ---
@@ -1189,14 +1193,28 @@ export class SaleReturnsService {
           data: {
             status: OrderStatus.closed,
             meta: {
+              isExchangeInvoice: true,
               exchangeOfOrderId: original.id,
               exchangeOfOrderNumber: original.orderNumber,
+              originalInvoiceNumber: (original as any).invoices?.[0]?.invoiceNumber || original.orderNumber,
               exchangeIdempotencyKey: dto.idempotencyKey,
               returnEventId: returnEvent.id,
               returnAmount,
+              replaceTotal,
+              returnTaxAmount: computed.lines.reduce((sum, l) => sum + (l.taxShare ?? 0), 0),
               exchangeNet: net,
               invoiceId: invoice.id,
               invoiceNumber: invoice.invoiceNumber,
+              returnedItems: computed.lines.map((i: any) => ({
+                name: i.name || i.description || 'Returned Product',
+                productId: i.productId,
+                stockLevelId: i.stockLevelId,
+                quantity: i.quantity,
+                unitPrice: i.unitPrice,
+                discountShare: i.discountShare,
+                taxShare: i.taxShare,
+                refundShare: i.refundShare,
+              })),
             },
           },
         });
@@ -1598,6 +1616,8 @@ export class SaleReturnsService {
           user.tenantId,
           args.order.items ?? [],
           args.lines,
+          undefined,
+          args.order.id,
         );
 
     const outcome = await this.prisma.$transaction(async (tx) => {
@@ -1729,9 +1749,73 @@ export class SaleReturnsService {
         args.order.id,
       );
 
+      const fullOrder = await tx.order.findUniqueOrThrow({
+        where: { id: args.order.id },
+        include: {
+          items: true,
+          returnEvents: { where: { status: 'completed' } },
+        },
+      });
+      let totalSoldProductQty = 0;
+      for (const item of fullOrder.items) {
+        if (item.itemKind === OrderItemKind.product) {
+          totalSoldProductQty += Number(item.quantity);
+        }
+      }
+      let totalReturnedProductQty = 0;
+      for (const ev of fullOrder.returnEvents) {
+        const arr = Array.isArray(ev.itemsJson)
+          ? (ev.itemsJson as Array<Record<string, unknown>>)
+          : [];
+        for (const item of arr) {
+          if (item.kind === 'replace') continue;
+          totalReturnedProductQty += Number(item.quantity ?? item.returnQty ?? 0);
+        }
+      }
+      const newReturnState =
+        totalReturnedProductQty <= 0
+          ? 'none'
+          : totalReturnedProductQty >= totalSoldProductQty - 1e-6
+            ? 'fully_returned'
+            : 'partially_returned';
+
+      const prevMeta =
+        fullOrder.meta && typeof fullOrder.meta === 'object' && !Array.isArray(fullOrder.meta)
+          ? (fullOrder.meta as Record<string, unknown>)
+          : {};
+
+      await tx.order.update({
+        where: { id: args.order.id },
+        data: {
+          meta: {
+            ...prevMeta,
+            returnState: newReturnState,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
       await tx.returnEvent.update({
         where: { id: returnEventId! },
         data: { status: 'completed' },
+      });
+
+      await tx.document.create({
+        data: {
+          tenantId: user.tenantId,
+          type: DocumentType.receipt,
+          storageKey: `returns/credit-notes/${returnEventId}.json`,
+          orderId: args.order.id,
+          customerId: args.order.customerId,
+          meta: {
+            docKind: 'credit_note',
+            returnEventId,
+            originalOrderId: args.order.id,
+            refundAmount: args.refundAmount,
+            refundMethod: args.refundMethod,
+            refundPaymentId: pay.id,
+            lines: args.lines,
+          } as Prisma.InputJsonValue,
+        },
       });
 
       await tx.auditLog.create({
@@ -1805,13 +1889,21 @@ export class SaleReturnsService {
 
   private async buildReturnItemsJson(
     tenantId: string,
-    orderItems: Array<{ stockLevelId: string | null; description: string | null }>,
+    orderItems: Array<{
+      id?: string;
+      stockLevelId: string | null;
+      productId?: string | null;
+      description: string | null;
+      quantity?: Prisma.Decimal | number | null;
+      unitPrice?: Prisma.Decimal | number | null;
+    }>,
     returnLines: ReturnLine[],
     replaceLines?: Array<{
       stockLevelId: string;
       quantity: number;
       unitPrice?: number;
     }>,
+    originalOrderId?: string,
   ): Promise<Prisma.InputJsonValue> {
     const levelIds = new Set<string>();
     for (const l of returnLines) levelIds.add(l.stockLevelId);
@@ -1823,6 +1915,7 @@ export class SaleReturnsService {
             where: { tenantId, id: { in: [...levelIds] } },
             select: {
               id: true,
+              productId: true,
               sellPrice: true,
               product: { select: { name: true, skuCode: true } },
             },
@@ -1833,6 +1926,7 @@ export class SaleReturnsService {
       levels.map((l) => [
         l.id,
         {
+          productId: l.productId,
           name: l.product.name,
           sku: l.product.skuCode,
           sellPrice: Number(l.sellPrice ?? 0),
@@ -1840,24 +1934,39 @@ export class SaleReturnsService {
       ]),
     );
 
-    const returned = returnLines.map((l) => ({
-      kind: 'return',
-      stockLevelId: l.stockLevelId,
-      quantity: l.quantity,
-      unitPrice: l.unitPrice,
-      condition: l.condition,
-      refundShare: l.refundShare,
-      name:
-        orderItems.find((i) => i.stockLevelId === l.stockLevelId)
-          ?.description ??
-        byLevel.get(l.stockLevelId)?.name ??
-        'Item',
-      sku: byLevel.get(l.stockLevelId)?.sku ?? null,
-    }));
+    const returned = returnLines.map((l) => {
+      const matchedOrderItem = orderItems.find(
+        (i) => i.stockLevelId === l.stockLevelId,
+      );
+      const purchasedQty = matchedOrderItem?.quantity
+        ? Number(matchedOrderItem.quantity)
+        : l.quantity;
+      const unitPrice = l.unitPrice ?? (matchedOrderItem?.unitPrice ? Number(matchedOrderItem.unitPrice) : 0);
+
+      return {
+        kind: 'return',
+        originalOrderId: originalOrderId ?? null,
+        originalOrderLineId: matchedOrderItem?.id ?? null,
+        productId: matchedOrderItem?.productId ?? byLevel.get(l.stockLevelId)?.productId ?? null,
+        stockLevelId: l.stockLevelId,
+        purchasedQty,
+        alreadyReturnedQty: Math.max(0, purchasedQty - l.quantity),
+        quantity: l.quantity,
+        returnQty: l.quantity,
+        unitPrice,
+        discountShare: l.discountShare ?? 0,
+        taxShare: l.taxShare ?? 0,
+        refundShare: l.refundShare ?? 0,
+        condition: l.condition || 'good',
+        name: matchedOrderItem?.description ?? byLevel.get(l.stockLevelId)?.name ?? 'Item',
+        sku: byLevel.get(l.stockLevelId)?.sku ?? null,
+      };
+    });
 
     const replaced = (replaceLines ?? []).map((item) => ({
       kind: 'replace',
       stockLevelId: item.stockLevelId,
+      productId: byLevel.get(item.stockLevelId)?.productId ?? null,
       quantity: item.quantity,
       unitPrice:
         item.unitPrice ?? byLevel.get(item.stockLevelId)?.sellPrice ?? 0,

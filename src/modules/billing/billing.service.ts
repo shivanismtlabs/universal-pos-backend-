@@ -227,7 +227,11 @@ export class BillingService {
     const sgst = dto.useIgst ? 0 : Math.round((partTax - cgst) * 100) / 100;
     const igst = dto.useIgst ? partTax : 0;
 
-    const invoiceNumber = await this.generateInvoiceNumber(tx, user.tenantId);
+    const invoiceNumber = await this.generateInvoiceNumber(
+      tx,
+      user.tenantId,
+      dto.prefix || 'INV-',
+    );
 
     const invoice = await tx.invoice.create({
       data: {
@@ -339,10 +343,11 @@ export class BillingService {
   private async generateInvoiceNumber(
     tx: PrismaTx,
     tenantId: string,
+    prefix: string = 'INV-',
   ): Promise<string> {
     for (let attempt = 0; attempt < 5; attempt++) {
       const random = Math.random().toString(36).slice(2, 6).toUpperCase();
-      const candidate = `INV-${Date.now().toString(36).toUpperCase()}-${random}`;
+      const candidate = `${prefix}${Date.now().toString(36).toUpperCase()}-${random}`;
       const exists = await tx.invoice.findFirst({
         where: { tenantId, invoiceNumber: candidate },
         select: { id: true },

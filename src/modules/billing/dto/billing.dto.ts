@@ -93,6 +93,11 @@ export class CreateInvoiceDto {
   @MaxLength(100)
   placeOfSupply?: string;
 
+  @ApiPropertyOptional({ example: 'EX-INV-' })
+  @IsOptional()
+  @IsString()
+  prefix?: string;
+
   @ApiPropertyOptional({
     default: false,
     description: 'Inter-state supply: charge IGST instead of CGST+SGST',

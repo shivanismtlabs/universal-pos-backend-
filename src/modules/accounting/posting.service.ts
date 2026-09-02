@@ -6,6 +6,7 @@ import type { Tx } from './mapping-resolve';
 import { D } from './money';
 import {
   buildCogsJournal,
+  buildCogsReturnJournal,
   buildCustomerPaymentJournal,
   buildExpenseJournal,
   buildPurchaseJournal,
@@ -263,6 +264,56 @@ export class AccountingPostingService {
       lines: built.lines,
       taxFacts: built.taxFacts,
     });
+
+    if (cfg.cogsEnabled && cfg.inventoryAccountingEnabled) {
+      let returnedCogs = new Prisma.Decimal(0);
+      const itemsArr = Array.isArray(ev.itemsJson)
+        ? (ev.itemsJson as Array<Record<string, unknown>>)
+        : [];
+      const productIds = itemsArr
+        .map((i) => (typeof i.productId === 'string' ? i.productId : null))
+        .filter(Boolean) as string[];
+
+      if (productIds.length > 0) {
+        const products = await tx.product.findMany({
+          where: { tenantId: user.tenantId, id: { in: productIds } },
+          select: { id: true, costPrice: true },
+        });
+        const costMap = new Map(products.map((p) => [p.id, D(p.costPrice ?? 0)]));
+        for (const item of itemsArr) {
+          if (item.kind === 'replace') continue;
+          const cond = String(item.condition ?? 'good');
+          const pid = typeof item.productId === 'string' ? item.productId : null;
+          const rawQty = item.quantity ?? item.returnQty ?? 0;
+          const numQty = typeof rawQty === 'number' || typeof rawQty === 'string' ? rawQty : 0;
+          const qty = D(numQty);
+          if (pid && qty.gt(0)) {
+            const unitCost = costMap.get(pid) ?? new Prisma.Decimal(0);
+            returnedCogs = returnedCogs.add(unitCost.mul(qty));
+          }
+        }
+      }
+
+      const cogsReturnJ = buildCogsReturnJournal({
+        cogsAmount: returnedCogs,
+        locationId: order.locationId,
+        orderNumber: order.orderNumber,
+      });
+
+      if (cogsReturnJ) {
+        await this.journals.postAutomatic(tx, {
+          tenantId: user.tenantId,
+          userId: user.userId,
+          locationId: order.locationId,
+          entryDate: ev.createdAt,
+          sourceType: cogsReturnJ.sourceType,
+          sourceId: ev.id,
+          description: cogsReturnJ.description,
+          lines: cogsReturnJ.lines,
+          taxFacts: [],
+        });
+      }
+    }
   }
 
   /**

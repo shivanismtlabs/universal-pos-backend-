@@ -495,6 +495,25 @@ export function buildCogsJournal(input: {
   };
 }
 
+export function buildCogsReturnJournal(input: {
+  cogsAmount: Money;
+  locationId?: string | null;
+  orderNumber: string;
+}): BuiltJournal | null {
+  if (isZero(input.cogsAmount)) return null;
+  const lines: DraftLine[] = [];
+  const loc = { locationId: input.locationId };
+  push(lines, MAP.inventory, 'debit', D(input.cogsAmount), loc);
+  push(lines, MAP.cogs, 'credit', D(input.cogsAmount), loc);
+  assertDoubleEntry(lines, 'COGS return journal');
+  return {
+    sourceType: 'INVENTORY_COGS_RETURN',
+    description: `COGS reversal ${input.orderNumber}`,
+    lines,
+    taxFacts: [],
+  };
+}
+
 export function reverseDraftLines(lines: DraftLine[]): DraftLine[] {
   return lines.map((l) => ({
     ...l,

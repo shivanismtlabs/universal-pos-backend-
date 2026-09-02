@@ -260,6 +260,10 @@ export class OrdersService {
           (i) => i.product?.name || i.description || 'Item',
         );
         const more = Math.max(0, o._count.items - productNames.length);
+        const metaObj =
+          o.meta && typeof o.meta === 'object' && !Array.isArray(o.meta)
+            ? (o.meta as Record<string, unknown>)
+            : {};
         return {
           ...o,
           store: o.location,
@@ -267,6 +271,9 @@ export class OrdersService {
           productSummary: productNames.join(', ') + (more > 0 ? ` +${more}` : ''),
           productNames,
           itemCount: o._count.items,
+          returnState: (typeof metaObj.returnState === 'string'
+            ? metaObj.returnState
+            : 'none') as string,
         };
       }),
       meta: pageMeta(total, page, limit),
@@ -321,6 +328,70 @@ export class OrdersService {
       },
     });
     if (!order) throw new NotFoundException('Order not found');
+
+    const completedReturnEvents = await this.prisma.returnEvent.findMany({
+      where: {
+        tenantId: user.tenantId,
+        orderId: order.id,
+        status: { in: ['completed', 'approved', 'processing'] },
+      },
+      select: { itemsJson: true },
+    });
+
+    const returnedQtyByLevel = new Map<string, number>();
+    let totalReturnedProductQty = 0;
+
+    for (const ev of completedReturnEvents) {
+      const arr = Array.isArray(ev.itemsJson)
+        ? (ev.itemsJson as Array<Record<string, unknown>>)
+        : [];
+      for (const item of arr) {
+        if (item.kind === 'replace') continue;
+        const levelId = typeof item.stockLevelId === 'string' ? item.stockLevelId : null;
+        const qty = Number(item.quantity ?? item.returnQty ?? 0);
+        if (levelId && qty > 0) {
+          returnedQtyByLevel.set(
+            levelId,
+            (returnedQtyByLevel.get(levelId) ?? 0) + qty,
+          );
+          totalReturnedProductQty += qty;
+        }
+      }
+    }
+
+    let totalProductQty = 0;
+    const enrichedItems = order.items.map((i) => {
+      const soldQty = Number(i.quantity);
+      if (i.itemKind === OrderItemKind.product) {
+        totalProductQty += soldQty;
+      }
+      const retQty = i.stockLevelId
+        ? (returnedQtyByLevel.get(i.stockLevelId) ?? 0)
+        : 0;
+      const remQty = Math.max(0, soldQty - retQty);
+      return {
+        ...i,
+        returnedQuantity: retQty,
+        remainingQuantity: remQty,
+      };
+    });
+
+    const metaObj =
+      order.meta && typeof order.meta === 'object' && !Array.isArray(order.meta)
+        ? (order.meta as Record<string, unknown>)
+        : {};
+
+    const computedReturnState =
+      totalReturnedProductQty <= 0
+        ? 'none'
+        : totalReturnedProductQty >= totalProductQty - 1e-6
+          ? 'fully_returned'
+          : 'partially_returned';
+
+    const returnState = (typeof metaObj.returnState === 'string'
+      ? metaObj.returnState
+      : computedReturnState) as 'none' | 'partially_returned' | 'fully_returned';
+
     const depositRequired = order.items.reduce((sum, i) => {
       const dep = i.stockUnit?.depositAmount;
       return sum + (dep != null ? Number(dep) : 0);
@@ -329,6 +400,8 @@ export class OrdersService {
     const depositDue = Math.max(0, depositRequired - depositCollected);
     return {
       ...order,
+      items: enrichedItems,
+      returnState,
       store: order.location,
       storeId: order.locationId,
       depositRequired: depositRequired.toFixed(2),

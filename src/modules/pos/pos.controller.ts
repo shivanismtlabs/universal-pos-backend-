@@ -41,6 +41,10 @@ import {
   CreateRefundReasonDto,
   ListSaleReturnsQueryDto,
   RejectSaleReturnDto,
+  CheckRentalAvailabilityDto,
+  RentalPickupDto,
+  RentalReturnSettleDto,
+  CancelRentalBookingDto,
   UpdateRentalProductDto,
   UpdateRentalUnitDto,
   RemoveSaleImageDto,
@@ -769,6 +773,67 @@ export class PosController {
     @Body() dto: ExtendRentalDto,
   ) {
     return this.rentalPos.extend(user, dto);
+  }
+
+  @Post('rental/check-availability')
+  @Roles(...RoleGroup.pos, Role.inventory)
+  @ApiOperation({
+    summary: 'Check rental availability with quantity and date overlap algorithm',
+  })
+  checkRentalAvailability(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CheckRentalAvailabilityDto,
+  ) {
+    return this.rentalPos.checkAvailability(user, dto);
+  }
+
+  @Post('rental/pickup')
+  @Roles(...RoleGroup.pos)
+  @ApiOperation({
+    summary: 'Pickup rental order: assign assets, record condition, transition to checked_out',
+  })
+  rentalPickup(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: RentalPickupDto,
+  ) {
+    return this.rentalPos.pickup(user, dto);
+  }
+
+  @Post('rental/return-settle')
+  @Roles(...RoleGroup.pos)
+  @ApiOperation({
+    summary: 'Complete return inspection, late/damage fee calculation, and deposit settlement',
+  })
+  rentalReturnSettle(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: RentalReturnSettleDto,
+  ) {
+    return this.rentalPos.returnSettle(user, dto);
+  }
+
+  @Post('rental/cancel')
+  @Roles(...RoleGroup.pos)
+  @ApiOperation({
+    summary: 'Cancel a rental booking, release inventory holds, and refund deposit',
+  })
+  rentalCancel(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CancelRentalBookingDto,
+  ) {
+    return this.rentalPos.cancel(user, dto);
+  }
+
+  @Get('rental/calendar')
+  @Roles(...RoleGroup.pos, Role.inventory)
+  @ApiOperation({
+    summary: 'Calendar timeline events for rental bookings, pickups, and return due dates',
+  })
+  rentalCalendar(
+    @CurrentUser() user: AuthUser,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.rentalPos.calendar(user, from, to);
   }
 
   @Post('checkout')

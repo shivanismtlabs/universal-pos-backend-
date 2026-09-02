@@ -476,11 +476,11 @@ export class AddSaleProductDto {
   @IsBoolean()
   trackInventory?: boolean;
 
-  /** Goods vs service (Zoho Type) */
-  @ApiPropertyOptional({ enum: ['goods', 'service'] })
+  /** Goods vs service vs rental (Zoho Type) */
+  @ApiPropertyOptional({ enum: ['goods', 'service', 'rental'] })
   @IsOptional()
-  @IsIn(['goods', 'service'])
-  itemType?: 'goods' | 'service';
+  @IsIn(['goods', 'service', 'rental'])
+  itemType?: 'goods' | 'service' | 'rental';
 
   @ApiPropertyOptional({
     example: 30,
@@ -957,11 +957,28 @@ export class AddRentalProductDto {
   @MaxLength(18)
   sku!: string;
 
-  @ApiProperty({ example: 800 })
+  @ApiPropertyOptional({ example: 800 })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
-  rentalPrice!: number;
+  rentalPrice?: number;
+
+  @ApiPropertyOptional({
+    enum: ['hour', 'day', 'week', 'month'],
+    default: 'day',
+    example: 'day',
+  })
+  @IsOptional()
+  @IsString()
+  ratePeriod?: string;
+
+  @ApiPropertyOptional({ example: 1, default: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  minDuration?: number;
 
   @ApiPropertyOptional({ example: 2000 })
   @IsOptional()
@@ -979,6 +996,13 @@ export class AddRentalProductDto {
   @IsNumber()
   @Min(0)
   lateFeePerDay?: number;
+
+  @ApiPropertyOptional({ example: 25, description: 'Late fee charged per hour' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  lateFeePerHour?: number;
 
   @ApiPropertyOptional({ example: true, description: 'When false, never auto-suggest late fees' })
   @IsOptional()
@@ -1002,11 +1026,40 @@ export class AddRentalProductDto {
   @Min(0)
   damageFeeDefault?: number;
 
-  @ApiProperty({ example: 'BC-001' })
+  @ApiPropertyOptional({ example: 5000, description: 'Asset replacement value' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  replacementValue?: number;
+
+  @ApiPropertyOptional({ example: true, default: true })
+  @IsOptional()
+  @IsBoolean()
+  canRent?: boolean;
+
+  @ApiPropertyOptional({ example: false, default: false })
+  @IsOptional()
+  @IsBoolean()
+  canSell?: boolean;
+
+  @ApiPropertyOptional({ example: 0, description: 'Selling price if dual sale+rental enabled' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  salePrice?: number;
+
+  @ApiPropertyOptional({ example: true, default: true })
+  @IsOptional()
+  @IsBoolean()
+  trackSerial?: boolean;
+
+  @ApiPropertyOptional({ example: 'BC-001' })
+  @IsOptional()
   @IsString()
-  @MinLength(1)
   @MaxLength(100)
-  barcode!: string;
+  barcode?: string;
 
   @ApiPropertyOptional({
     description: 'Variant (size, frame, length…) — alias: size',
@@ -1099,6 +1152,82 @@ export class UpdateRentalProductDto {
   @Min(0)
   rentalPrice?: number;
 
+  @ApiPropertyOptional({ enum: ['hour', 'day', 'week', 'month'] })
+  @IsOptional()
+  @IsString()
+  ratePeriod?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  minDuration?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  deposit?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  lateFeePerDay?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  lateFeePerHour?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  lateFeeEnabled?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  cleaningFee?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  damageFeeDefault?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  replacementValue?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  canRent?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  canSell?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  salePrice?: number;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
@@ -1126,10 +1255,196 @@ export class UpdateRentalUnitDto {
   @Min(0)
   deposit?: number;
 
+  @ApiPropertyOptional({ enum: ['available', 'reserved', 'checked_out', 'cleaning', 'repair', 'damaged', 'lost', 'retired'] })
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  @ApiPropertyOptional({ enum: ['brand_new', 'good', 'fair', 'needs_repair'] })
+  @IsOptional()
+  @IsString()
+  condition?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+}
+
+/** Check rental availability for a date/time window */
+export class CheckRentalAvailabilityDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  productId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  stockUnitId?: string;
+
+  @ApiProperty({ example: '2026-09-02T10:00:00.000Z' })
+  @IsString()
+  startDate!: string;
+
+  @ApiProperty({ example: '2026-09-04T18:00:00.000Z' })
+  @IsString()
+  endDate!: string;
+
+  @ApiPropertyOptional({ default: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  quantity?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
+}
+
+/** Pickup rental ticket: assign units, record condition, transition to active */
+export class RentalPickupDto {
+  @ApiProperty()
+  @IsUUID()
+  orderId!: string;
+
+  @ApiPropertyOptional({ type: [String], description: 'Optional explicit StockUnit IDs to assign' })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  stockUnitIds?: string[];
+
+  @ApiPropertyOptional({ example: 'good', description: 'Condition at pickup: good | fair' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  pickupCondition?: string;
+
+  @ApiPropertyOptional({ example: 'Includes power cable, remote, lens cap' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  accessories?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  pickupNotes?: string;
+}
+
+export class RentalReturnItemInspectionDto {
+  @ApiProperty()
+  @IsUUID()
+  stockUnitId!: string;
+
+  @ApiProperty({ enum: ['good', 'minor_damage', 'major_damage', 'missing', 'lost'] })
+  @IsString()
+  condition!: string;
+
+  @ApiPropertyOptional({ default: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  damageCharge?: number;
+
+  @ApiPropertyOptional({ default: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  missingCharge?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
+
+  @ApiPropertyOptional({ default: false })
+  @IsOptional()
+  @IsBoolean()
+  cleaningRequired?: boolean;
+}
+
+/** Complete return inspection, late fee calculation, and deposit settlement */
+export class RentalReturnSettleDto {
+  @ApiProperty()
+  @IsUUID()
+  orderId!: string;
+
+  @ApiProperty({ type: [RentalReturnItemInspectionDto] })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => RentalReturnItemInspectionDto)
+  items!: RentalReturnItemInspectionDto[];
+
+  @ApiPropertyOptional({ description: 'Override auto-calculated late fee' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  lateFeeOverride?: number;
+
+  @ApiPropertyOptional({ description: 'Total damage / repair charge to assess' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  damageCharges?: number;
+
+  @ApiPropertyOptional({ description: 'Amount of security deposit to refund to customer' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  depositRefundAmount?: number;
+
+  @ApiPropertyOptional({ description: 'Amount of deposit forfeited for damages/losses' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  depositForfeitAmount?: number;
+
+  @ApiPropertyOptional({ enum: PaymentMethod, default: PaymentMethod.cash })
+  @IsOptional()
+  @IsEnum(PaymentMethod)
+  refundMethod?: PaymentMethod;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  notes?: string;
+}
+
+/** Cancel a rental reservation and release holds */
+export class CancelRentalBookingDto {
+  @ApiProperty()
+  @IsUUID()
+  orderId!: string;
+
+  @ApiPropertyOptional({ example: 'Customer called to cancel event' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
+
+  @ApiPropertyOptional({ default: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  cancellationFee?: number;
+
+  @ApiPropertyOptional({ enum: PaymentMethod })
+  @IsOptional()
+  @IsEnum(PaymentMethod)
+  refundMethod?: PaymentMethod;
 }
 
 /** Swap unit on an open rental ticket */

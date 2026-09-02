@@ -108,6 +108,9 @@ import {
   buildTaxProfile,
   computeLineTax,
   resolveProductTaxRatePercent,
+  resolveProductTaxInclusive,
+  INDIAN_GST_STATES,
+  extractGstStateCode,
 } from '../../common/tax-engine';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
@@ -328,9 +331,10 @@ export class PosService {
     if (!loc) throw new NotFoundException('Location not found');
 
     const isService = dto.itemType === 'service';
+    const isRental = dto.itemType === 'rental';
     const trackInventory =
-      isService ? false : dto.trackInventory !== false;
-    const trackSerial = Boolean(dto.serialTracking) && !isService;
+      isService || isRental ? false : dto.trackInventory !== false;
+    const trackSerial = Boolean(dto.serialTracking) || isRental;
 
     let barcode = dto.barcode?.trim() || dto.upc?.trim() || null;
     let barcodeType: string | null = null;
@@ -361,15 +365,19 @@ export class PosService {
           photoUrl,
           kind: isService
             ? 'service'
-            : dto.isComposite
-              ? 'bundle'
-              : 'physical',
+            : isRental
+              ? 'rental'
+              : dto.isComposite
+                ? 'bundle'
+                : 'physical',
           fulfillmentMode: isService
             ? FulfillmentMode.service
-            : FulfillmentMode.sale,
+            : isRental
+              ? FulfillmentMode.rental
+              : FulfillmentMode.sale,
           trackQty: trackInventory,
           trackSerial,
-          trackBatch: Boolean(dto.batchTracking) && !isService,
+          trackBatch: Boolean(dto.batchTracking) && !isService && !isRental,
           basePrice: price,
           costPrice:
             dto.costPrice != null && Number.isFinite(dto.costPrice)
@@ -393,7 +401,7 @@ export class PosService {
           isActive: true,
           meta: {
             sellUnit,
-            itemType: isService ? 'service' : 'goods',
+            itemType: isService ? 'service' : isRental ? 'rental' : 'goods',
             itemStructure: dto.itemStructure === 'variants' ? 'variants' : 'single',
             ...(photoUrl ? { images: [photoUrl] } : {}),
             ...(isService &&
@@ -543,6 +551,31 @@ export class PosService {
           skipComponentExplosion: true,
         });
       }
+      if (isRental) {
+        const rentalUnitsCount = Math.max(1, Math.round(Number(dto.qty) || 1));
+        for (let u = 0; u < rentalUnitsCount; u++) {
+          const unitBarcode =
+            u === 0
+              ? (barcode || `${dto.sku.trim().toUpperCase()}-1`)
+              : `${dto.sku.trim().toUpperCase()}-${u + 1}`;
+          await this.prisma.stockUnit
+            .create({
+              data: {
+                tenantId: user.tenantId,
+                locationId,
+                productId: product.id,
+                barcodeSku: unitBarcode,
+                variantLabel: 'Standard',
+                condition: 'good',
+                status: 'available',
+                ownership: 'own',
+                depositAmount: Number(dto.costPrice ?? 0).toFixed(2),
+                meta: { rentalPrice: price },
+              },
+            })
+            .catch(() => null);
+        }
+      }
       await seedZeroStockAtOtherLocations(this.prisma, {
         tenantId: user.tenantId,
         productId: product.id,
@@ -687,6 +720,7 @@ export class PosService {
         }
 
         const isService = row.itemType === 'service';
+        const isRental = row.itemType === 'rental';
         const res = await this.addSaleProduct(user, {
           title: row.title,
           description: row.description,
@@ -703,10 +737,9 @@ export class PosService {
           costPrice: row.costPrice,
           reorderPoint: row.reorderPoint,
           hsnOrSac: row.hsnOrSac,
-          itemType: isService ? 'service' : 'goods',
+          itemType: isService ? 'service' : isRental ? 'rental' : 'goods',
           durationMinutes: row.durationMinutes,
-          // Services never track stock. Goods: count unless row opts out.
-          trackInventory: isService
+          trackInventory: isService || isRental
             ? false
             : row.trackInventory === false && !(Number(row.qty) > 0)
               ? false
@@ -2552,6 +2585,10 @@ export class PosService {
           taxCode: level.product.taxCode,
           meta: level.product.meta,
         });
+        const isProductInclusive = resolveProductTaxInclusive({
+          meta: level.product.meta,
+          storeDefault: taxProfile.inclusive,
+        });
         const unitPrice = calc
           ? calc.unitPrice
           : line.unitPrice !== undefined
@@ -2562,6 +2599,7 @@ export class PosService {
           : unitPrice.mul(qty);
         const taxed = computeLineTax(taxProfile, {
           lineGross,
+          inclusive: isProductInclusive,
           ...(productRatePct != null
             ? { rate: productRatePct / 100 }
             : {}),
@@ -2570,8 +2608,16 @@ export class PosService {
         const lineMeta: Record<string, unknown> = {
           taxRate:
             productRatePct != null ? productRatePct / 100 : taxProfile.rate,
-          taxInclusive: taxProfile.inclusive,
+          taxRatePercent:
+            productRatePct != null
+              ? productRatePct
+              : Number((taxProfile.rate * 100).toFixed(2)),
+          taxInclusive: isProductInclusive,
           taxCode: level.product.taxCode ?? null,
+          hsnOrSac:
+            (level.product.meta as Record<string, unknown>)?.hsnOrSac ??
+            level.product.taxCode ??
+            null,
           ...(line.variantId ? { variantId: line.variantId } : {}),
           ...(line.batchId ? { batchId: line.batchId } : {}),
           ...(line.serialNumber?.trim()
@@ -3134,6 +3180,10 @@ export class PosService {
           taxCode: level.product.taxCode,
           meta: level.product.meta,
         });
+        const isProductInclusive = resolveProductTaxInclusive({
+          meta: level.product.meta,
+          storeDefault: taxProfile.inclusive,
+        });
         const unitPrice = calc
           ? calc.unitPrice
           : line.unitPrice !== undefined
@@ -3144,6 +3194,7 @@ export class PosService {
           : unitPrice.mul(qty);
         const taxed = computeLineTax(taxProfile, {
           lineGross,
+          inclusive: isProductInclusive,
           ...(productRatePct != null
             ? { rate: productRatePct / 100 }
             : {}),
@@ -3154,8 +3205,16 @@ export class PosService {
         const lineMeta: Record<string, unknown> = {
           taxRate:
             productRatePct != null ? productRatePct / 100 : taxProfile.rate,
-          taxInclusive: taxProfile.inclusive,
+          taxRatePercent:
+            productRatePct != null
+              ? productRatePct
+              : Number((taxProfile.rate * 100).toFixed(2)),
+          taxInclusive: isProductInclusive,
           taxCode: level.product.taxCode ?? null,
+          hsnOrSac:
+            (level.product.meta as Record<string, unknown>)?.hsnOrSac ??
+            level.product.taxCode ??
+            null,
           ...(line.variantId ? { variantId: line.variantId } : {}),
           ...(line.batchId ? { batchId: line.batchId } : {}),
           ...(line.serialNumber?.trim()
@@ -4059,6 +4118,75 @@ export class PosService {
     const locEmail =
       typeof locSettings.email === 'string' ? locSettings.email.trim() : null;
 
+    const storeGstin = tenant?.taxId?.trim() || null;
+    const storeStateCode = extractGstStateCode(storeGstin) || '12';
+    const storeState = INDIAN_GST_STATES[storeStateCode] || 'Arunachal Pradesh';
+
+    const custMeta = (order.customer as unknown as { meta?: Record<string, unknown> })?.meta;
+    const customerGstin =
+      typeof custMeta?.gstin === 'string'
+        ? custMeta.gstin.trim()
+        : typeof meta.customerGstin === 'string'
+          ? (meta.customerGstin as string).trim()
+          : null;
+    const customerStateCode =
+      extractGstStateCode(customerGstin) ||
+      (typeof meta.placeOfSupplyCode === 'string' ? (meta.placeOfSupplyCode as string) : null) ||
+      storeStateCode;
+    const placeOfSupply =
+      INDIAN_GST_STATES[customerStateCode] ||
+      (typeof meta.placeOfSupply === 'string' ? (meta.placeOfSupply as string) : storeState);
+
+    const isInterState = Boolean(
+      customerStateCode && storeStateCode && customerStateCode !== storeStateCode,
+    );
+
+    const slabMap = new Map<number, { taxable: number; tax: number }>();
+    for (const item of order.items) {
+      const itemMeta =
+        item.meta && typeof item.meta === 'object'
+          ? (item.meta as Record<string, unknown>)
+          : {};
+      const ratePct =
+        typeof itemMeta.taxRatePercent === 'number'
+          ? itemMeta.taxRatePercent
+          : typeof itemMeta.taxRate === 'number'
+            ? Number((itemMeta.taxRate * 100).toFixed(2))
+            : 5;
+      const t = Number(item.taxAmount);
+      const l = Number(item.lineTotal);
+      if (t > 0 || l > 0) {
+        const cur = slabMap.get(ratePct) || { taxable: 0, tax: 0 };
+        slabMap.set(ratePct, {
+          taxable: cur.taxable + l,
+          tax: cur.tax + t,
+        });
+      }
+    }
+
+    const slabs = Array.from(slabMap.entries()).map(([ratePercent, val]) => {
+      const tax = Number(val.tax.toFixed(2));
+      const taxable = Number(val.taxable.toFixed(2));
+      const halfTax = Number((tax / 2).toFixed(2));
+      const halfRate = Number((ratePercent / 2).toFixed(2));
+      return {
+        ratePercent,
+        taxableAmount: taxable,
+        cgstRate: isInterState ? 0 : halfRate,
+        cgstAmount: isInterState ? 0 : halfTax,
+        sgstRate: isInterState ? 0 : halfRate,
+        sgstAmount: isInterState ? 0 : Number((tax - halfTax).toFixed(2)),
+        igstRate: isInterState ? ratePercent : 0,
+        igstAmount: isInterState ? tax : 0,
+        totalTax: tax,
+      };
+    });
+
+    const cgstTotal = slabs.reduce((s, x) => s + x.cgstAmount, 0);
+    const sgstTotal = slabs.reduce((s, x) => s + x.sgstAmount, 0);
+    const igstTotal = slabs.reduce((s, x) => s + x.igstAmount, 0);
+    const totalGstTax = Number((cgstTotal + sgstTotal + igstTotal).toFixed(2));
+
     return {
       orderId: order.id,
       orderNumber: order.orderNumber,
@@ -4072,7 +4200,10 @@ export class PosService {
         phone: locPhone,
         email: locEmail,
         shopName: tenant?.name ?? order.location.name,
-        taxId: tenant?.taxId ?? null,
+        taxId: storeGstin,
+        gstin: storeGstin,
+        state: storeState,
+        stateCode: storeStateCode,
       },
       location: order.location,
       customer: order.customer
@@ -4081,8 +4212,23 @@ export class PosService {
             fullName: order.customer.fullName,
             phone: order.customer.phone,
             email: order.customer.email,
+            gstin: customerGstin,
           }
         : null,
+      gstInfo: {
+        isInterState,
+        supplierGstin: storeGstin,
+        supplierState: storeState,
+        supplierStateCode: storeStateCode,
+        customerGstin,
+        placeOfSupply,
+        placeOfSupplyCode: customerStateCode,
+        cgstTotal,
+        sgstTotal,
+        igstTotal,
+        totalTax: totalGstTax,
+        slabs,
+      },
       cashier: cashier?.fullName ?? null,
       branding: {
         productName: branding.productName ?? tenant?.name ?? 'Universal POS',
@@ -4097,6 +4243,16 @@ export class PosService {
           item.meta && typeof item.meta === 'object'
             ? (item.meta as Record<string, unknown>)
             : {};
+        const isInc = itemMeta.taxInclusive === true;
+        const ratePct = (() => {
+          if (typeof itemMeta.taxRate === 'number') {
+            return Number((itemMeta.taxRate * 100).toFixed(4));
+          }
+          if (typeof itemMeta.taxRatePercent === 'number') {
+            return itemMeta.taxRatePercent;
+          }
+          return null;
+        })();
         return {
         id: item.id,
         itemType: item.itemKind,
@@ -4106,19 +4262,12 @@ export class PosService {
         unitPrice: item.unitPrice,
         taxAmount: item.taxAmount,
         lineTotal: item.lineTotal,
+        taxInclusive: isInc,
         taxCode:
           typeof itemMeta.taxCode === 'string'
             ? itemMeta.taxCode
             : (item.product?.taxCode ?? null),
-        taxRatePercent: (() => {
-          if (typeof itemMeta.taxRate === 'number') {
-            return Number((itemMeta.taxRate * 100).toFixed(4));
-          }
-          if (typeof itemMeta.taxRatePercent === 'number') {
-            return itemMeta.taxRatePercent;
-          }
-          return null;
-        })(),
+        taxRatePercent: ratePct,
         hsnOrSac:
           typeof itemMeta.hsnOrSac === 'string'
             ? itemMeta.hsnOrSac

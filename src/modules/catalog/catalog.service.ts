@@ -1553,6 +1553,56 @@ export class CatalogService {
     }
   }
 
+  async deleteAllProducts(user: AuthUser) {
+    const products = await this.prisma.product.findMany({
+      where: { tenantId: user.tenantId },
+      select: { id: true },
+    });
+    if (!products.length) {
+      return { ok: true, deletedCount: 0, archivedCount: 0, total: 0 };
+    }
+
+    let deletedCount = 0;
+    let archivedCount = 0;
+
+    for (const p of products) {
+      try {
+        const res = await this.deleteProduct(user, p.id);
+        if (res.deleted) {
+          deletedCount++;
+        } else {
+          archivedCount++;
+        }
+      } catch {
+        archivedCount++;
+      }
+    }
+
+    await this.prisma.auditLog
+      .create({
+        data: {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          entityType: 'product',
+          entityId: 'all',
+          action: 'catalog.products.purge_all',
+          beforeAfter: {
+            total: products.length,
+            deletedCount,
+            archivedCount,
+          } as Prisma.InputJsonValue,
+        },
+      })
+      .catch(() => null);
+
+    return {
+      ok: true,
+      deletedCount,
+      archivedCount,
+      total: products.length,
+    };
+  }
+
   qrForProduct(user: AuthUser, id: string) {
     return this.getProduct(user, id).then((p) => p.qr);
   }

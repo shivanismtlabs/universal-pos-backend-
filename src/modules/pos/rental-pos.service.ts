@@ -5,13 +5,18 @@ import {
 } from '@nestjs/common';
 import {
   FulfillmentMode,
+  InspectStatus,
   OrderKind,
+  OrderStatus,
+  PaymentMethod,
+  PaymentStatus,
   PaymentType,
   Prisma,
   ProductKind,
   ProductStatus,
   RentalOrderLifecycle,
   ReservationStatus,
+  StockUnitCondition,
   StockUnitStatus,
 } from '@prisma/client';
 import { saveProductImage } from '../../common/product-image';
@@ -35,6 +40,10 @@ import {
   UpdateRentalProductDto,
   UpdateRentalUnitDto,
   UploadSaleImageDto,
+  CheckRentalAvailabilityDto,
+  RentalPickupDto,
+  RentalReturnSettleDto,
+  CancelRentalBookingDto,
 } from './dto/pos.dto';
 import {
   BLOCKED_UNIT_STATUSES,
@@ -255,12 +264,22 @@ export class RentalPosService {
     if (!cat) throw new NotFoundException('Category not found');
 
     const variant = (dto.variant ?? dto.size)?.trim() || null;
+    const rentalPrice = Number(dto.rentalPrice ?? 0);
     const feeMeta = {
-      rentalPrice: Number(dto.rentalPrice),
+      rentalPrice,
+      ratePeriod: dto.ratePeriod || 'day',
+      minDuration: Number(dto.minDuration ?? 1),
+      deposit: Number(dto.deposit ?? 0),
       lateFeePerDay: Number(dto.lateFeePerDay ?? 0),
+      lateFeePerHour: Number(dto.lateFeePerHour ?? 0),
       lateFeeEnabled: dto.lateFeeEnabled !== false,
       cleaningFee: Number(dto.cleaningFee ?? 0),
       damageFeeDefault: Number(dto.damageFeeDefault ?? 0),
+      replacementValue: Number(dto.replacementValue ?? 0),
+      canRent: dto.canRent !== false,
+      canSell: Boolean(dto.canSell),
+      salePrice: Number(dto.salePrice ?? 0),
+      trackSerial: dto.trackSerial !== false,
     };
 
     try {
@@ -273,24 +292,28 @@ export class RentalPosService {
           description: dto.description?.trim() || null,
           kind: 'physical',
           fulfillmentMode: FulfillmentMode.rental,
-          trackQty: false,
-          trackSerial: true,
-          basePrice: Number(dto.rentalPrice),
+          trackQty: !feeMeta.trackSerial,
+          trackSerial: feeMeta.trackSerial,
+          canSell: feeMeta.canSell,
+          canPurchase: true,
+          basePrice: rentalPrice,
           meta: feeMeta,
         },
       });
+
+      const barcode = dto.barcode?.trim() ? dto.barcode.trim().toUpperCase() : `${product.skuCode}-001`;
       const unit = await this.prisma.stockUnit.create({
         data: {
           tenantId: user.tenantId,
           locationId,
           productId: product.id,
-          barcodeSku: dto.barcode.trim().toUpperCase(),
+          barcodeSku: barcode,
           variantLabel: variant,
           condition: 'good',
           status: StockUnitStatus.available,
           ownership: 'own',
           depositAmount: Number(dto.deposit ?? 0).toFixed(2),
-          meta: { rentalPrice: Number(dto.rentalPrice) },
+          meta: { rentalPrice },
         },
         include: {
           product: {
@@ -300,7 +323,7 @@ export class RentalPosService {
               skuCode: true,
               basePrice: true,
               photoUrl: true,
-            category: { select: { id: true, name: true } },
+              category: { select: { id: true, name: true } },
             },
           },
         },
@@ -313,6 +336,7 @@ export class RentalPosService {
           title: product.name,
           sku: product.skuCode,
           category: cat,
+          rentalConfig: feeMeta,
         },
         unit: this.mapUnit(unit),
       };
@@ -523,6 +547,45 @@ export class RentalPosService {
       if (!cat) throw new NotFoundException('Category not found');
     }
 
+    const existingMeta = ((product.meta as Record<string, unknown>) ?? {});
+    const newRentalPrice =
+      dto.rentalPrice !== undefined
+        ? Number(dto.rentalPrice)
+        : Number(product.basePrice);
+
+    const mergedMeta = {
+      ...existingMeta,
+      rentalPrice: newRentalPrice,
+      ...(dto.ratePeriod !== undefined ? { ratePeriod: dto.ratePeriod } : {}),
+      ...(dto.minDuration !== undefined
+        ? { minDuration: Number(dto.minDuration) }
+        : {}),
+      ...(dto.deposit !== undefined ? { deposit: Number(dto.deposit) } : {}),
+      ...(dto.lateFeePerDay !== undefined
+        ? { lateFeePerDay: Number(dto.lateFeePerDay) }
+        : {}),
+      ...(dto.lateFeePerHour !== undefined
+        ? { lateFeePerHour: Number(dto.lateFeePerHour) }
+        : {}),
+      ...(dto.lateFeeEnabled !== undefined
+        ? { lateFeeEnabled: dto.lateFeeEnabled }
+        : {}),
+      ...(dto.cleaningFee !== undefined
+        ? { cleaningFee: Number(dto.cleaningFee) }
+        : {}),
+      ...(dto.damageFeeDefault !== undefined
+        ? { damageFeeDefault: Number(dto.damageFeeDefault) }
+        : {}),
+      ...(dto.replacementValue !== undefined
+        ? { replacementValue: Number(dto.replacementValue) }
+        : {}),
+      ...(dto.canRent !== undefined ? { canRent: dto.canRent } : {}),
+      ...(dto.canSell !== undefined ? { canSell: dto.canSell } : {}),
+      ...(dto.salePrice !== undefined
+        ? { salePrice: Number(dto.salePrice) }
+        : {}),
+    };
+
     const updated = await this.prisma.product.update({
       where: { id: productId },
       data: {
@@ -532,9 +595,11 @@ export class RentalPosService {
           : {}),
         ...(dto.categoryId ? { categoryId: dto.categoryId } : {}),
         ...(dto.rentalPrice !== undefined
-          ? { basePrice: Number(dto.rentalPrice) }
+          ? { basePrice: newRentalPrice }
           : {}),
+        ...(dto.canSell !== undefined ? { canSell: dto.canSell } : {}),
         ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+        meta: mergedMeta,
       },
       include: {
         category: { select: { id: true, name: true } },
@@ -542,7 +607,7 @@ export class RentalPosService {
       },
     });
 
-    if (dto.rentalPrice !== undefined) {
+    if (dto.rentalPrice !== undefined || dto.deposit !== undefined) {
       const units = await this.prisma.stockUnit.findMany({
         where: { productId, tenantId: user.tenantId },
         select: { id: true, meta: true },
@@ -552,9 +617,12 @@ export class RentalPosService {
           this.prisma.stockUnit.update({
             where: { id: u.id },
             data: {
+              ...(dto.deposit !== undefined
+                ? { depositAmount: Number(dto.deposit).toFixed(2) }
+                : {}),
               meta: {
                 ...((u.meta as object) ?? {}),
-                rentalPrice: Number(dto.rentalPrice),
+                rentalPrice: newRentalPrice,
               },
             },
           }),
@@ -571,6 +639,7 @@ export class RentalPosService {
       isActive: updated.isActive,
       category: updated.category,
       unitCount: updated._count.stockUnits,
+      rentalConfig: mergedMeta,
       image: updated.photoUrl ?? null,
     };
   }
@@ -1289,6 +1358,600 @@ export class RentalPosService {
       balanceDue: refreshed.balanceDue,
       payment,
       lifecycle: refreshed.rentalExt?.lifecycle ?? lc,
+    };
+  }
+
+  /**
+   * Check rental availability across a date/time window.
+   * Enforces date overlap checks against existing held/checked_out reservations.
+   */
+  async checkAvailability(user: AuthUser, dto: CheckRentalAvailabilityDto) {
+    await this.assertRentalShop(user.tenantId);
+    const start = new Date(dto.startDate);
+    const end = new Date(dto.endDate);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) {
+      throw new BadRequestException('Invalid startDate or endDate');
+    }
+    const locationId = dto.locationId ?? (await this.defaultLocationId(user.tenantId));
+    if (!locationId) throw new BadRequestException('No location configured');
+
+    const requestedQty = Math.max(1, dto.quantity ?? 1);
+
+    const units = await this.prisma.stockUnit.findMany({
+      where: {
+        tenantId: user.tenantId,
+        locationId,
+        status: { notIn: BLOCKED_UNIT_STATUSES },
+        ...(dto.productId ? { productId: dto.productId } : {}),
+        ...(dto.stockUnitId ? { id: dto.stockUnitId } : {}),
+        product: { fulfillmentMode: FulfillmentMode.rental, isActive: true },
+      },
+      include: {
+        product: {
+          select: {
+            id: true,
+            name: true,
+            skuCode: true,
+            basePrice: true,
+            photoUrl: true,
+            meta: true,
+            category: { select: { id: true, name: true } },
+          },
+        },
+        reservations: {
+          where: {
+            status: {
+              in: [ReservationStatus.held, ReservationStatus.checked_out],
+            },
+            startDate: { lte: end },
+            endDate: { gte: start },
+          },
+          select: { id: true },
+        },
+      },
+      orderBy: { barcodeSku: 'asc' },
+      take: 200,
+    });
+
+    const availableUnits = units.filter((u) => u.reservations.length === 0);
+    const isAvailable = availableUnits.length >= requestedQty;
+
+    return {
+      available: isAvailable,
+      availableCount: availableUnits.length,
+      requestedQuantity: requestedQty,
+      startDate: start.toISOString(),
+      endDate: end.toISOString(),
+      items: availableUnits.map((u) => this.mapUnit(u)),
+    };
+  }
+
+  /**
+   * Pickup rental order: assign assets, record condition, transition to checked_out.
+   */
+  async pickup(user: AuthUser, dto: RentalPickupDto) {
+    await this.assertRentalShop(user.tenantId);
+    const order = await this.prisma.order.findFirst({
+      where: { id: dto.orderId, tenantId: user.tenantId, kind: OrderKind.rental },
+      include: {
+        rentalExt: true,
+        items: {
+          include: {
+            stockUnit: true,
+            product: true,
+          },
+        },
+      },
+    });
+    if (!order) throw new NotFoundException('Rental order not found');
+
+    const lc = order.rentalExt?.lifecycle;
+    if (
+      lc === RentalOrderLifecycle.checked_out ||
+      lc === RentalOrderLifecycle.returned ||
+      lc === RentalOrderLifecycle.closed ||
+      lc === RentalOrderLifecycle.cancelled
+    ) {
+      throw new BadRequestException(
+        `Order is already ${lc} — cannot pickup again`,
+      );
+    }
+
+    const pickupDate = order.rentalExt?.pickupDate ?? new Date();
+    const returnDue = order.rentalExt?.returnDueDate ?? new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await this.prisma.$transaction(async (tx) => {
+      // If explicit stockUnitIds provided, map them to lines
+      if (dto.stockUnitIds && dto.stockUnitIds.length > 0) {
+        for (let i = 0; i < dto.stockUnitIds.length; i++) {
+          const unitId = dto.stockUnitIds[i];
+          const item = order.items[i];
+          if (item && item.stockUnitId !== unitId) {
+            await tx.orderItem.update({
+              where: { id: item.id },
+              data: { stockUnitId: unitId },
+            });
+          }
+        }
+      }
+
+      // Transition units to checked_out and create/update reservations
+      const refreshedItems = await tx.orderItem.findMany({
+        where: { orderId: order.id, tenantId: user.tenantId },
+        include: { stockUnit: true },
+      });
+
+      for (const item of refreshedItems) {
+        if (item.stockUnitId) {
+          await tx.stockUnit.update({
+            where: { id: item.stockUnitId },
+            data: { status: StockUnitStatus.checked_out },
+          });
+
+          await tx.stockMovement.create({
+            data: {
+              tenantId: user.tenantId,
+              stockUnitId: item.stockUnitId,
+              fromStatus: item.stockUnit?.status ?? StockUnitStatus.available,
+              toStatus: StockUnitStatus.checked_out,
+              reason: 'rental.pickup',
+              actorUserId: user.userId,
+              orderId: order.id,
+            },
+          });
+
+          const existingRes = await tx.stockReservation.findFirst({
+            where: {
+              tenantId: user.tenantId,
+              orderItemId: item.id,
+              stockUnitId: item.stockUnitId,
+            },
+          });
+
+          if (existingRes) {
+            await tx.stockReservation.update({
+              where: { id: existingRes.id },
+              data: { status: ReservationStatus.checked_out },
+            });
+          } else {
+            await tx.stockReservation.create({
+              data: {
+                tenantId: user.tenantId,
+                stockUnitId: item.stockUnitId,
+                orderItemId: item.id,
+                startDate: pickupDate,
+                endDate: returnDue,
+                status: ReservationStatus.checked_out,
+              },
+            });
+          }
+        }
+      }
+
+      // Update Rental Order Lifecycle to checked_out
+      await tx.modRentalOrder.update({
+        where: { orderId: order.id },
+        data: {
+          lifecycle: RentalOrderLifecycle.checked_out,
+          pickupDate: new Date(),
+        },
+      });
+
+      // Update Order meta with pickup record
+      const currentMeta = (order.meta as Record<string, unknown>) ?? {};
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          status: OrderStatus.fulfilled,
+          meta: {
+            ...currentMeta,
+            pickupRecord: {
+              pickupAt: new Date().toISOString(),
+              pickedUpByUserId: user.userId,
+              pickupCondition: dto.pickupCondition || 'good',
+              accessories: dto.accessories || null,
+              notes: dto.pickupNotes || null,
+            },
+          },
+        },
+      });
+
+      await tx.outboxEvent.create({
+        data: {
+          tenantId: user.tenantId,
+          eventType: 'pos.rental.picked_up',
+          aggregateType: 'order',
+          aggregateId: order.id,
+          payload: {
+            orderId: order.id,
+            pickupDate: new Date().toISOString(),
+            condition: dto.pickupCondition || 'good',
+          },
+        },
+      });
+    });
+
+    return this.ordersService.getById(user, order.id);
+  }
+
+  /**
+   * Universal Return Inspection & Deposit Settlement.
+   * Inspects units, calculates late & damage charges, adjusts held deposit, and returns final balance.
+   */
+  async returnSettle(user: AuthUser, dto: RentalReturnSettleDto) {
+    await this.assertRentalShop(user.tenantId);
+    const order = await this.prisma.order.findFirst({
+      where: { id: dto.orderId, tenantId: user.tenantId, kind: OrderKind.rental },
+      include: {
+        rentalExt: true,
+        items: {
+          include: {
+            stockUnit: {
+              include: { product: { select: { meta: true, basePrice: true } } },
+            },
+          },
+        },
+        fees: true,
+        payments: true,
+      },
+    });
+    if (!order) throw new NotFoundException('Rental order not found');
+
+    const due = order.rentalExt?.returnDueDate ?? null;
+    const now = new Date();
+
+    // 1. Calculate Late Fee
+    let lateFee = 0;
+    if (dto.lateFeeOverride !== undefined && dto.lateFeeOverride >= 0) {
+      lateFee = dto.lateFeeOverride;
+    } else if (due && now.getTime() > new Date(due).getTime()) {
+      for (const item of order.items) {
+        const feeConfig = readRentalFeeConfig(item.stockUnit?.product?.meta);
+        const calc = calcLateFee({ returnDue: due, feeConfig, actualReturn: now });
+        if (calc.applicable) {
+          lateFee = Math.round((lateFee + calc.suggested) * 100) / 100;
+        }
+      }
+    }
+
+    // 2. Calculate Damage Charges from items
+    let totalDamageCharge = dto.damageCharges ?? 0;
+    for (const itemDto of dto.items ?? []) {
+      totalDamageCharge += Number(itemDto.damageCharge ?? 0) + Number(itemDto.missingCharge ?? 0);
+    }
+
+    const depositHeld = Number(order.depositTotal ?? 0);
+    const totalDeductions = lateFee + totalDamageCharge;
+    const autoRefund = Math.max(0, depositHeld - totalDeductions);
+    const refundAmount =
+      dto.depositRefundAmount !== undefined
+        ? Number(dto.depositRefundAmount)
+        : autoRefund;
+
+    await this.prisma.$transaction(async (tx) => {
+      // Process each returned unit
+      for (const itemInspection of dto.items ?? []) {
+        const unitId = itemInspection.stockUnitId;
+        const cond = itemInspection.condition;
+        const isDamaged = cond === 'minor_damage' || cond === 'major_damage';
+        const isLost = cond === 'missing' || cond === 'lost';
+        const isCleaning = itemInspection.cleaningRequired || false;
+
+        let nextStatus: StockUnitStatus = StockUnitStatus.available;
+        let nextCond: StockUnitCondition = StockUnitCondition.good;
+
+        if (isLost) {
+          nextStatus = StockUnitStatus.lost;
+          nextCond = StockUnitCondition.damaged;
+        } else if (isDamaged) {
+          nextStatus = StockUnitStatus.repair;
+          nextCond = StockUnitCondition.damaged;
+        } else if (isCleaning) {
+          nextStatus = StockUnitStatus.cleaning;
+          nextCond = StockUnitCondition.good;
+        }
+
+        // Release reservation
+        await tx.stockReservation.updateMany({
+          where: {
+            tenantId: user.tenantId,
+            stockUnitId: unitId,
+            status: { in: [ReservationStatus.held, ReservationStatus.checked_out] },
+          },
+          data: { status: ReservationStatus.released },
+        });
+
+        // Update unit status & condition
+        await tx.stockUnit.update({
+          where: { id: unitId },
+          data: { status: nextStatus, condition: nextCond },
+        });
+
+        // Record stock movement
+        await tx.stockMovement.create({
+          data: {
+            tenantId: user.tenantId,
+            stockUnitId: unitId,
+            fromStatus: StockUnitStatus.checked_out,
+            toStatus: nextStatus,
+            reason: `rental.returned:${cond}`,
+            actorUserId: user.userId,
+            orderId: order.id,
+          },
+        });
+
+        // Create return event
+        await tx.returnEvent.create({
+          data: {
+            tenantId: user.tenantId,
+            orderId: order.id,
+            stockUnitId: unitId,
+            receivedById: user.userId,
+            notes: itemInspection.notes || `Condition: ${cond}`,
+          },
+        });
+
+        // Create damage record if damaged or missing
+        if (isDamaged || (itemInspection.damageCharge && itemInspection.damageCharge > 0)) {
+          await tx.modRentalDamageRecord.create({
+            data: {
+              tenantId: user.tenantId,
+              stockUnitId: unitId,
+              inspectStatus: isDamaged ? InspectStatus.damaged : InspectStatus.clean_ready,
+              chargeAmount: Number(itemInspection.damageCharge ?? 0).toFixed(2),
+              notes: itemInspection.notes || `Condition: ${cond}`,
+            },
+          });
+        }
+
+        // Create cleaning job if needed
+        if (isCleaning) {
+          await tx.modRentalCleaningJob.create({
+            data: {
+              tenantId: user.tenantId,
+              stockUnitId: unitId,
+              status: 'queued',
+              notes: itemInspection.notes,
+            },
+          });
+        }
+      }
+
+      // Add Late Fee if applicable
+      if (lateFee > 0) {
+        await tx.orderFee.create({
+          data: {
+            tenantId: user.tenantId,
+            orderId: order.id,
+            feeCode: 'late_fee',
+            amount: lateFee.toFixed(2),
+            reason: 'Late return fee',
+          },
+        });
+      }
+
+      // Add Damage Fee if applicable
+      if (totalDamageCharge > 0) {
+        await tx.orderFee.create({
+          data: {
+            tenantId: user.tenantId,
+            orderId: order.id,
+            feeCode: 'damage',
+            amount: totalDamageCharge.toFixed(2),
+            reason: 'Damage / missing item assessment',
+          },
+        });
+      }
+
+      // Process Deposit Refund if amount > 0
+      if (refundAmount > 0) {
+        await tx.payment.create({
+          data: {
+            tenantId: user.tenantId,
+            orderId: order.id,
+            type: PaymentType.deposit_refund,
+            method: dto.refundMethod ?? PaymentMethod.cash,
+            status: PaymentStatus.succeeded,
+            amount: refundAmount.toFixed(2),
+            currencyCode: order.currencyCode,
+            idempotencyKey: `dep-ref-${order.id}-${Date.now()}`,
+          },
+        });
+      }
+
+      // Update Rental Order lifecycle to returned
+      await tx.modRentalOrder.update({
+        where: { orderId: order.id },
+        data: { lifecycle: RentalOrderLifecycle.returned },
+      });
+
+      // Recalculate totals
+      await this.ordersService.recalculateTotals(tx, user.tenantId, order.id);
+
+      // Record audit outbox
+      await tx.outboxEvent.create({
+        data: {
+          tenantId: user.tenantId,
+          eventType: 'pos.rental.return_settled',
+          aggregateType: 'order',
+          aggregateId: order.id,
+          payload: {
+            orderId: order.id,
+            lateFee,
+            totalDamageCharge,
+            refundAmount,
+            returnedAt: now.toISOString(),
+          },
+        },
+      });
+    });
+
+    return this.ordersService.getById(user, order.id);
+  }
+
+  /**
+   * Cancel a rental booking and release all holds.
+   */
+  async cancel(user: AuthUser, dto: CancelRentalBookingDto) {
+    await this.assertRentalShop(user.tenantId);
+    const order = await this.prisma.order.findFirst({
+      where: { id: dto.orderId, tenantId: user.tenantId, kind: OrderKind.rental },
+      include: {
+        rentalExt: true,
+        items: { include: { stockUnit: true } },
+        payments: true,
+      },
+    });
+    if (!order) throw new NotFoundException('Rental order not found');
+
+    const lc = order.rentalExt?.lifecycle;
+    if (lc === RentalOrderLifecycle.checked_out) {
+      throw new BadRequestException('Cannot cancel an active rental that is already checked out. Please process a return.');
+    }
+    if (lc === RentalOrderLifecycle.cancelled || order.status === OrderStatus.cancelled) {
+      throw new BadRequestException('Order is already cancelled');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      // Release all reservations
+      for (const item of order.items) {
+        if (item.stockUnitId) {
+          await tx.stockReservation.updateMany({
+            where: {
+              tenantId: user.tenantId,
+              stockUnitId: item.stockUnitId,
+              status: { in: [ReservationStatus.held, ReservationStatus.checked_out] },
+            },
+            data: { status: ReservationStatus.released },
+          });
+
+          await tx.stockUnit.update({
+            where: { id: item.stockUnitId },
+            data: { status: StockUnitStatus.available },
+          });
+        }
+      }
+
+      // Add cancellation fee if specified
+      if (dto.cancellationFee && dto.cancellationFee > 0) {
+        await tx.orderFee.create({
+          data: {
+            tenantId: user.tenantId,
+            orderId: order.id,
+            feeCode: 'cancellation',
+            amount: Number(dto.cancellationFee).toFixed(2),
+            reason: dto.reason || 'Booking cancellation fee',
+          },
+        });
+      }
+
+      // Update lifecycle and order status
+      await tx.modRentalOrder.update({
+        where: { orderId: order.id },
+        data: { lifecycle: RentalOrderLifecycle.cancelled },
+      });
+
+      const currentMeta = (order.meta as Record<string, unknown>) ?? {};
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          status: OrderStatus.cancelled,
+          meta: {
+            ...currentMeta,
+            cancelledRecord: {
+              cancelledAt: new Date().toISOString(),
+              cancelledByUserId: user.userId,
+              reason: dto.reason || 'Cancelled by staff',
+              cancellationFee: dto.cancellationFee ?? 0,
+            },
+          },
+        },
+      });
+
+      await tx.outboxEvent.create({
+        data: {
+          tenantId: user.tenantId,
+          eventType: 'pos.rental.cancelled',
+          aggregateType: 'order',
+          aggregateId: order.id,
+          payload: {
+            orderId: order.id,
+            reason: dto.reason,
+            cancellationFee: dto.cancellationFee,
+          },
+        },
+      });
+    });
+
+    return this.ordersService.getById(user, order.id);
+  }
+
+  /**
+   * Calendar timeline events for rental bookings, pickups, and return due dates.
+   */
+  async calendar(user: AuthUser, from?: string, to?: string) {
+    await this.assertRentalShop(user.tenantId);
+    const startDate = from ? new Date(from) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const endDate = to ? new Date(to) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    const orders = await this.prisma.order.findMany({
+      where: {
+        tenantId: user.tenantId,
+        kind: OrderKind.rental,
+        rentalExt: {
+          OR: [
+            { pickupDate: { gte: startDate, lte: endDate } },
+            { returnDueDate: { gte: startDate, lte: endDate } },
+            { lifecycle: { in: [RentalOrderLifecycle.checked_out, RentalOrderLifecycle.reserved, RentalOrderLifecycle.quote] } },
+          ],
+        },
+      },
+      include: {
+        customer: { select: { id: true, fullName: true, phone: true } },
+        rentalExt: true,
+        items: {
+          include: {
+            stockUnit: { select: { id: true, barcodeSku: true, variantLabel: true } },
+            product: { select: { id: true, name: true, skuCode: true } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+
+    const now = Date.now();
+    return {
+      from: startDate.toISOString(),
+      to: endDate.toISOString(),
+      events: orders.map((o) => {
+        const pickup = o.rentalExt?.pickupDate ?? o.createdAt;
+        const returnDue = o.rentalExt?.returnDueDate ?? pickup;
+        const isOverdue =
+          o.rentalExt?.lifecycle === RentalOrderLifecycle.checked_out &&
+          new Date(returnDue).getTime() < now;
+
+        return {
+          id: o.id,
+          orderId: o.id,
+          orderNumber: o.orderNumber,
+          customerName: o.customer?.fullName ?? 'Walk-in',
+          customerPhone: o.customer?.phone ?? null,
+          pickupDate: pickup,
+          returnDueDate: returnDue,
+          lifecycle: o.rentalExt?.lifecycle ?? 'quote',
+          status: o.status,
+          isOverdue,
+          totalAmount: o.subtotal,
+          balanceDue: o.balanceDue,
+          items: o.items.map((it) => ({
+            name: it.product?.name ?? it.description ?? 'Rental Item',
+            sku: it.product?.skuCode ?? null,
+            barcode: it.stockUnit?.barcodeSku ?? null,
+            quantity: Number(it.quantity),
+          })),
+        };
+      }),
     };
   }
 

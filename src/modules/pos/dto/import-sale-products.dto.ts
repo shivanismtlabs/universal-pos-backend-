@@ -110,12 +110,12 @@ export class ImportSaleProductRowDto {
   trackInventory?: boolean;
 
   @ApiPropertyOptional({
-    enum: ['goods', 'service'],
-    description: 'CSV column type / item_type / kind — service vs goods',
+    enum: ['goods', 'service', 'rental'],
+    description: 'CSV column type / item_type / kind — service vs goods vs rental',
   })
   @IsOptional()
-  @IsIn(['goods', 'service'])
-  itemType?: 'goods' | 'service';
+  @IsIn(['goods', 'service', 'rental'])
+  itemType?: 'goods' | 'service' | 'rental';
 
   @ApiPropertyOptional({
     example: 30,

@@ -120,7 +120,7 @@ export class IamAttendanceService {
       },
     });
     await this.audit(user, created.id, 'attendance.clock_in', {
-      after: this.slim(created),
+      after: this.slim(created, tz),
     });
     return this.mapRow(
       await this.prisma.attendanceEntry.findFirstOrThrow({
@@ -142,6 +142,7 @@ export class IamAttendanceService {
       orderBy: { clockInAt: 'desc' },
     });
     if (!open) throw new BadRequestException('Not clocked in');
+    const tz = await this.tenantTimezone(user.tenantId);
     const updated = await this.prisma.attendanceEntry.update({
       where: { id: open.id },
       data: {
@@ -152,10 +153,9 @@ export class IamAttendanceService {
       include: this.include(),
     });
     await this.audit(user, updated.id, 'attendance.clock_out', {
-      before: this.slim(open),
-      after: this.slim(updated),
+      before: this.slim(open, tz),
+      after: this.slim(updated, tz),
     });
-    const tz = await this.tenantTimezone(user.tenantId);
     return this.mapRow(updated, tz);
   }
 
@@ -265,7 +265,7 @@ export class IamAttendanceService {
       include: this.include(),
     });
     await this.audit(user, created.id, 'attendance.created', {
-      after: this.slim(created),
+      after: this.slim(created, tz),
     });
     return this.mapRow(created, tz);
   }
@@ -342,8 +342,8 @@ export class IamAttendanceService {
       include: this.include(),
     });
     await this.audit(user, id, 'attendance.updated', {
-      before: this.slim(existing),
-      after: this.slim(updated),
+      before: this.slim(existing, tz),
+      after: this.slim(updated, tz),
       reason: dto.correctionReason.trim(),
     });
     return this.mapRow(updated, tz);
@@ -383,10 +383,11 @@ export class IamAttendanceService {
 
   async remove(user: AuthUser, id: string) {
     this.assertManage(user);
+    const tz = await this.tenantTimezone(user.tenantId);
     const existing = await this.requireEntry(user, id);
     await this.prisma.attendanceEntry.delete({ where: { id } });
     await this.audit(user, id, 'attendance.deleted', {
-      before: this.slim(existing),
+      before: this.slim(existing, tz),
     });
     return { ok: true };
   }
@@ -554,22 +555,25 @@ export class IamAttendanceService {
     return dbStatus;
   }
 
-  private slim(r: {
-    id: string;
-    userId: string;
-    workDate?: Date | null;
-    shiftId?: string | null;
-    clockInAt?: Date | null;
-    clockOutAt?: Date | null;
-    breakMinutes?: number;
-    status?: string;
-    method?: string;
-    notes?: string | null;
-  }) {
+  private slim(
+    r: {
+      id: string;
+      userId: string;
+      workDate?: Date | null;
+      shiftId?: string | null;
+      clockInAt?: Date | null;
+      clockOutAt?: Date | null;
+      breakMinutes?: number;
+      status?: string;
+      method?: string;
+      notes?: string | null;
+    },
+    timeZone: string,
+  ) {
     return {
       id: r.id,
       userId: r.userId,
-      workDate: r.workDate ? ymdFromDate(r.workDate) : null,
+      workDate: r.workDate ? ymdFromDate(r.workDate, timeZone) : null,
       shiftId: r.shiftId ?? null,
       clockInAt: r.clockInAt ?? null,
       clockOutAt: r.clockOutAt ?? null,

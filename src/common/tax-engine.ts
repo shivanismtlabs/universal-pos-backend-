@@ -101,7 +101,7 @@ export function ensureTenantTaxSettings(
   root.tax = {
     ...prev,
     ratePercent: taxMode === TaxMode.none ? 0 : ratePercent,
-    inclusive: taxMode === TaxMode.in_gst ? false : parsed.inclusive === true,
+    inclusive: parsed.inclusive === true,
     ...(typeof prev.receiptFooter === 'string'
       ? { receiptFooter: prev.receiptFooter }
       : typeof parsed.receiptFooter === 'string'
@@ -139,9 +139,7 @@ export function buildTaxProfile(input: {
     taxMode: input.taxMode,
     taxId: input.taxId ?? null,
     rate,
-    // India GST: listed catalog price is exclusive — CGST/SGST added on due.
-    inclusive:
-      input.taxMode === TaxMode.in_gst ? false : parsed.inclusive === true,
+    inclusive: parsed.inclusive === true,
     receiptFooter:
       typeof taxBag.receiptFooter === 'string'
         ? taxBag.receiptFooter
@@ -153,10 +151,11 @@ export function buildTaxProfile(input: {
 
 /** Compute net lineTotal + taxAmount for one cart line.
  * Optional `rate` overrides the tenant profile rate (product-level GST %).
+ * Optional `inclusive` overrides whether line gross already includes tax.
  */
 export function computeLineTax(
   profile: TaxProfile,
-  input: LineTaxInput & { rate?: number },
+  input: LineTaxInput & { rate?: number; inclusive?: boolean },
 ): LineTaxResult {
   const gross = money(input.lineGross);
   const rate =
@@ -168,7 +167,10 @@ export function computeLineTax(
     return { lineTotal: gross, taxAmount: money(0) };
   }
 
-  if (profile.inclusive) {
+  const isInclusive =
+    input.inclusive !== undefined ? input.inclusive : profile.inclusive;
+
+  if (isInclusive) {
     // gross includes tax: net = gross / (1+r), tax = gross - net
     const divisor = money(1).add(rate);
     const net = gross.div(divisor).toDecimalPlaces(2);
@@ -190,7 +192,7 @@ export function resolveProductTaxRatePercent(input: {
     input.meta && typeof input.meta === 'object' && !Array.isArray(input.meta)
       ? (input.meta as Record<string, unknown>)
       : {};
-  if (meta.taxPreference === 'non_taxable') return 0;
+  if (meta.taxPreference === 'non_taxable' || meta.taxPreference === 'exempt') return 0;
   if (
     typeof meta.taxRatePercent === 'number' &&
     Number.isFinite(meta.taxRatePercent)
@@ -224,6 +226,71 @@ export function resolveProductTaxRatePercent(input: {
   }
 
   return null;
+}
+
+/** Resolve whether product is tax-inclusive from meta or taxPreference */
+export function resolveProductTaxInclusive(input: {
+  meta?: unknown;
+  storeDefault?: boolean;
+}): boolean {
+  const meta =
+    input.meta && typeof input.meta === 'object' && !Array.isArray(input.meta)
+      ? (input.meta as Record<string, unknown>)
+      : {};
+  if (meta.taxPreference === 'inclusive' || meta.taxInclusive === true) {
+    return true;
+  }
+  if (meta.taxPreference === 'taxable' || meta.taxPreference === 'exclusive' || meta.taxInclusive === false) {
+    return false;
+  }
+  return input.storeDefault === true;
+}
+
+/** Indian State GST Code Mapping (01 to 38) */
+export const INDIAN_GST_STATES: Record<string, string> = {
+  '01': 'Jammu and Kashmir',
+  '02': 'Himachal Pradesh',
+  '03': 'Punjab',
+  '04': 'Chandigarh',
+  '05': 'Uttarakhand',
+  '06': 'Haryana',
+  '07': 'Delhi',
+  '08': 'Rajasthan',
+  '09': 'Uttar Pradesh',
+  '10': 'Bihar',
+  '11': 'Sikkim',
+  '12': 'Arunachal Pradesh',
+  '13': 'Nagaland',
+  '14': 'Manipur',
+  '15': 'Mizoram',
+  '16': 'Tripura',
+  '17': 'Meghalaya',
+  '18': 'Assam',
+  '19': 'West Bengal',
+  '20': 'Jharkhand',
+  '21': 'Odisha',
+  '22': 'Chhattisgarh',
+  '23': 'Madhya Pradesh',
+  '24': 'Gujarat',
+  '26': 'Dadra & Nagar Haveli and Daman & Diu',
+  '27': 'Maharashtra',
+  '29': 'Karnataka',
+  '30': 'Goa',
+  '31': 'Lakshadweep',
+  '32': 'Kerala',
+  '33': 'Tamil Nadu',
+  '34': 'Puducherry',
+  '35': 'Andaman and Nicobar Islands',
+  '36': 'Telangana',
+  '37': 'Andhra Pradesh',
+  '38': 'Ladakh',
+  '97': 'Other Territory',
+};
+
+export function extractGstStateCode(gstin?: string | null): string | null {
+  if (!gstin || typeof gstin !== 'string') return null;
+  const match = gstin.trim().match(/^(\d{2})[A-Z0-9]{13}$/i);
+  return match ? match[1] : null;
 }
 
 /** Invoice breakdown from order subtotal (net) using profile rate. */

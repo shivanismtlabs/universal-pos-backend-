@@ -377,6 +377,13 @@ export class CatalogController {
     return this.catalog.duplicateProduct(user, id);
   }
 
+  @Delete('products/purge/all')
+  @Roles(...RoleGroup.catalogWrite)
+  @HttpCode(200)
+  deleteAllProducts(@CurrentUser() user: AuthUser) {
+    return this.catalog.deleteAllProducts(user);
+  }
+
   @Delete('products/:id')
   @Roles(...RoleGroup.catalogWrite)
   @HttpCode(200)

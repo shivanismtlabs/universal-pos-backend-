@@ -15,11 +15,41 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ProductKind, ProductStatus } from '@prisma/client';
 import { PaginationQueryDto } from '../../../common/dto/pagination.dto';
+
+export class ProductUnitInputDto {
+  @ApiProperty()
+  @IsUUID()
+  unitId!: string;
+
+  @ApiProperty({ description: '1 of this unit = N of product base unit' })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.00000001)
+  conversionToBase!: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  fixedPrice?: number | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isDefaultSellingUnit?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isPurchaseUnit?: boolean;
+}
 
 export class CreateBrandDto {
   @ApiProperty()
@@ -265,6 +295,38 @@ export class CreateCatalogProductDto {
   @MaxLength(16)
   unitOfMeasure?: string;
 
+  @ApiPropertyOptional({ description: 'Unit master id (base / inventory unit)' })
+  @IsOptional()
+  @IsUUID()
+  baseUnitId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  pricingUnitId?: string | null;
+
+  @ApiPropertyOptional({ enum: ['converted', 'fixed_tier'] })
+  @IsOptional()
+  @IsIn(['converted', 'fixed_tier'])
+  pricingStrategy?: 'converted' | 'fixed_tier';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  pricePerPricingUnit?: number;
+
+  @ApiPropertyOptional({
+    description: 'Selling/purchase unit rows (product_units)',
+    type: [ProductUnitInputDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ProductUnitInputDto)
+  productUnits?: ProductUnitInputDto[];
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
@@ -300,11 +362,15 @@ export class CreateCatalogProductDto {
   @IsUUID()
   locationId?: string;
 
-  @ApiPropertyOptional({ description: 'Opening stock at default location (qty-tracked only; min 1)' })
+  @ApiPropertyOptional({
+    description:
+      'Opening stock at default location (qty-tracked only). Omit or 0 = start at zero Stock on Hand.',
+  })
   @IsOptional()
+  @ValidateIf((_, v) => v !== '' && v != null)
   @Type(() => Number)
   @IsNumber()
-  @Min(1)
+  @Min(0, { message: 'Opening quantity cannot be negative' })
   openingQty?: number;
 
   @ApiPropertyOptional({
@@ -437,6 +503,35 @@ export class UpdateCatalogProductDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsUUID()
+  baseUnitId?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  pricingUnitId?: string | null;
+
+  @ApiPropertyOptional({ enum: ['converted', 'fixed_tier'] })
+  @IsOptional()
+  @IsIn(['converted', 'fixed_tier'])
+  pricingStrategy?: 'converted' | 'fixed_tier';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  pricePerPricingUnit?: number | null;
+
+  @ApiPropertyOptional({ type: [ProductUnitInputDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ProductUnitInputDto)
+  productUnits?: ProductUnitInputDto[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsBoolean()
   trackInventory?: boolean;
 
@@ -464,6 +559,16 @@ export class UpdateCatalogProductDto {
   @IsOptional()
   @IsBoolean()
   availableInPos?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Low-stock alert qty — updates product meta + stock levels',
+  })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  reorderPoint?: number | null;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -510,7 +615,10 @@ export class ListCatalogQueryDto extends PaginationQueryDto {
   @IsUUID()
   locationId?: string;
 
-  @ApiPropertyOptional({ description: 'Filter items at or below default reorder (5)' })
+  @ApiPropertyOptional({
+    description:
+      'Filter items at or below default reorder (5), including zero stock',
+  })
   @IsOptional()
   @IsIn(['true', 'false', '1', '0'])
   lowStock?: string;

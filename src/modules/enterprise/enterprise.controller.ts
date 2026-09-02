@@ -134,11 +134,17 @@ export class EnterpriseController {
   }
 
   @Get('approvals')
-  approvalsList(
+  async approvalsList(
     @CurrentEnterprise() p: EnterprisePrincipal,
     @Query('status') status?: string,
   ) {
-    return this.approvals.listGroup(p.groupId, status);
+    const visible =
+      p.groupRole === 'owner' ||
+      p.groupRole === 'finance' ||
+      p.groupRole === 'auditor'
+        ? await this.groups.allTenantIdsInGroup(p.groupId)
+        : p.tenantIds;
+    return this.approvals.listGroup(p.groupId, status, visible);
   }
 
   @Post('approvals/:id/decide')

@@ -101,7 +101,7 @@ export function ensureTenantTaxSettings(
   root.tax = {
     ...prev,
     ratePercent: taxMode === TaxMode.none ? 0 : ratePercent,
-    inclusive: parsed.inclusive === true,
+    inclusive: taxMode === TaxMode.in_gst ? false : parsed.inclusive === true,
     ...(typeof prev.receiptFooter === 'string'
       ? { receiptFooter: prev.receiptFooter }
       : typeof parsed.receiptFooter === 'string'
@@ -139,7 +139,9 @@ export function buildTaxProfile(input: {
     taxMode: input.taxMode,
     taxId: input.taxId ?? null,
     rate,
-    inclusive: parsed.inclusive === true,
+    // India GST: listed catalog price is exclusive — CGST/SGST added on due.
+    inclusive:
+      input.taxMode === TaxMode.in_gst ? false : parsed.inclusive === true,
     receiptFooter:
       typeof taxBag.receiptFooter === 'string'
         ? taxBag.receiptFooter

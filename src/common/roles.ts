@@ -8,6 +8,7 @@ export const Role = {
   accountant: 'accountant',
   captain: 'captain',
   kitchen: 'kitchen',
+  staff: 'staff',
 } as const;
 
 export type RoleCode = (typeof Role)[keyof typeof Role];
@@ -21,6 +22,7 @@ export const RoleGroup = {
     Role.fitter,
     Role.inventory,
     Role.accountant,
+    Role.staff,
     Role.captain,
     Role.kitchen,
   ] as string[],

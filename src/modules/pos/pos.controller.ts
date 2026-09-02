@@ -242,10 +242,12 @@ export class PosController {
   listRecentSales(
     @CurrentUser() user: AuthUser,
     @Query('limit') limit?: string,
+    @Query('locationId') locationId?: string,
   ) {
     return this.posService.listRecentSales(
       user,
       limit ? Number(limit) : undefined,
+      locationId,
     );
   }
 
@@ -654,6 +656,18 @@ export class PosController {
       productId,
       locationId,
     });
+  }
+
+  @Get('rental/orders/:orderId/late-fee-preview')
+  @Roles(...RoleGroup.pos, Role.inventory, Role.manager, Role.admin)
+  @ApiOperation({
+    summary: 'Preview late fee for a rental ticket (no charge)',
+  })
+  lateFeePreview(
+    @CurrentUser() user: AuthUser,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    return this.rentalPos.lateFeePreview(user, orderId);
   }
 
   @Get('rental/units')

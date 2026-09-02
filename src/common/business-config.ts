@@ -292,6 +292,19 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
     metaFields: [
       {
         entity: 'item',
+        key: 'foodType',
+        label: 'Diet tag',
+        type: 'select',
+        required: false,
+        hint: 'Optional veg / non-veg marker for menus — leave blank if not needed',
+        options: [
+          { value: 'veg', label: 'Veg' },
+          { value: 'non_veg', label: 'Non-veg' },
+          { value: 'egg', label: 'Egg' },
+        ],
+      },
+      {
+        entity: 'item',
         key: 'kitchenStation',
         label: 'Kitchen station',
         type: 'select',
@@ -568,7 +581,8 @@ export const BUSINESS_CONFIG_REGISTRY: Record<string, BusinessConfig> = {
       },
     ],
     gettingStartedHints: [
-      'Enable rental mode and track units as available / rented / damaged',
+      'Add rental units with size barcodes on Dashboard → Rent → Stock',
+      'Sell accessories on Counter · Sell; rent outfits on Counter · Rent',
       'Collect deposits separately from rental charges',
     ],
     defaultCapabilities: BUSINESS_TYPE_CAPABILITY_DEFAULTS.rental,

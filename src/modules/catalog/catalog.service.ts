@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import {
   FulfillmentMode,
+  PricingStrategy,
   Prisma,
   ProductKind,
   ProductStatus,
@@ -12,6 +13,10 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../database/database.module';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
+import {
+  normalizeQty,
+  validateSellQty,
+} from '../../common/sell-units';
 import {
   BARCODE_TYPE_CODE128,
   detectBarcodeType,
@@ -26,6 +31,7 @@ import { resolveProductTaxRatePercent } from '../../common/tax-engine';
 import { listSafeImageUrl } from '../../common/product-image';
 import { StockMutationEngine } from '../inventory/stock-mutation.engine';
 import { isRecipePurpose } from '../restaurant/restaurant-policy';
+import { UnitPricingService } from './unit-pricing.service';
 import type { AuthUser } from '../auth/types';
 import {
   CreateBatchDto,
@@ -108,6 +114,7 @@ function mapProduct(p: {
   qrCode: string | null;
   internalCode: string | null;
   kind: ProductKind;
+  fulfillmentMode: FulfillmentMode;
   status: ProductStatus;
   shortDescription: string | null;
   description: string | null;
@@ -145,6 +152,20 @@ function mapProduct(p: {
     .filter((u): u is string => Boolean(u));
   const cover = listSafeImageUrl(p.photoUrl) ?? images[0] ?? null;
   const metaOut = { ...meta, images };
+  const foodTypeRaw = String(meta.foodType ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  const foodType =
+    foodTypeRaw === 'veg' || foodTypeRaw === 'vegetarian'
+      ? 'veg'
+      : foodTypeRaw === 'non_veg' ||
+          foodTypeRaw === 'nonveg' ||
+          foodTypeRaw === 'non_vegetarian'
+        ? 'non_veg'
+        : foodTypeRaw === 'egg' || foodTypeRaw === 'eggetarian'
+          ? 'egg'
+          : null;
   return {
     id: p.id,
     name: p.name,
@@ -156,6 +177,7 @@ function mapProduct(p: {
     qrCode: p.qrCode,
     internalCode: p.internalCode,
     kind: p.kind,
+    fulfillmentMode: p.fulfillmentMode,
     productType: p.kind,
     status: p.status,
     shortDescription: p.shortDescription,
@@ -179,14 +201,16 @@ function mapProduct(p: {
     brandId: p.brandId,
     category: p.category ?? null,
     brand: p.brand ?? null,
+    foodType,
     meta: metaOut,
     counts: {
       variants: p._count?.variants ?? 0,
       batches: p._count?.batches ?? 0,
       bundleLines: p._count?.bundleComponents ?? 0,
     },
-    stockOnHand:
-      p.stockLevels?.[0] != null ? Number(p.stockLevels[0].qtyOnHand) : null,
+    stockOnHand: p.stockLevels?.length
+      ? p.stockLevels.reduce((sum, s) => sum + Number(s.qtyOnHand), 0)
+      : null,
     sellUnit: p.stockLevels?.[0]?.sellUnit ?? p.unitOfMeasure,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
@@ -198,6 +222,7 @@ export class CatalogService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stock: StockMutationEngine,
+    private readonly unitPricing: UnitPricingService,
   ) {}
 
   // ── Brands ──────────────────────────────────────────────────────────────
@@ -472,10 +497,39 @@ export class CatalogService {
 
   // ── Products (catalog master) ───────────────────────────────────────────
 
+  /** Prefer MAIN, else oldest active location — same branch Items list uses for SOH. */
+  private async resolveDefaultLocationId(
+    tenantId: string,
+    preferredId?: string | null,
+  ): Promise<string | null> {
+    if (preferredId) {
+      const hit = await this.prisma.location.findFirst({
+        where: { id: preferredId, tenantId, isActive: true },
+        select: { id: true },
+      });
+      if (hit) return hit.id;
+    }
+    const main = await this.prisma.location.findFirst({
+      where: { tenantId, isActive: true, code: 'MAIN' },
+      select: { id: true },
+    });
+    if (main) return main.id;
+    const first = await this.prisma.location.findFirst({
+      where: { tenantId, isActive: true },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+    return first?.id ?? null;
+  }
+
   async listProducts(user: AuthUser, query: ListCatalogQueryDto) {
     const q = query.q?.trim();
     const { page, limit, skip } = paginate(query.page, query.limit ?? 25);
     const lowStock = query.lowStock === 'true' || query.lowStock === '1';
+    const stockLocationId = await this.resolveDefaultLocationId(
+      user.tenantId,
+      query.locationId,
+    );
     const categoryIds = query.categoryId
       ? await categoryIdsWithDescendants(
           this.prisma,
@@ -488,7 +542,16 @@ export class CatalogService {
       ...(categoryIds ? { categoryId: { in: categoryIds } } : {}),
       ...(query.brandId ? { brandId: query.brandId } : {}),
       ...(query.kind ? { kind: query.kind } : {}),
-      ...(query.status ? { status: query.status } : {}),
+      // UI "Inactive" = not selling: inactive + archived (soft-deleted)
+      ...(query.status === ProductStatus.inactive
+        ? {
+            status: {
+              in: [ProductStatus.inactive, ProductStatus.archived],
+            },
+          }
+        : query.status
+          ? { status: query.status }
+          : {}),
       ...(query.availableInPos === 'true'
         ? { availableInPos: true }
         : query.availableInPos === 'false'
@@ -499,8 +562,9 @@ export class CatalogService {
             trackQty: true,
             stockLevels: {
               some: {
-                ...(query.locationId ? { locationId: query.locationId } : {}),
-                qtyOnHand: { gt: 0, lte: 5 },
+                ...(stockLocationId ? { locationId: stockLocationId } : {}),
+                // Include zero — "low" means at/below default reorder (5)
+                qtyOnHand: { lte: 5 },
               },
             },
           }
@@ -544,10 +608,10 @@ export class CatalogService {
           _count: {
             select: { variants: true, batches: true, bundleComponents: true },
           },
-          ...(query.locationId
+          ...(stockLocationId
             ? {
                 stockLevels: {
-                  where: { locationId: query.locationId },
+                  where: { locationId: stockLocationId },
                   select: { qtyOnHand: true, sellUnit: true },
                   take: 1,
                 },
@@ -602,13 +666,11 @@ export class CatalogService {
             qtyOnHand: true,
             sellPrice: true,
             sellUnit: true,
+            reorderPoint: true,
             location: { select: { id: true, name: true } },
           },
         },
         stockUnits: {
-          where: {
-            meta: { path: ['catalogSerial'], equals: true },
-          },
           orderBy: { createdAt: 'desc' },
           take: 200,
           select: {
@@ -618,6 +680,7 @@ export class CatalogService {
             status: true,
             locationId: true,
             productVariantId: true,
+            meta: true,
             location: { select: { id: true, name: true } },
           },
         },
@@ -630,6 +693,10 @@ export class CatalogService {
 
     const base = mapProduct(p);
     const qrPayload = this.buildQrPayload(p);
+    const catalogSerials = p.stockUnits.filter((u) => {
+      const meta = (u.meta ?? {}) as Record<string, unknown>;
+      return meta.catalogSerial === true || meta.catalogSerial === 'true';
+    });
     return {
       ...base,
       category: p.category,
@@ -670,7 +737,7 @@ export class CatalogService {
         notes: b.notes,
         isActive: b.isActive,
       })),
-      serials: p.stockUnits.map((u) => ({
+      serials: catalogSerials.map((u) => ({
         id: u.id,
         serial: u.barcodeSku,
         label: u.variantLabel,
@@ -687,6 +754,8 @@ export class CatalogService {
         qtyOnHand: Number(s.qtyOnHand),
         sellPrice: Number(s.sellPrice),
         sellUnit: s.sellUnit,
+        reorderPoint:
+          s.reorderPoint != null ? Number(s.reorderPoint) : null,
       })),
       qr: qrPayload,
     };
@@ -746,6 +815,20 @@ export class CatalogService {
 
     const unit = (dto.unitOfMeasure || 'pcs').trim().slice(0, 16) || 'pcs';
     const price = Number(dto.basePrice ?? 0);
+
+    let resolvedBaseUnitId = dto.baseUnitId;
+    let resolvedPricingUnitId = dto.pricingUnitId;
+    if (!resolvedBaseUnitId) {
+      const linked = await this.unitPricing.resolveUnitIdBySymbol(
+        user.tenantId,
+        unit,
+      );
+      if (linked) {
+        resolvedBaseUnitId = linked.id;
+        if (!resolvedPricingUnitId) resolvedPricingUnitId = linked.id;
+      }
+    }
+
     const resolvedImages = await resolveImageList(user.tenantId, [
       ...(dto.photoUrl?.trim() ? [dto.photoUrl.trim()] : []),
       ...((dto.images ?? []).filter(Boolean) as string[]),
@@ -770,6 +853,10 @@ export class CatalogService {
         : {}),
     };
 
+    const openingLocationId = trackQty
+      ? await this.resolveDefaultLocationId(user.tenantId, dto.locationId)
+      : null;
+
     try {
       const product = await this.prisma.$transaction(async (tx) => {
         const created = await tx.product.create({
@@ -782,7 +869,7 @@ export class CatalogService {
             status,
             isActive: statusToActive(status),
             categoryId: dto.categoryId ?? null,
-            brandId: dto.brandId ?? null,
+            brandId: dto.brandId || null,
             barcode,
             barcodeType,
             qrCode: dto.qrCode?.trim() || null,
@@ -795,6 +882,25 @@ export class CatalogService {
             costPrice: dec(dto.costPrice),
             mrp: dec(dto.mrp),
             unitOfMeasure: unit,
+            ...(resolvedBaseUnitId ? { baseUnitId: resolvedBaseUnitId } : {}),
+            ...(resolvedPricingUnitId
+              ? { pricingUnitId: resolvedPricingUnitId }
+              : {}),
+            ...(dto.pricingStrategy
+              ? {
+                  pricingStrategy:
+                    dto.pricingStrategy === 'fixed_tier'
+                      ? PricingStrategy.fixed_tier
+                      : PricingStrategy.converted,
+                }
+              : resolvedBaseUnitId
+                ? { pricingStrategy: PricingStrategy.converted }
+                : {}),
+            ...(dto.pricePerPricingUnit != null
+              ? { pricePerPricingUnit: dec(dto.pricePerPricingUnit) }
+              : resolvedBaseUnitId || resolvedPricingUnitId
+                ? { pricePerPricingUnit: dec(price) }
+                : {}),
             trackQty,
             trackSerial,
             trackBatch,
@@ -813,22 +919,21 @@ export class CatalogService {
           },
         });
 
-        if (trackQty && !trackSerial) {
-          const opening = dto.openingQty;
-          if (opening == null || !(opening >= 1)) {
-            throw new BadRequestException(
-              'Opening quantity must be at least 1 (not 0 or a fraction below 1)',
-            );
+        if (trackQty) {
+          const openingRaw =
+            dto.openingQty != null ? Number(dto.openingQty) : 0;
+          if (openingRaw < 0) {
+            throw new BadRequestException('Opening quantity cannot be negative');
           }
-          const locationId =
-            dto.locationId ??
-            (
-              await tx.location.findFirst({
-                where: { tenantId: user.tenantId, isActive: true },
-                orderBy: { createdAt: 'asc' },
-                select: { id: true },
-              })
-            )?.id;
+          const qtyErr = validateSellQty(openingRaw, unit);
+          if (qtyErr) throw new BadRequestException(qtyErr);
+          // Serial-tracked items: Stock on Hand must match registered units.
+          // Free-form opening without serials causes "serial is required" later —
+          // start at 0; each Register serial / Stock In serial adds 1.
+          const opening = trackSerial
+            ? 0
+            : normalizeQty(openingRaw, unit);
+          const locationId = openingLocationId;
           if (!locationId) {
             throw new BadRequestException(
               'No store location configured — add a location before creating stocked items',
@@ -838,30 +943,37 @@ export class CatalogService {
             dto.reorderPoint != null && Number.isFinite(Number(dto.reorderPoint))
               ? Number(dto.reorderPoint)
               : undefined;
-          await tx.stockLevel.create({
+          const level = await tx.stockLevel.create({
             data: {
               tenantId: user.tenantId,
               locationId,
               productId: created.id,
               sku: sku!,
               sellUnit: unit.slice(0, 8),
-              qtyOnHand: 0,
+              qtyOnHand: opening > 0 ? opening : 0,
               sellPrice: price,
               ...(reorderPoint != null ? { reorderPoint } : {}),
             },
           });
-          await this.stock.mutateInTx(tx, {
-            tenantId: user.tenantId,
-            actorUserId: user.userId,
-            locationId,
-            productId: created.id,
-            qty: opening,
-            type: StockLedgerType.opening,
-            reason: 'Opening stock',
-            referenceType: 'product',
-            referenceId: created.id,
-            skipComponentExplosion: true,
-          });
+          if (opening > 0) {
+            await tx.stockLedgerEntry.create({
+              data: {
+                tenantId: user.tenantId,
+                locationId,
+                productId: created.id,
+                stockLevelId: level.id,
+                type: StockLedgerType.opening,
+                qtyBefore: 0,
+                qtyDelta: opening,
+                qtyAfter: opening,
+                reason: 'Opening stock',
+                referenceType: 'product',
+                referenceId: created.id,
+                actorUserId: user.userId,
+                meta: { sku: sku!, sellUnit: unit.slice(0, 8) },
+              },
+            });
+          }
           await seedZeroStockAtOtherLocations(tx, {
             tenantId: user.tenantId,
             productId: created.id,
@@ -870,31 +982,6 @@ export class CatalogService {
             sellPrice: price,
             exceptLocationId: locationId,
           });
-        } else if (trackQty && trackSerial) {
-          // Serialized items: no bulk opening qty — individual serials are added after creation.
-          // Still seed a zero stock-level row so the item is discoverable at POS.
-          const locationId =
-            dto.locationId ??
-            (
-              await tx.location.findFirst({
-                where: { tenantId: user.tenantId, isActive: true },
-                orderBy: { createdAt: 'asc' },
-                select: { id: true },
-              })
-            )?.id;
-          if (locationId) {
-            await tx.stockLevel.create({
-              data: {
-                tenantId: user.tenantId,
-                locationId,
-                productId: created.id,
-                sku: sku!,
-                sellUnit: unit.slice(0, 8),
-                qtyOnHand: 0,
-                sellPrice: price,
-              },
-            });
-          }
         } else if (canSell && availableInPos) {
           // Services / non-tracked items still need a stock row so Counter can find them
           const locationId =
@@ -932,6 +1019,35 @@ export class CatalogService {
           });
         }
 
+        if (dto.productUnits?.length) {
+          let defaults = 0;
+          for (const row of dto.productUnits) {
+            if (row.isDefaultSellingUnit) defaults += 1;
+            const factor = Number(row.conversionToBase);
+            if (!(factor > 0)) {
+              throw new BadRequestException('conversion_to_base must be > 0');
+            }
+            await tx.productUnit.create({
+              data: {
+                tenantId: user.tenantId,
+                productId: created.id,
+                unitId: row.unitId,
+                conversionToBase: factor,
+                fixedPrice:
+                  row.fixedPrice != null ? Number(row.fixedPrice) : null,
+                isDefaultSellingUnit: Boolean(row.isDefaultSellingUnit),
+                isPurchaseUnit: Boolean(row.isPurchaseUnit),
+                createdById: user.userId,
+              },
+            });
+          }
+          if (defaults > 1) {
+            throw new BadRequestException(
+              'Only one default selling unit is allowed',
+            );
+          }
+        }
+
         await tx.auditLog.create({
           data: {
             tenantId: user.tenantId,
@@ -955,6 +1071,16 @@ export class CatalogService {
       return this.getProduct(user, product.id);
     } catch (e) {
       throwIfUnique(e, 'SKU or barcode already exists');
+      if (
+        e instanceof Error &&
+        /product_units|base_unit_id|pricing_unit_id|pricing_strategy|P2021|P2022/i.test(
+          e.message,
+        )
+      ) {
+        throw new BadRequestException(
+          'Unit pricing tables are missing on this database. Run: npx prisma migrate deploy (or db push), then retry. Simple items only need Unit of measure (pcs/kg) — leave advanced Unit & pricing empty.',
+        );
+      }
       throw e;
     }
   }
@@ -1024,7 +1150,24 @@ export class CatalogService {
       }
     }
     if (dto.extraFields) {
-      nextMeta = { ...nextMeta, ...dto.extraFields };
+      nextMeta = { ...nextMeta };
+      for (const [k, v] of Object.entries(dto.extraFields)) {
+        if (v === null || v === undefined || v === "") {
+          delete nextMeta[k];
+        } else {
+          nextMeta[k] = v;
+        }
+      }
+    }
+    if (dto.reorderPoint !== undefined) {
+      if (
+        dto.reorderPoint != null &&
+        Number.isFinite(Number(dto.reorderPoint))
+      ) {
+        nextMeta.reorderPoint = Number(dto.reorderPoint);
+      } else {
+        delete nextMeta.reorderPoint;
+      }
     }
     if (dto.unitOfMeasure) {
       nextMeta.sellUnit = dto.unitOfMeasure;
@@ -1107,14 +1250,50 @@ export class CatalogService {
             ...(dto.unitOfMeasure !== undefined
               ? { unitOfMeasure: dto.unitOfMeasure.trim().slice(0, 16) }
               : {}),
-            ...(dto.trackInventory !== undefined
-              ? { trackQty: dto.trackInventory }
+            ...(dto.baseUnitId !== undefined
+              ? { baseUnitId: dto.baseUnitId }
               : {}),
-            ...(dto.trackSerial !== undefined
-              ? { trackSerial: dto.trackSerial }
+            ...(dto.pricingUnitId !== undefined
+              ? { pricingUnitId: dto.pricingUnitId }
               : {}),
-            ...(dto.trackBatch !== undefined
-              ? { trackBatch: dto.trackBatch }
+            ...(dto.pricingStrategy !== undefined
+              ? {
+                  pricingStrategy:
+                    dto.pricingStrategy === 'fixed_tier'
+                      ? PricingStrategy.fixed_tier
+                      : PricingStrategy.converted,
+                }
+              : {}),
+            ...(dto.pricePerPricingUnit !== undefined
+              ? {
+                  pricePerPricingUnit:
+                    dto.pricePerPricingUnit != null
+                      ? dec(dto.pricePerPricingUnit)
+                      : null,
+                }
+              : {}),
+            ...(dto.trackInventory !== undefined ||
+            dto.trackSerial !== undefined ||
+            dto.trackBatch !== undefined
+              ? (() => {
+                  const trackQty =
+                    dto.trackInventory !== undefined
+                      ? dto.trackInventory
+                      : existing.trackQty;
+                  const trackSerial =
+                    Boolean(
+                      dto.trackSerial !== undefined
+                        ? dto.trackSerial
+                        : existing.trackSerial,
+                    ) && trackQty;
+                  const trackBatch =
+                    Boolean(
+                      dto.trackBatch !== undefined
+                        ? dto.trackBatch
+                        : existing.trackBatch,
+                    ) && trackQty;
+                  return { trackQty, trackSerial, trackBatch };
+                })()
               : {}),
             ...(dto.canSell !== undefined ? { canSell: dto.canSell } : {}),
             ...(dto.canPurchase !== undefined
@@ -1127,6 +1306,81 @@ export class CatalogService {
             updatedById: user.userId,
           },
         });
+
+        // Keep location stock in sync — Counter sells from stockLevel.sellPrice/unit
+        const stockPatch: Prisma.StockLevelUpdateManyMutationInput = {};
+        if (dto.unitOfMeasure !== undefined) {
+          stockPatch.sellUnit = dto.unitOfMeasure.trim().slice(0, 8);
+        }
+        if (dto.basePrice !== undefined) {
+          stockPatch.sellPrice = new Prisma.Decimal(dto.basePrice);
+        }
+        if (dto.reorderPoint !== undefined) {
+          stockPatch.reorderPoint =
+            dto.reorderPoint != null &&
+            Number.isFinite(Number(dto.reorderPoint))
+              ? new Prisma.Decimal(Number(dto.reorderPoint))
+              : null;
+        }
+        if (Object.keys(stockPatch).length) {
+          await tx.stockLevel.updateMany({
+            where: { tenantId: user.tenantId, productId: id },
+            data: stockPatch,
+          });
+        }
+
+        const nextTrackQty =
+          dto.trackInventory !== undefined
+            ? dto.trackInventory
+            : existing.trackQty;
+        if (nextTrackQty && !existing.trackQty) {
+          const existingLevels = await tx.stockLevel.count({
+            where: { tenantId: user.tenantId, productId: id },
+          });
+          if (existingLevels === 0) {
+            const sku =
+              (dto.skuCode?.trim().toUpperCase() || existing.skuCode || '')
+                .slice(0, 18) || 'ITEM';
+            const unit = (
+              dto.unitOfMeasure?.trim() ||
+              existing.unitOfMeasure ||
+              'pcs'
+            ).slice(0, 8);
+            const price =
+              dto.basePrice !== undefined
+                ? Number(dto.basePrice)
+                : Number(existing.basePrice);
+            const locationId = await this.resolveDefaultLocationId(
+              user.tenantId,
+              null,
+            );
+            if (locationId) {
+              await tx.stockLevel.create({
+                data: {
+                  tenantId: user.tenantId,
+                  locationId,
+                  productId: id,
+                  sku,
+                  sellUnit: unit,
+                  qtyOnHand: 0,
+                  sellPrice: price,
+                  ...(dto.reorderPoint != null &&
+                  Number.isFinite(Number(dto.reorderPoint))
+                    ? { reorderPoint: Number(dto.reorderPoint) }
+                    : {}),
+                },
+              });
+              await seedZeroStockAtOtherLocations(tx, {
+                tenantId: user.tenantId,
+                productId: id,
+                sku,
+                sellUnit: unit,
+                sellPrice: price,
+                exceptLocationId: locationId,
+              });
+            }
+          }
+        }
 
         await tx.auditLog.create({
           data: {
@@ -1578,39 +1832,161 @@ export class CatalogService {
   // ── Serial tracking ─────────────────────────────────────────────────────
 
   async createSerial(user: AuthUser, productId: string, dto: CreateSerialDto) {
-    const product = await this.requireProduct(user.tenantId, productId);
-    if (!product.trackSerial) {
-      throw new BadRequestException(
-        'Enable serial tracking on this product first',
-      );
+    let product = await this.requireProduct(user.tenantId, productId);
+    if (!product.trackSerial || !product.trackQty) {
+      // Persist flags so Register works after "Enable serial tracking"
+      product = await this.prisma.product.update({
+        where: { id: productId },
+        data: { trackSerial: true, trackQty: true },
+      });
     }
     let locationId = dto.locationId;
     if (!locationId) {
-      locationId = (
-        await this.prisma.location.findFirst({
-          where: { tenantId: user.tenantId, isActive: true },
-          orderBy: { createdAt: 'asc' },
-          select: { id: true },
-        })
-      )?.id;
+      locationId =
+        (await this.resolveDefaultLocationId(user.tenantId, null)) ?? undefined;
     }
     if (!locationId) throw new BadRequestException('No location configured');
     if (dto.variantId) {
       await this.requireVariant(user.tenantId, productId, dto.variantId);
     }
-    const serial = dto.serial.trim();
-    try {
-      return await this.prisma.stockUnit.create({
+    const serial = normalizeBarcode(dto.serial);
+    if (serial.length < 2) {
+      throw new BadRequestException(
+        'Enter a serial number (at least 2 characters)',
+      );
+    }
+
+    // Ensure a stock row exists at this location (serial register must move SOH too).
+    let level = await this.prisma.stockLevel.findFirst({
+      where: {
+        tenantId: user.tenantId,
+        productId,
+        locationId,
+        variantKey: '',
+      },
+    });
+    if (!level) {
+      level = await this.prisma.stockLevel.create({
         data: {
           tenantId: user.tenantId,
           locationId,
           productId,
-          productVariantId: dto.variantId ?? null,
-          barcodeSku: serial,
-          variantLabel: dto.label?.trim() || null,
-          meta: { catalogSerial: true },
+          sku: product.skuCode.slice(0, 18),
+          sellUnit: (product.unitOfMeasure || 'pcs').slice(0, 8),
+          qtyOnHand: 0,
+          sellPrice: product.basePrice,
+          variantKey: '',
         },
       });
+      await seedZeroStockAtOtherLocations(this.prisma, {
+        tenantId: user.tenantId,
+        productId,
+        sku: product.skuCode.slice(0, 18),
+        sellUnit: (product.unitOfMeasure || 'pcs').slice(0, 8),
+        sellPrice: Number(product.basePrice),
+        exceptLocationId: locationId,
+      });
+    }
+
+    const availableUnits = await this.prisma.stockUnit.count({
+      where: {
+        tenantId: user.tenantId,
+        productId,
+        locationId,
+        status: 'available',
+      },
+    });
+    const onHand = Number(level.qtyOnHand);
+    // Opening qty without serials leaves "phantom" SOH — absorb until serials catch up.
+    const absorbPhantom = availableUnits < onHand - 1e-9;
+
+    try {
+      if (absorbPhantom) {
+        const created = await this.prisma.stockUnit.create({
+          data: {
+            tenantId: user.tenantId,
+            locationId,
+            productId,
+            productVariantId: dto.variantId ?? null,
+            barcodeSku: serial,
+            variantLabel: dto.label?.trim() || null,
+            meta: { catalogSerial: true } as Prisma.InputJsonValue,
+          },
+          include: {
+            location: { select: { id: true, name: true } },
+          },
+        });
+        return {
+          id: created.id,
+          serial: created.barcodeSku,
+          label: created.variantLabel,
+          status: created.status,
+          locationId: created.locationId,
+          location: created.location,
+          stockAdjusted: false,
+        };
+      }
+
+      await this.stock.mutate(this.prisma, {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        locationId,
+        productId,
+        qty: 1,
+        type: StockLedgerType.stock_in,
+        reason: dto.label?.trim()
+          ? `Register serial (${dto.label.trim()})`
+          : 'Register serial',
+        referenceType: 'catalog_serial',
+        referenceId: productId,
+        serialNumber: serial,
+      });
+
+      const unit = await this.prisma.stockUnit.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          productId,
+          barcodeSku: serial,
+        },
+        include: {
+          location: { select: { id: true, name: true } },
+        },
+      });
+      if (!unit) {
+        throw new BadRequestException('Serial registered but unit was not found');
+      }
+      // Keep catalog-serial marker for the Serials tab filter
+      const meta = (unit.meta ?? {}) as Record<string, unknown>;
+      if (meta.catalogSerial !== true) {
+        await this.prisma.stockUnit.update({
+          where: { id: unit.id },
+          data: {
+            meta: {
+              ...meta,
+              catalogSerial: true,
+              ...(dto.label?.trim() ? {} : {}),
+            } as Prisma.InputJsonValue,
+            ...(dto.label?.trim()
+              ? { variantLabel: dto.label.trim() }
+              : {}),
+          },
+        });
+      } else if (dto.label?.trim()) {
+        await this.prisma.stockUnit.update({
+          where: { id: unit.id },
+          data: { variantLabel: dto.label.trim() },
+        });
+      }
+
+      return {
+        id: unit.id,
+        serial: unit.barcodeSku,
+        label: dto.label?.trim() || unit.variantLabel,
+        status: unit.status,
+        locationId: unit.locationId,
+        location: unit.location,
+        stockAdjusted: true,
+      };
     } catch (e) {
       throwIfUnique(e, 'Serial / barcode already exists');
       throw e;
@@ -1623,23 +1999,28 @@ export class CatalogService {
       where: {
         tenantId: user.tenantId,
         productId,
-        meta: { path: ['catalogSerial'], equals: true },
       },
       orderBy: { createdAt: 'desc' },
       include: {
         location: { select: { id: true, name: true } },
         productVariant: { select: { id: true, name: true } },
       },
+      take: 500,
     });
     return {
-      items: units.map((u) => ({
-        id: u.id,
-        serial: u.barcodeSku,
-        label: u.variantLabel,
-        status: u.status,
-        location: u.location,
-        variant: u.productVariant,
-      })),
+      items: units
+        .filter((u) => {
+          const meta = (u.meta ?? {}) as Record<string, unknown>;
+          return meta.catalogSerial === true || meta.catalogSerial === 'true';
+        })
+        .map((u) => ({
+          id: u.id,
+          serial: u.barcodeSku,
+          label: u.variantLabel,
+          status: u.status,
+          location: u.location,
+          variant: u.productVariant,
+        })),
     };
   }
 

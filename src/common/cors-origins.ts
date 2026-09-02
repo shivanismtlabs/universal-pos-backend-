@@ -58,3 +58,31 @@ export function shouldExposeDevOtp(env: {
   if (env.NODE_ENV === 'production') return false;
   return env.AUTH_OTP_RETURN_CODE !== '0';
 }
+
+/**
+ * Seed / reserved domains that cannot receive real SMTP mail.
+ * OTP must be shown in-app (or logged) instead of pretending email was delivered.
+ */
+export function isNonDeliverableEmail(email: string): boolean {
+  const domain = email.trim().toLowerCase().split('@')[1] ?? '';
+  if (!domain) return true;
+  if (
+    domain === 'localhost' ||
+    domain === 'local' ||
+    domain === 'invalid' ||
+    domain === 'example.com' ||
+    domain === 'example.org' ||
+    domain === 'example.net' ||
+    domain === 'test' ||
+    domain === 'upos.live' ||
+    domain === 'upos.demo' ||
+    domain.endsWith('.test') ||
+    domain.endsWith('.local') ||
+    domain.endsWith('.invalid') ||
+    domain.endsWith('.demo') ||
+    domain.endsWith('.example')
+  ) {
+    return true;
+  }
+  return false;
+}

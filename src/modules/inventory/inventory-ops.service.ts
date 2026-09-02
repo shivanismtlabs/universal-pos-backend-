@@ -51,11 +51,14 @@ export class InventoryOpsService {
       reason?: string;
     },
   ) {
+    const delta = Number(body.delta);
     const level = await this.resolveLevel(
       user.tenantId,
       body.locationId,
       body.stockLevelId,
       body.productId,
+      // Positive found-stock adjustments should create the location row if missing
+      { createIfMissing: Number.isFinite(delta) && delta > 0 },
     );
     await this.approvals.assertOrQueue(user, {
       type: 'stock_adjustment',
@@ -89,6 +92,30 @@ export class InventoryOpsService {
     });
     const fresh = await this.prisma.stockLevel.findFirstOrThrow({
       where: { id: level.id },
+    });
+    const product = await this.prisma.product.findFirst({
+      where: { id: level.productId, tenantId: user.tenantId },
+      select: { name: true, skuCode: true },
+    });
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: user.tenantId,
+        actorUserId: user.userId,
+        entityType: 'stock_level',
+        entityId: level.id,
+        action: 'inventory.qty_adjust',
+        beforeAfter: {
+          sku: level.sku,
+          productName: product?.name ?? null,
+          productSku: product?.skuCode ?? level.sku,
+          locationId: body.locationId,
+          beforeQty: Number(level.qtyOnHand),
+          afterQty: Number(fresh.qtyOnHand),
+          delta: Number(body.delta),
+          sellUnit: level.sellUnit,
+          reason: body.reason ?? null,
+        },
+      },
     });
     return this.mapLevel(fresh);
   }
@@ -202,6 +229,7 @@ export class InventoryOpsService {
             skuCode: true,
             photoUrl: true,
             trackQty: true,
+            trackSerial: true,
             meta: true,
           },
         },
@@ -217,6 +245,7 @@ export class InventoryOpsService {
       locationId?: string;
       q?: string;
       lowStockOnly?: boolean;
+      damagedOnly?: boolean;
       includeZero?: boolean;
       page?: number;
       limit?: number;
@@ -229,30 +258,38 @@ export class InventoryOpsService {
     );
     const term = opts.q?.trim();
     const { page, limit, skip } = paginate(opts.page, opts.limit ?? 25);
+    const and: Prisma.StockLevelWhereInput[] = [];
+    if (!opts.includeZero) {
+      and.push({
+        OR: [{ qtyOnHand: { gt: 0 } }, { qtyDamaged: { gt: 0 } }],
+      });
+    }
+    if (opts.damagedOnly) {
+      and.push({ qtyDamaged: { gt: 0 } });
+    }
+    if (term) {
+      and.push({
+        OR: [
+          { sku: { contains: term, mode: 'insensitive' } },
+          { product: { name: { contains: term, mode: 'insensitive' } } },
+          { product: { skuCode: { contains: term, mode: 'insensitive' } } },
+        ],
+      });
+    }
+    if (opts.lowStockOnly) {
+      const lowIds = await this.lowStockLevelIds(user.tenantId, locFilter);
+      and.push({
+        id: {
+          in: lowIds.length
+            ? lowIds
+            : ['00000000-0000-0000-0000-000000000000'],
+        },
+      });
+    }
     const where: Prisma.StockLevelWhereInput = {
       tenantId: user.tenantId,
       ...locFilter,
-      ...(opts.includeZero
-        ? {}
-        : { OR: [{ qtyOnHand: { gt: 0 } }, { qtyDamaged: { gt: 0 } }] }),
-      ...(opts.lowStockOnly ? { qtyOnHand: { lte: 5 } } : {}),
-      ...(term
-        ? {
-            OR: [
-              { sku: { contains: term, mode: 'insensitive' } },
-              {
-                product: {
-                  name: { contains: term, mode: 'insensitive' },
-                },
-              },
-              {
-                product: {
-                  skuCode: { contains: term, mode: 'insensitive' },
-                },
-              },
-            ],
-          }
-        : {}),
+      ...(and.length ? { AND: and } : {}),
     };
     const [total, rows] = await this.prisma.$transaction([
       this.prisma.stockLevel.count({ where }),
@@ -269,6 +306,7 @@ export class InventoryOpsService {
               skuCode: true,
               photoUrl: true,
               trackQty: true,
+              trackSerial: true,
               meta: true,
             },
           },
@@ -284,15 +322,70 @@ export class InventoryOpsService {
   }
 
   async lowStockAlerts(user: AuthUser, locationId?: string) {
-    const { items } = await this.listLevels(user, {
+    const locFilter = await locationAccessFilter(
+      this.prisma,
+      user,
       locationId,
-      lowStockOnly: true,
-      includeZero: true,
+    );
+    const ids = await this.lowStockLevelIds(user.tenantId, locFilter);
+    if (!ids.length) return { count: 0, items: [] };
+    const rows = await this.prisma.stockLevel.findMany({
+      where: { tenantId: user.tenantId, id: { in: ids } },
+      orderBy: [{ location: { name: 'asc' } }, { product: { name: 'asc' } }],
+      include: {
+        product: {
+          select: {
+            id: true,
+            name: true,
+            skuCode: true,
+            photoUrl: true,
+            trackQty: true,
+            trackSerial: true,
+            meta: true,
+          },
+        },
+        location: {
+          select: { id: true, name: true, code: true, type: true },
+        },
+      },
     });
-    return {
-      count: items.length,
-      items: items.filter((i) => i.qtyOnHand <= (i.reorderPoint ?? 5)),
-    };
+    const items = rows.map((r) => this.mapLevelRich(r)).filter((i) => i.isLowStock);
+    return { count: items.length, items };
+  }
+
+  /** IDs where on-hand is at or below reorder (null reorder → 5, matching mapLevelRich). */
+  private async lowStockLevelIds(
+    tenantId: string,
+    locFilter: { locationId: string | { in: string[] } } | Record<string, never>,
+  ): Promise<string[]> {
+    const locId =
+      'locationId' in locFilter ? locFilter.locationId : undefined;
+    let locSql: Prisma.Sql = Prisma.empty;
+    if (typeof locId === 'string') {
+      locSql = Prisma.sql`AND sl.location_id = ${locId}::uuid`;
+    } else if (locId && typeof locId === 'object' && Array.isArray(locId.in)) {
+      if (!locId.in.length) return [];
+      locSql = Prisma.sql`AND sl.location_id IN (${Prisma.join(locId.in)})`;
+    }
+
+    const rows = await this.prisma.$queryRaw<{ id: string }[]>`
+      SELECT sl.id
+      FROM stock_levels sl
+      INNER JOIN products p ON p.id = sl.product_id
+      WHERE sl.tenant_id = ${tenantId}::uuid
+      ${locSql}
+      AND (p.track_qty IS DISTINCT FROM false)
+      AND sl.qty_on_hand <= COALESCE(
+        sl.reorder_point,
+        CASE
+          WHEN (p.meta->>'reorderPoint') ~ '^[0-9]+(\\.[0-9]+)?$'
+            THEN (p.meta->>'reorderPoint')::numeric
+          ELSE NULL
+        END,
+        5
+      )
+    `;
+    return rows.map((r) => r.id);
   }
 
   async listLedger(user: AuthUser, query: ListLedgerQueryDto) {
@@ -555,29 +648,78 @@ export class InventoryOpsService {
         line.productId,
         { createIfMissing: direction === 'in', line },
       );
-      const delta = direction === 'in' ? qty : -qty;
-      if (direction === 'out' && Number(level.qtyOnHand) + 1e-9 < qty) {
-        throw new BadRequestException(
-          `Insufficient stock for ${level.sku} (have ${level.qtyOnHand})`,
-        );
-      }
-      const updated = await this.stock.mutate(this.prisma, {
-        tenantId: user.tenantId,
-        actorUserId: user.userId,
-        locationId: dto.locationId,
-        stockLevelId: level.id,
-        qty: delta,
-        type:
-          direction === 'in'
-            ? StockLedgerType.stock_in
-            : StockLedgerType.stock_out,
-        reason: line.reason ?? dto.reason,
-        referenceType: direction === 'in' ? 'stock_in' : 'stock_out',
-        referenceId: dto.referenceId,
-        idempotencyKey: dto.referenceId
-          ? `${direction}:${dto.referenceId}:${level.id}:${qty}`
-          : undefined,
+      const product = await this.prisma.product.findFirst({
+        where: { id: level.productId, tenantId: user.tenantId },
+        select: { trackSerial: true, name: true, skuCode: true },
       });
+      const serials = this.normalizeMoveSerials(line);
+      if (product?.trackSerial) {
+        if (!serials.length) {
+          throw new BadRequestException(
+            `${product.name} (${level.sku}) requires serial numbers — enter one serial per unit.`,
+          );
+        }
+        const unitCount = Math.round(qty);
+        if (Math.abs(qty - unitCount) > 1e-9 || unitCount < 1) {
+          throw new BadRequestException(
+            'Serial-tracked items must use whole-unit quantities.',
+          );
+        }
+        if (serials.length !== unitCount) {
+          throw new BadRequestException(
+            `Provide exactly ${unitCount} serial number(s) for ${product.name} (got ${serials.length}).`,
+          );
+        }
+        if (new Set(serials).size !== serials.length) {
+          throw new BadRequestException('Duplicate serial numbers in the same receive/remove.');
+        }
+        if (direction === 'out' && Number(level.qtyOnHand) + 1e-9 < qty) {
+          throw new BadRequestException(
+            `Insufficient stock for ${level.sku} (have ${level.qtyOnHand})`,
+          );
+        }
+        for (const serial of serials) {
+          await this.stock.mutate(this.prisma, {
+            tenantId: user.tenantId,
+            actorUserId: user.userId,
+            locationId: dto.locationId,
+            stockLevelId: level.id,
+            qty: direction === 'in' ? 1 : -1,
+            type:
+              direction === 'in'
+                ? StockLedgerType.stock_in
+                : StockLedgerType.stock_out,
+            reason: line.reason ?? dto.reason,
+            referenceType: direction === 'in' ? 'stock_in' : 'stock_out',
+            referenceId: dto.referenceId,
+            serialNumber: serial,
+          });
+        }
+      } else {
+        const delta = direction === 'in' ? qty : -qty;
+        if (direction === 'out' && Number(level.qtyOnHand) + 1e-9 < qty) {
+          throw new BadRequestException(
+            `Insufficient stock for ${level.sku} (have ${level.qtyOnHand})`,
+          );
+        }
+        await this.stock.mutate(this.prisma, {
+          tenantId: user.tenantId,
+          actorUserId: user.userId,
+          locationId: dto.locationId,
+          stockLevelId: level.id,
+          qty: delta,
+          type:
+            direction === 'in'
+              ? StockLedgerType.stock_in
+              : StockLedgerType.stock_out,
+          reason: line.reason ?? dto.reason,
+          referenceType: direction === 'in' ? 'stock_in' : 'stock_out',
+          referenceId: dto.referenceId,
+          idempotencyKey: dto.referenceId
+            ? `${direction}:${dto.referenceId}:${level.id}:${qty}`
+            : undefined,
+        });
+      }
       const fresh = await this.prisma.stockLevel.findFirstOrThrow({
         where: { id: level.id },
       });
@@ -589,6 +731,26 @@ export class InventoryOpsService {
       });
     }
     return { locationId: dto.locationId, lines: results };
+  }
+
+  private normalizeMoveSerials(line: StockMoveLineDto): string[] {
+    const raw =
+      line.serialNumbers && line.serialNumbers.length > 0
+        ? line.serialNumbers
+        : line.serialNumber
+          ? [line.serialNumber]
+          : [];
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const s of raw) {
+      const t = String(s ?? '').trim();
+      if (!t) continue;
+      const key = t.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(t);
+    }
+    return out;
   }
 
   private async applyQtyChange(
@@ -850,6 +1012,7 @@ export class InventoryOpsService {
         skuCode: string;
         photoUrl?: string | null;
         trackQty?: boolean;
+        trackSerial?: boolean;
         meta?: unknown;
       };
       location: {
@@ -877,6 +1040,8 @@ export class InventoryOpsService {
       location: r.location,
       reorderPoint,
       isLowStock,
+      trackSerial: r.product.trackSerial === true,
+      requiresSerial: r.product.trackSerial === true,
     };
   }
 

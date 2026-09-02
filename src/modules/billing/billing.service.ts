@@ -161,6 +161,7 @@ export class BillingService {
   /**
    * Create a sale invoice inside an existing transaction (exchange / checkout).
    * Prefer order.taxTotal when already computed by the tax engine.
+   * Split bills: pass `amount` + `splitPartIndex` to mint one invoice per part.
    */
   async createInvoiceInTx(
     tx: PrismaTx,
@@ -169,6 +170,7 @@ export class BillingService {
       id: string;
       subtotal: Prisma.Decimal | string | number;
       taxTotal?: Prisma.Decimal | string | number | null;
+      discountTotal?: Prisma.Decimal | string | number | null;
     },
     profile: ReturnType<typeof buildTaxProfile>,
     dto: CreateInvoiceDto = {},
@@ -180,16 +182,51 @@ export class BillingService {
         ? { totalTax: existingTax }
         : computeInvoiceTax(profile, subtotal);
 
-    const cgst = dto.useIgst ? 0 : totalTax / 2;
-    const sgst = dto.useIgst ? 0 : totalTax / 2;
-    const igst = dto.useIgst ? totalTax : 0;
-
     const feesAgg = await tx.orderFee.aggregate({
       where: { tenantId: user.tenantId, orderId: order.id },
       _sum: { amount: true },
     });
     const feesTotal = Number(feesAgg._sum.amount ?? 0);
-    const grandTotal = subtotal + totalTax + feesTotal;
+    const discount = Number(order.discountTotal ?? 0);
+    const orderGrand = Math.max(0, subtotal + totalTax + feesTotal - discount);
+
+    // Idempotent replay for the same split part
+    if (dto.splitPartIndex != null && Number.isFinite(dto.splitPartIndex)) {
+      const prior = await tx.invoice.findMany({
+        where: { tenantId: user.tenantId, orderId: order.id },
+        select: { id: true, taxBreakdown: true, invoiceNumber: true, grandTotal: true, cgst: true, sgst: true, igst: true, taxIdSnapshot: true, createdAt: true, updatedAt: true, tenantId: true, orderId: true },
+      });
+      const hit = prior.find((inv) => {
+        const b =
+          inv.taxBreakdown && typeof inv.taxBreakdown === 'object'
+            ? (inv.taxBreakdown as Record<string, unknown>)
+            : {};
+        return Number(b.splitPartIndex) === Number(dto.splitPartIndex);
+      });
+      if (hit) return hit;
+    }
+
+    const isSplitPart =
+      dto.amount != null &&
+      Number.isFinite(Number(dto.amount)) &&
+      Number(dto.amount) > 0 &&
+      dto.splitPartIndex != null;
+
+    const grandTotal = isSplitPart
+      ? Math.round(Number(dto.amount) * 100) / 100
+      : orderGrand;
+
+    if (grandTotal <= 0) {
+      throw new BadRequestException('Invoice amount must be greater than 0');
+    }
+
+    const ratio =
+      isSplitPart && orderGrand > 0.009 ? grandTotal / orderGrand : 1;
+    const partTax = Math.round(totalTax * ratio * 100) / 100;
+    const cgst = dto.useIgst ? 0 : Math.round((partTax / 2) * 100) / 100;
+    const sgst = dto.useIgst ? 0 : Math.round((partTax - cgst) * 100) / 100;
+    const igst = dto.useIgst ? partTax : 0;
+
     const invoiceNumber = await this.generateInvoiceNumber(tx, user.tenantId);
 
     const invoice = await tx.invoice.create({
@@ -205,6 +242,18 @@ export class BillingService {
           rate: profile.rate,
           taxMode: profile.taxMode,
           placeOfSupply: dto.placeOfSupply ?? null,
+          ...(isSplitPart
+            ? {
+                splitPart: true,
+                splitPartIndex: Number(dto.splitPartIndex),
+                splitPartLabel:
+                  dto.splitPartLabel?.trim() ||
+                  `Part ${Number(dto.splitPartIndex) + 1}`,
+                partAmount: grandTotal,
+                orderGrandTotal: orderGrand,
+                ...(dto.paymentId ? { paymentId: dto.paymentId } : {}),
+              }
+            : {}),
         },
         cgst: cgst.toFixed(2),
         sgst: sgst.toFixed(2),
@@ -213,13 +262,50 @@ export class BillingService {
       },
     });
 
-    await tx.order.update({
-      where: { id: order.id },
-      data: { taxTotal: totalTax.toFixed(2) },
-    });
+    // Keep order tax snapshot from full ticket (do not overwrite with part tax)
+    if (!isSplitPart) {
+      await tx.order.update({
+        where: { id: order.id },
+        data: { taxTotal: totalTax.toFixed(2) },
+      });
+    }
 
     await this.paymentsService.recalculateBalance(tx, user.tenantId, order.id);
     return invoice;
+  }
+
+  /**
+   * Mint the next split-bill part invoice for an order (or a full ticket invoice).
+   * Safe to call from checkout / follow-up pay / Stripe finalize.
+   */
+  async issueSaleInvoice(
+    user: AuthUser,
+    orderId: string,
+    opts?: {
+      amount?: number;
+      splitPartIndex?: number;
+      splitPartLabel?: string;
+      paymentId?: string;
+      onlyIfMissing?: boolean;
+    },
+  ) {
+    if (opts?.onlyIfMissing) {
+      const existing = await this.prisma.invoice.count({
+        where: { tenantId: user.tenantId, orderId },
+      });
+      if (existing > 0) {
+        return this.prisma.invoice.findFirst({
+          where: { tenantId: user.tenantId, orderId },
+          orderBy: { createdAt: 'asc' },
+        });
+      }
+    }
+    return this.createInvoice(user, orderId, {
+      amount: opts?.amount,
+      splitPartIndex: opts?.splitPartIndex,
+      splitPartLabel: opts?.splitPartLabel,
+      paymentId: opts?.paymentId,
+    });
   }
 
   async listInvoices(user: AuthUser, orderId: string) {

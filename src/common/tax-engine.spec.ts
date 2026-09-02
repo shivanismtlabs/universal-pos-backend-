@@ -17,9 +17,20 @@ describe('tax-engine', () => {
     expect(line.taxAmount.toFixed(2)).toBe('5.00');
   });
 
-  it('extracts inclusive tax from line', () => {
+  it('India GST stays exclusive even if inclusive was saved', () => {
     const profile = buildTaxProfile({
       taxMode: TaxMode.in_gst,
+      settings: { tax: { ratePercent: 5, inclusive: true } },
+    });
+    expect(profile.inclusive).toBe(false);
+    const line = computeLineTax(profile, { lineGross: 120 });
+    expect(line.lineTotal.toFixed(2)).toBe('120.00');
+    expect(line.taxAmount.toFixed(2)).toBe('6.00');
+  });
+
+  it('extracts inclusive tax from line for VAT / simple', () => {
+    const profile = buildTaxProfile({
+      taxMode: TaxMode.vat,
       settings: { tax: { ratePercent: 18, inclusive: true } },
     });
     const line = computeLineTax(profile, { lineGross: 118 });

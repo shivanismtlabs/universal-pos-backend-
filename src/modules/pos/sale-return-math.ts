@@ -34,6 +34,10 @@ export type ComputedReturnLine = {
 /**
  * Refund from the original sale: proportional line net + tax,
  * minus a share of order-level discount. Never invents tax rates.
+ *
+ * Line-level discounts are already baked into `unitPrice` / `lineTotal`
+ * at checkout — do not re-apply them here. `orderDiscountTotal` is only
+ * the bill-level / coupon discount allocated by returned merchandise share.
  */
 export function computeReturnRefundFromOriginal(args: {
   orderSubtotal: number;

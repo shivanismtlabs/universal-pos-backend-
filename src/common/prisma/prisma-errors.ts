@@ -8,6 +8,15 @@ export function isUniqueViolation(error: unknown): boolean {
   );
 }
 
+/** Table/column missing — schema not migrated (P2021/P2022). */
+export function isMissingRelation(error: unknown): boolean {
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    if (error.code === 'P2021' || error.code === 'P2022') return true;
+  }
+  const msg = error instanceof Error ? error.message : String(error ?? '');
+  return /does not exist|P2021|P2022/i.test(msg);
+}
+
 /** Postgres exclusion / check violation (e.g. reservation overlap) */
 export function isExclusionViolation(error: unknown): boolean {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError)) {

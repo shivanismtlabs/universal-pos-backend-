@@ -33,6 +33,7 @@ import type {
 import { AuthService } from './auth.service';
 import { SecurityService } from '../security/security.service';
 import { rethrowAuthDb, safePasswordMatch } from './auth-db-error';
+import { fiscalMonthNameToNumber } from '../../common/fiscal-year';
 import { ensureBusinessGroupForIdentity } from '../../common/ensure-business-group';
 
 const BCRYPT_ROUNDS = 12;
@@ -65,7 +66,10 @@ export class PortalAuthService {
   async signupIdentity(dto: SignupIdentityDto) {
     const email = dto.email.trim().toLowerCase();
     const fullName = dto.fullName.trim();
-    const phone = dto.phone?.trim();
+    const phone = dto.phone.trim();
+    if (!phone) {
+      throw new BadRequestException('Please enter your phone number');
+    }
 
     const exists = await this.prisma.identityAccount.findUnique({
       where: { email },
@@ -89,7 +93,7 @@ export class PortalAuthService {
 
     if (dto.password.toLowerCase().includes(email.split('@')[0] ?? '')) {
       throw new BadRequestException(
-        'Password must not contain email local-part',
+        'Password must not contain your email name',
       );
     }
 
@@ -340,6 +344,15 @@ export class PortalAuthService {
           })
         : profile.defaultCommerceModes.filter(isCommerceMode);
     if (!modes.length) modes = ['sale'];
+    // Clothes rental shops that sell accessories live need both modes
+    if (profile.id === 'rental') {
+      if (sells.includes('products') && !modes.includes('sale')) {
+        modes = [...new Set([...modes, 'sale'])];
+      }
+      if (sells.includes('rentals') && !modes.includes('rental')) {
+        modes = [...new Set([...modes, 'rental'])];
+      }
+    }
     const modeModuleCodes = [
       ...new Set(modes.flatMap((m) => [...moduleStackForMode(m)])),
     ];
@@ -368,8 +381,19 @@ export class PortalAuthService {
           sells,
           extras: profile.defaultCapabilities,
         });
+        const fiscalYearName = dto.fiscalYearStart?.trim() || null;
+        const fiscalYearStartMonth = fiscalYearName
+          ? fiscalMonthNameToNumber(fiscalYearName)
+          : null;
+
         const settings = {
           ...((provisioned.tenant.settings as Record<string, unknown>) ?? {}),
+          ...(fiscalYearName && fiscalYearStartMonth
+            ? {
+                fiscalYearStart: fiscalYearName,
+                fiscalYearStartMonth,
+              }
+            : {}),
           businessType: profile.id,
           businessConfigId: profile.id,
           businessLabel,
@@ -380,6 +404,9 @@ export class PortalAuthService {
           capabilitiesSetAt: new Date().toISOString(),
           commerceSetupAt: new Date().toISOString(),
           pos: { pinSwitchEnabled: true },
+          ...(fiscalYearStartMonth
+            ? { accounting: { fiscalYearStartMonth } }
+            : {}),
           /** Exclusive tax by default so Due = Subtotal + Tax at counter */
           tax: {
             ratePercent: provisioned.tenant.taxMode === 'none' ? 0 : 5,
@@ -395,7 +422,7 @@ export class PortalAuthService {
             state: dto.state?.trim() || null,
             postalCode: dto.postalCode?.trim() || null,
             countryCode: (dto.countryCode?.trim() || 'IN').toUpperCase(),
-            fiscalYearStart: dto.fiscalYearStart?.trim() || null,
+            fiscalYearStart: fiscalYearName,
             inventoryStartDate: dto.inventoryStartDate || null,
             timezone: dto.timezone?.trim() || 'Asia/Kolkata',
             locale: dto.locale?.trim() || locale,

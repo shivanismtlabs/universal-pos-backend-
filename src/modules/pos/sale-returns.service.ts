@@ -31,6 +31,7 @@ import {
   computeReturnRefundFromOriginal,
   type ComputedReturnLine,
 } from './sale-return-math';
+import { reverseHistoricalBaseQty } from '../catalog/pricing-engine';
 
 function money(n: Prisma.Decimal | string | number) {
   return new Prisma.Decimal(n);
@@ -314,16 +315,11 @@ export class SaleReturnsService {
           reasonCode: dto.reasonCode,
           refundAmount: refundAmount.toFixed(2),
           refundMethod: resolvedMethod,
-          itemsJson: lines.map((l) => {
-            const src = order.items.find(
-              (i) => i.stockLevelId === l.stockLevelId,
-            );
-            return {
-              ...l,
-              name: src?.description ?? null,
-              sku: null,
-            };
-          }),
+          itemsJson: await this.buildReturnItemsJson(
+            user.tenantId,
+            order.items,
+            lines,
+          ),
           idempotencyKey: dto.idempotencyKey,
           parentPaymentId: dto.parentPaymentId,
         },
@@ -421,6 +417,7 @@ export class SaleReturnsService {
             : [];
           const linked = exchanges.find((e) => e.returnEventId === r.id) ??
             exchanges[exchanges.length - 1];
+          const parsed = this.splitReturnItemsJson(r.itemsJson);
           return {
             id: r.id,
             status: r.status,
@@ -434,6 +431,10 @@ export class SaleReturnsService {
               r.refundAmount != null ? Number(r.refundAmount) : null,
             refundMethod: r.refundMethod,
             items: r.itemsJson,
+            returnedItems: parsed.returnedItems,
+            replacedItems: parsed.replacedItems,
+            isExchange:
+              r.reasonCode === 'exchange' || parsed.replacedItems.length > 0,
             orderId: r.orderId,
             orderNumber: r.order.orderNumber,
             customerName: r.order.customer?.fullName ?? null,
@@ -492,7 +493,8 @@ export class SaleReturnsService {
 
     const lines = (
       Array.isArray(ev.itemsJson) ? ev.itemsJson : []
-    ) as ReturnLine[];
+    ) as Array<ReturnLine & { kind?: string }>;
+    const returnOnly = lines.filter((l) => l.kind !== 'replace');
     const refundAmount = Number(ev.refundAmount ?? 0);
     const remaining = await this.remainingRefundableAmount(
       user.tenantId,
@@ -523,7 +525,7 @@ export class SaleReturnsService {
 
     return this.completeSaleReturn(user, {
       order,
-      lines: lines.map((l) => ({
+      lines: returnOnly.map((l) => ({
         stockLevelId: l.stockLevelId,
         quantity: Number(l.quantity),
         unitPrice: Number(l.unitPrice ?? 0),
@@ -874,6 +876,13 @@ export class SaleReturnsService {
     const notes = dto.reason?.trim() || 'Product exchange';
     const reasonCode = dto.reasonCode || 'exchange';
 
+    const exchangeItemsJson = await this.buildReturnItemsJson(
+      user.tenantId,
+      original.items,
+      computed.lines,
+      dto.replaceItems,
+    );
+
     const result = await this.prisma.$transaction(
       async (tx) => {
         // --- 1) Return old product (restock) — no cash refund yet ---
@@ -892,7 +901,7 @@ export class SaleReturnsService {
             reasonCode,
             refundAmount: returnAmount.toFixed(2),
             refundMethod: PaymentMethod.other,
-            itemsJson: computed.lines,
+            itemsJson: exchangeItemsJson,
             idempotencyKey: `${dto.idempotencyKey}:return`,
           },
         });
@@ -1444,9 +1453,15 @@ export class SaleReturnsService {
     const map = new Map<string, number>();
     for (const ev of events) {
       const lines = Array.isArray(ev.itemsJson)
-        ? (ev.itemsJson as Array<{ stockLevelId?: string; quantity?: number }>)
+        ? (ev.itemsJson as Array<{
+            stockLevelId?: string;
+            quantity?: number;
+            kind?: string;
+          }>)
         : [];
       for (const l of lines) {
+        // Exchange events store return + replace rows; only returned qty reserves.
+        if (l.kind === 'replace') continue;
         if (!l.stockLevelId || !l.quantity) continue;
         map.set(
           l.stockLevelId,
@@ -1472,6 +1487,31 @@ export class SaleReturnsService {
         `Stock level not found: ${line.stockLevelId}`,
       );
     }
+    const originals = await tx.orderItem.findMany({
+      where: {
+        tenantId: user.tenantId,
+        orderId: order.id,
+        stockLevelId: line.stockLevelId,
+      },
+      select: {
+        quantity: true,
+        orderedQuantity: true,
+        baseQuantity: true,
+      },
+    });
+    const orig = originals[0];
+    let restockQty = line.quantity;
+    if (orig) {
+      const ordered = orig.orderedQuantity ?? orig.quantity;
+      const base = orig.baseQuantity ?? orig.quantity;
+      restockQty = Number(
+        reverseHistoricalBaseQty({
+          originalOrderedQty: ordered,
+          originalBaseQty: base,
+          returnOrderedQty: line.quantity,
+        }).toFixed(),
+      );
+    }
     const resellable = RESELLABLE.has(line.condition || 'good');
     const recipe = await this.stock.hasRecipeExplosion(
       tx,
@@ -1485,7 +1525,7 @@ export class SaleReturnsService {
           actorUserId: user.userId,
           locationId: level.locationId,
           productId: level.productId,
-          parentQty: line.quantity,
+          parentQty: restockQty,
           referenceType: 'customer_return',
           referenceId: order.id,
         });
@@ -1498,7 +1538,7 @@ export class SaleReturnsService {
         actorUserId: user.userId,
         locationId: level.locationId,
         stockLevelId: level.id,
-        qty: line.quantity,
+        qty: restockQty,
         type: StockLedgerType.customer_return,
         reason: notes,
         referenceType: 'customer_return',
@@ -1513,7 +1553,7 @@ export class SaleReturnsService {
         stockLevelId: level.id,
         qty: 0,
         type: StockLedgerType.damage,
-        damageDelta: line.quantity,
+        damageDelta: restockQty,
         reason: notes,
         referenceType: 'customer_return',
         referenceId: order.id,
@@ -1531,6 +1571,10 @@ export class SaleReturnsService {
         orderNumber: string;
         customerId: string | null;
         meta?: unknown;
+        items?: Array<{
+          stockLevelId: string | null;
+          description: string | null;
+        }>;
       };
       lines: ReturnLine[];
       refundAmount: number;
@@ -1547,6 +1591,14 @@ export class SaleReturnsService {
     if (args.refundAmount <= 0) {
       throw new BadRequestException('Refund amount must be > 0');
     }
+
+    const newEventItemsJson = args.existingEventId
+      ? null
+      : await this.buildReturnItemsJson(
+          user.tenantId,
+          args.order.items ?? [],
+          args.lines,
+        );
 
     const outcome = await this.prisma.$transaction(async (tx) => {
       let returnEventId = args.existingEventId;
@@ -1591,7 +1643,7 @@ export class SaleReturnsService {
             reasonCode: args.reasonCode,
             refundAmount: args.refundAmount.toFixed(2),
             refundMethod: args.refundMethod,
-            itemsJson: args.lines,
+            itemsJson: newEventItemsJson!,
             idempotencyKey: args.idempotencyKey,
             parentPaymentId: args.parentPaymentId,
           },
@@ -1730,5 +1782,89 @@ export class SaleReturnsService {
         condition: l.condition,
       })),
     };
+  }
+
+  private splitReturnItemsJson(itemsJson: unknown): {
+    items: Array<Record<string, unknown>>;
+    returnedItems: Array<Record<string, unknown>>;
+    replacedItems: Array<Record<string, unknown>>;
+  } {
+    const arr = Array.isArray(itemsJson)
+      ? (itemsJson as Array<Record<string, unknown>>)
+      : [];
+    const hasKind = arr.some((i) => i.kind != null);
+    if (!hasKind) {
+      return { items: arr, returnedItems: arr, replacedItems: [] };
+    }
+    return {
+      items: arr,
+      returnedItems: arr.filter((i) => i.kind !== 'replace'),
+      replacedItems: arr.filter((i) => i.kind === 'replace'),
+    };
+  }
+
+  private async buildReturnItemsJson(
+    tenantId: string,
+    orderItems: Array<{ stockLevelId: string | null; description: string | null }>,
+    returnLines: ReturnLine[],
+    replaceLines?: Array<{
+      stockLevelId: string;
+      quantity: number;
+      unitPrice?: number;
+    }>,
+  ): Promise<Prisma.InputJsonValue> {
+    const levelIds = new Set<string>();
+    for (const l of returnLines) levelIds.add(l.stockLevelId);
+    for (const r of replaceLines ?? []) levelIds.add(r.stockLevelId);
+
+    const levels =
+      levelIds.size > 0
+        ? await this.prisma.stockLevel.findMany({
+            where: { tenantId, id: { in: [...levelIds] } },
+            select: {
+              id: true,
+              sellPrice: true,
+              product: { select: { name: true, skuCode: true } },
+            },
+          })
+        : [];
+
+    const byLevel = new Map(
+      levels.map((l) => [
+        l.id,
+        {
+          name: l.product.name,
+          sku: l.product.skuCode,
+          sellPrice: Number(l.sellPrice ?? 0),
+        },
+      ]),
+    );
+
+    const returned = returnLines.map((l) => ({
+      kind: 'return',
+      stockLevelId: l.stockLevelId,
+      quantity: l.quantity,
+      unitPrice: l.unitPrice,
+      condition: l.condition,
+      refundShare: l.refundShare,
+      name:
+        orderItems.find((i) => i.stockLevelId === l.stockLevelId)
+          ?.description ??
+        byLevel.get(l.stockLevelId)?.name ??
+        'Item',
+      sku: byLevel.get(l.stockLevelId)?.sku ?? null,
+    }));
+
+    const replaced = (replaceLines ?? []).map((item) => ({
+      kind: 'replace',
+      stockLevelId: item.stockLevelId,
+      quantity: item.quantity,
+      unitPrice:
+        item.unitPrice ?? byLevel.get(item.stockLevelId)?.sellPrice ?? 0,
+      name: byLevel.get(item.stockLevelId)?.name ?? 'Item',
+      sku: byLevel.get(item.stockLevelId)?.sku ?? null,
+    }));
+
+    return [...returned, ...replaced] as Prisma.InputJsonValue;
   }
 }

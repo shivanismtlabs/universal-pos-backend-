@@ -5,6 +5,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
@@ -107,6 +108,24 @@ export class ImportSaleProductRowDto {
   @IsOptional()
   @IsBoolean()
   trackInventory?: boolean;
+
+  @ApiPropertyOptional({
+    enum: ['goods', 'service'],
+    description: 'CSV column type / item_type / kind — service vs goods',
+  })
+  @IsOptional()
+  @IsIn(['goods', 'service'])
+  itemType?: 'goods' | 'service';
+
+  @ApiPropertyOptional({
+    example: 30,
+    description: 'Service duration in minutes (CSV: duration_minutes)',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  durationMinutes?: number;
 
   @ApiPropertyOptional({
     description:

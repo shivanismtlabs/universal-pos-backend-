@@ -295,6 +295,7 @@ export class OrdersService {
                 id: true,
                 barcodeSku: true,
                 variantLabel: true,
+                depositAmount: true,
               },
             },
             stockLevel: {
@@ -320,10 +321,19 @@ export class OrdersService {
       },
     });
     if (!order) throw new NotFoundException('Order not found');
+    const depositRequired = order.items.reduce((sum, i) => {
+      const dep = i.stockUnit?.depositAmount;
+      return sum + (dep != null ? Number(dep) : 0);
+    }, 0);
+    const depositCollected = Number(order.depositTotal ?? 0);
+    const depositDue = Math.max(0, depositRequired - depositCollected);
     return {
       ...order,
       store: order.location,
       storeId: order.locationId,
+      depositRequired: depositRequired.toFixed(2),
+      depositCollected: depositCollected.toFixed(2),
+      depositDue: depositDue.toFixed(2),
     };
   }
 
@@ -575,7 +585,12 @@ export class OrdersService {
     const unitItems = order.items.filter(
       (i) => i.stockUnitId && i.itemKind === OrderItemKind.stock_unit,
     );
+    // Service / product-only rental lines need no unit hold
     if (unitItems.length === 0) {
+      const hasProductLines = order.items.some(
+        (i) => i.itemKind === OrderItemKind.product,
+      );
+      if (hasProductLines) return;
       throw new BadRequestException('No stock units on order to reserve');
     }
 

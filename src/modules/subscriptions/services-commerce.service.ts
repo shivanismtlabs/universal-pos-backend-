@@ -13,9 +13,11 @@ import {
   PaymentStatus,
   PaymentType,
   Prisma,
+  ProductKind,
 } from '@prisma/client';
 import { parseCommerceModes } from '../../common/commerce-schema';
 import { validateSku } from '../../common/sell-units';
+import { resolveProductTaxRatePercent } from '../../common/tax-engine';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
 import {
@@ -68,37 +70,57 @@ export class ServicesCommerceService {
     return any.id;
   }
 
+  private mapServiceRow(p: {
+    id: string;
+    name: string;
+    skuCode: string;
+    description: string | null;
+    basePrice: Prisma.Decimal;
+    isActive: boolean;
+    meta: unknown;
+    taxCode?: string | null;
+    createdAt?: Date;
+    category: { id: string; name: string } | null;
+  }) {
+    const meta =
+      p.meta && typeof p.meta === 'object'
+        ? (p.meta as Record<string, unknown>)
+        : {};
+    return {
+      id: p.id,
+      title: p.name,
+      sku: p.skuCode,
+      description: p.description,
+      price: p.basePrice,
+      durationMinutes:
+        typeof meta.durationMinutes === 'number'
+          ? meta.durationMinutes
+          : Number(meta.durationMinutes ?? 0) || null,
+      taxRatePercent: resolveProductTaxRatePercent({
+        taxCode: p.taxCode,
+        meta: p.meta,
+      }),
+      isActive: p.isActive,
+      category: p.category,
+      createdAt: p.createdAt,
+    };
+  }
+
   async listServices(user: AuthUser) {
     await this.assertServiceMode(user.tenantId);
     const rows = await this.prisma.product.findMany({
       where: {
         tenantId: user.tenantId,
-        fulfillmentMode: FulfillmentMode.service,
+        OR: [
+          { fulfillmentMode: FulfillmentMode.service },
+          { kind: ProductKind.service },
+        ],
       },
       include: { category: { select: { id: true, name: true } } },
       orderBy: { name: 'asc' },
     });
     return {
-      items: rows.map((p) => {
-        const meta =
-          p.meta && typeof p.meta === 'object'
-            ? (p.meta as Record<string, unknown>)
-            : {};
-        return {
-          id: p.id,
-          title: p.name,
-          sku: p.skuCode,
-          description: p.description,
-          price: p.basePrice,
-          durationMinutes:
-            typeof meta.durationMinutes === 'number'
-              ? meta.durationMinutes
-              : Number(meta.durationMinutes ?? 0) || null,
-          isActive: p.isActive,
-          category: p.category,
-          createdAt: p.createdAt,
-        };
-      }),
+      items: rows.map((p) => this.mapServiceRow(p)),
       counts: {
         services: rows.length,
         active: rows.filter((r) => r.isActive).length,
@@ -125,10 +147,12 @@ export class ServicesCommerceService {
           name: dto.title.trim(),
           skuCode: dto.sku.trim().toUpperCase(),
           description: dto.description?.trim() || null,
-          kind: 'service',
+          kind: ProductKind.service,
           fulfillmentMode: FulfillmentMode.service,
           trackQty: false,
           trackSerial: false,
+          canSell: true,
+          availableInPos: true,
           basePrice: money(dto.price).toFixed(2),
           meta:
             dto.durationMinutes != null
@@ -137,16 +161,7 @@ export class ServicesCommerceService {
         },
         include: { category: { select: { id: true, name: true } } },
       });
-      return {
-        id: product.id,
-        title: product.name,
-        sku: product.skuCode,
-        description: product.description,
-        price: product.basePrice,
-        durationMinutes: dto.durationMinutes ?? null,
-        isActive: product.isActive,
-        category: product.category,
-      };
+      return this.mapServiceRow(product);
     } catch (e) {
       if (
         e instanceof Prisma.PrismaClientKnownRequestError &&
@@ -164,7 +179,10 @@ export class ServicesCommerceService {
       where: {
         id,
         tenantId: user.tenantId,
-        fulfillmentMode: FulfillmentMode.service,
+        OR: [
+          { fulfillmentMode: FulfillmentMode.service },
+          { kind: ProductKind.service },
+        ],
       },
     });
     if (!existing) throw new NotFoundException('Service not found');
@@ -173,22 +191,7 @@ export class ServicesCommerceService {
       data: { isActive },
       include: { category: { select: { id: true, name: true } } },
     });
-    const meta =
-      updated.meta && typeof updated.meta === 'object'
-        ? (updated.meta as Record<string, unknown>)
-        : {};
-    return {
-      id: updated.id,
-      title: updated.name,
-      sku: updated.skuCode,
-      price: updated.basePrice,
-      isActive: updated.isActive,
-      durationMinutes:
-        typeof meta.durationMinutes === 'number'
-          ? meta.durationMinutes
-          : null,
-      category: updated.category,
-    };
+    return this.mapServiceRow(updated);
   }
 
   async bill(user: AuthUser, dto: BillServiceDto) {
@@ -198,30 +201,58 @@ export class ServicesCommerceService {
       dto.locationId,
     );
 
-    const customer = await this.prisma.customer.findFirst({
-      where: {
-        id: dto.customerId,
-        tenantId: user.tenantId,
-        deletedAt: null,
-      },
-      select: { id: true, fullName: true },
-    });
-    if (!customer) throw new NotFoundException('Customer not found');
+    let customer: { id: string; fullName: string } | null = null;
+    if (dto.customerId) {
+      customer = await this.prisma.customer.findFirst({
+        where: {
+          id: dto.customerId,
+          tenantId: user.tenantId,
+          deletedAt: null,
+        },
+        select: { id: true, fullName: true },
+      });
+      if (!customer) throw new NotFoundException('Customer not found');
+    }
 
     const product = await this.prisma.product.findFirst({
       where: {
         id: dto.productId,
         tenantId: user.tenantId,
-        fulfillmentMode: FulfillmentMode.service,
         isActive: true,
+        OR: [
+          { fulfillmentMode: FulfillmentMode.service },
+          { kind: ProductKind.service },
+        ],
       },
     });
     if (!product) throw new NotFoundException('Service not found or inactive');
 
-    const price = money(product.basePrice);
-    if (price.lte(0)) {
+    const unitPrice = money(product.basePrice);
+    if (unitPrice.lte(0)) {
       throw new BadRequestException('Service price must be greater than 0');
     }
+
+    const qty = Math.max(1, Math.min(99, Math.floor(Number(dto.quantity) || 1)));
+    const subtotal = unitPrice.mul(qty);
+    const taxRate =
+      resolveProductTaxRatePercent({
+        taxCode: product.taxCode,
+        meta: product.meta,
+      }) ?? 0;
+    const taxTotal =
+      taxRate > 0
+        ? subtotal.mul(taxRate).div(100).toDecimalPlaces(2)
+        : money(0);
+    const grandTotal = subtotal.add(taxTotal);
+
+    const meta =
+      product.meta && typeof product.meta === 'object'
+        ? (product.meta as Record<string, unknown>)
+        : {};
+    const durationMinutes =
+      typeof meta.durationMinutes === 'number'
+        ? meta.durationMinutes
+        : Number(meta.durationMinutes ?? 0) || null;
 
     const methodMap: Record<string, PaymentMethod> = {
       cash: PaymentMethod.cash,
@@ -231,9 +262,48 @@ export class ServicesCommerceService {
     const method = methodMap[dto.paymentMethod ?? 'cash'] ?? PaymentMethod.cash;
     const idem =
       dto.idempotencyKey?.trim() ||
-      `svc-bill-${user.tenantId}-${customer.id}-${product.id}-${Date.now()}`;
+      `svc-bill-${user.tenantId}-${customer?.id ?? 'walkin'}-${product.id}-${Date.now()}`;
+
+    const existingPay = await this.prisma.payment.findFirst({
+      where: { tenantId: user.tenantId, idempotencyKey: idem },
+      include: {
+        order: { select: { id: true, orderNumber: true, kind: true } },
+      },
+    });
+    if (existingPay?.order) {
+      return {
+        order: {
+          id: existingPay.order.id,
+          orderNumber: existingPay.order.orderNumber,
+          kind: existingPay.order.kind,
+        },
+        payment: {
+          id: existingPay.id,
+          amount: existingPay.amount,
+          method: existingPay.method,
+        },
+        service: {
+          id: product.id,
+          title: product.name,
+          price: product.basePrice,
+        },
+        customer,
+        totals: {
+          subtotal: subtotal.toFixed(2),
+          taxTotal: taxTotal.toFixed(2),
+          grandTotal: grandTotal.toFixed(2),
+          taxRatePercent: taxRate,
+          quantity: qty,
+        },
+      };
+    }
 
     if (dto.appointmentId) {
+      if (!customer) {
+        throw new BadRequestException(
+          'Customer is required when linking an appointment',
+        );
+      }
       const apt = await this.prisma.appointment.findFirst({
         where: {
           id: dto.appointmentId,
@@ -255,22 +325,26 @@ export class ServicesCommerceService {
         data: {
           tenantId: user.tenantId,
           locationId,
-          customerId: customer.id,
+          customerId: customer?.id ?? null,
           orderNumber,
           kind: OrderKind.service,
           status: OrderStatus.closed,
           createdById: user.userId,
           currencyCode: tenant.currencyCode,
-          subtotal: price.toFixed(2),
-          taxTotal: '0.00',
+          subtotal: subtotal.toFixed(2),
+          taxTotal: taxTotal.toFixed(2),
           discountTotal: '0.00',
           balanceDue: '0.00',
           meta: {
             serviceBill: true,
             productId: product.id,
+            quantity: qty,
+            ...(durationMinutes != null ? { durationMinutes } : {}),
+            ...(taxRate > 0 ? { taxRatePercent: taxRate } : {}),
             ...(dto.appointmentId
               ? { appointmentId: dto.appointmentId }
               : {}),
+            ...(customer ? {} : { walkIn: true }),
           },
         },
       });
@@ -282,10 +356,14 @@ export class ServicesCommerceService {
           itemKind: OrderItemKind.service,
           productId: product.id,
           description: product.name,
-          quantity: 1,
-          unitPrice: price.toFixed(2),
-          lineTotal: price.toFixed(2),
-          taxAmount: '0.00',
+          quantity: qty,
+          unitPrice: unitPrice.toFixed(2),
+          lineTotal: subtotal.toFixed(2),
+          taxAmount: taxTotal.toFixed(2),
+          meta: {
+            ...(durationMinutes != null ? { durationMinutes } : {}),
+            ...(taxRate > 0 ? { taxRatePercent: taxRate } : {}),
+          },
         },
       });
 
@@ -295,7 +373,7 @@ export class ServicesCommerceService {
           orderId: order.id,
           type: PaymentType.payment,
           method,
-          amount: price.toFixed(2),
+          amount: grandTotal.toFixed(2),
           status: PaymentStatus.succeeded,
           idempotencyKey: idem,
           takenByUserId: user.userId,
@@ -329,6 +407,13 @@ export class ServicesCommerceService {
         price: product.basePrice,
       },
       customer,
+      totals: {
+        subtotal: subtotal.toFixed(2),
+        taxTotal: taxTotal.toFixed(2),
+        grandTotal: grandTotal.toFixed(2),
+        taxRatePercent: taxRate,
+        quantity: qty,
+      },
     };
   }
 
@@ -338,8 +423,11 @@ export class ServicesCommerceService {
       this.prisma.product.count({
         where: {
           tenantId: user.tenantId,
-          fulfillmentMode: FulfillmentMode.service,
           isActive: true,
+          OR: [
+            { fulfillmentMode: FulfillmentMode.service },
+            { kind: ProductKind.service },
+          ],
         },
       }),
       this.prisma.appointment.count({

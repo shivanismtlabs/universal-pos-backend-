@@ -17,6 +17,7 @@ import { Roles } from '../auth/decorators/auth.decorators';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
 import { CatalogService } from './catalog.service';
+import { UnitPricingService } from './unit-pricing.service';
 import {
   CreateBatchDto,
   CreateBrandDto,
@@ -39,7 +40,158 @@ import {
 @ApiBearerAuth('access-token')
 @Controller('catalog')
 export class CatalogController {
-  constructor(private readonly catalog: CatalogService) {}
+  constructor(
+    private readonly catalog: CatalogService,
+    private readonly unitPricing: UnitPricingService,
+  ) {}
+
+  // ── Unit master & product units ────────────────────────────────────────
+
+  @Post('units/seed')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Ensure system unit groups + units exist' })
+  seedUnits() {
+    return this.unitPricing.ensureSystemUnits();
+  }
+
+  @Get('unit-groups')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'List unit groups with units' })
+  listUnitGroups() {
+    return this.unitPricing.listUnitGroups();
+  }
+
+  @Get('units/country-defaults')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'Suggested UOMs by country (config-driven)' })
+  countryDefaults(@Query('country') country?: string) {
+    return this.unitPricing.getCountryDefaults(country);
+  }
+
+  @Get('units/tenant')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'Tenant-enabled units (system + custom)' })
+  listTenantUnits(@CurrentUser() user: AuthUser) {
+    return this.unitPricing.listTenantUnits(user.tenantId);
+  }
+
+  @Get('units/suggest')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'Suggested units for tenant country profile' })
+  suggestTenantUnits(@CurrentUser() user: AuthUser) {
+    return this.unitPricing.suggestForTenant(user.tenantId);
+  }
+
+  @Post('units/custom')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Create tenant custom unit' })
+  createCustomUnit(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      symbol: string;
+      name: string;
+      unitGroupCode: string;
+      conversionToGroupBase: number;
+      isBaseUnit?: boolean;
+    },
+  ) {
+    return this.unitPricing.createCustomUnit(user, body);
+  }
+
+  @Patch('units/custom/:id')
+  @Roles(...RoleGroup.catalogWrite)
+  updateCustomUnit(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: { name?: string; isActive?: boolean },
+  ) {
+    return this.unitPricing.updateCustomUnit(user, id, body);
+  }
+
+  @Post('units/:symbol/enabled')
+  @Roles(...RoleGroup.catalogWrite)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Enable/disable a unit for this tenant' })
+  setUnitEnabled(
+    @CurrentUser() user: AuthUser,
+    @Param('symbol') symbol: string,
+    @Body() body: { enabled: boolean },
+  ) {
+    return this.unitPricing.setTenantUnitEnabled(user, symbol, body.enabled);
+  }
+
+  @Post('units/validate-conversion')
+  @Roles(...RoleGroup.catalogRead)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Validate qty conversion between units' })
+  validateConversion(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      fromUnitId: string;
+      toUnitId: string;
+      productId?: string;
+      quantity?: number;
+    },
+  ) {
+    return this.unitPricing.validateConversion(user, body);
+  }
+
+  @Post('units/convert')
+  @Roles(...RoleGroup.catalogRead)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Convert quantity to product base unit' })
+  convertToBase(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: { productId: string; qty: number; fromUnitId: string },
+  ) {
+    return this.unitPricing.convertToBase(
+      user,
+      body.productId,
+      body.qty,
+      body.fromUnitId,
+    );
+  }
+
+  @Get('products/:id/units')
+  @Roles(...RoleGroup.catalogRead)
+  listProductUnits(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.unitPricing.listProductUnits(user, id);
+  }
+
+  @Post('products/:id/units')
+  @Roles(...RoleGroup.catalogWrite)
+  upsertProductUnit(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body()
+    body: {
+      unitId: string;
+      conversionToBase: number;
+      fixedPrice?: number | null;
+      isDefaultSellingUnit?: boolean;
+      isPurchaseUnit?: boolean;
+    },
+  ) {
+    return this.unitPricing.upsertProductUnit(user, id, body);
+  }
+
+  @Post('pricing/quote')
+  @Roles(...RoleGroup.catalogRead)
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Quote line amount + base qty (PricingEngine)' })
+  quoteLine(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: { productId: string; enteredQty: number; sellingUnitId: string },
+  ) {
+    return this.unitPricing.quoteLine(user, body);
+  }
 
   // ── Brands ─────────────────────────────────────────────────────────────
 

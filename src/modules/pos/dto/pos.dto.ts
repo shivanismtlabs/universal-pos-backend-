@@ -17,6 +17,7 @@ import {
   IsUUID,
   Matches,
   MaxLength,
+  Max,
   Min,
   MinLength,
   ValidateNested,
@@ -149,13 +150,21 @@ export class SaleCheckoutItemDto {
   quantity!: number;
 
   @ApiPropertyOptional({
-    description: 'Override sell price (defaults to stock level sellPrice)',
+    description: 'Override sell price (defaults to catalog/engine price for the transaction unit)',
   })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   unitPrice?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Transaction unit id (Unit master). When set, quantity is in this unit; backend converts to base.',
+  })
+  @IsOptional()
+  @IsUUID()
+  sellingUnitId?: string;
 
   @ApiPropertyOptional({ description: 'Selected product variant id when variants are enabled' })
   @IsOptional()
@@ -227,6 +236,18 @@ export class SaleCheckoutDto {
   @IsNumber()
   @Min(0)
   discountAmount?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Nearest-rupee half-up delta (rounded − exact). Positive adds Round off fee; negative writes off via discount.',
+    example: 0.4,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-0.99)
+  @Max(0.99)
+  roundOffAmount?: number;
 
   @ApiPropertyOptional({
     description: 'Loyalty coupon code applied at counter (records redemption)',
@@ -316,6 +337,18 @@ export class PrepareSaleCheckoutDto {
   @IsNumber()
   @Min(0)
   discountAmount?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Nearest-rupee half-up delta (rounded − exact). Positive adds Round off fee; negative writes off via discount.',
+    example: 0.4,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-0.99)
+  @Max(0.99)
+  roundOffAmount?: number;
 
   @ApiPropertyOptional({
     description: 'Loyalty coupon code (same as cash sale checkout)',
@@ -449,6 +482,16 @@ export class AddSaleProductDto {
   @IsOptional()
   @IsIn(['goods', 'service'])
   itemType?: 'goods' | 'service';
+
+  @ApiPropertyOptional({
+    example: 30,
+    description: 'Service duration in minutes',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  durationMinutes?: number;
 
   /** Single item vs variants parent (matrix pack later) */
   @ApiPropertyOptional({ enum: ['single', 'variants'] })
@@ -721,6 +764,7 @@ export class ImportSaleProductRowDto {
   @IsBoolean()
   trackInventory?: boolean;
 
+<<<<<<< HEAD
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -735,6 +779,19 @@ export class ImportSaleProductRowDto {
   @IsOptional()
   @IsString()
   kind?: string;
+=======
+  @ApiPropertyOptional({ enum: ['goods', 'service'] })
+  @IsOptional()
+  @IsIn(['goods', 'service'])
+  itemType?: 'goods' | 'service';
+
+  @ApiPropertyOptional({ example: 30 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  durationMinutes?: number;
+>>>>>>> a91e49de027a7047554016472689f0e4be4081e0
 }
 
 export class ImportSaleProductsDto {
@@ -930,6 +987,38 @@ export class AddRentalProductDto {
   @IsNumber()
   @Min(0)
   deposit?: number;
+
+  @ApiPropertyOptional({
+    example: 200,
+    description: 'Late fee charged per day past return due (0 = disabled amount)',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  lateFeePerDay?: number;
+
+  @ApiPropertyOptional({ example: true, description: 'When false, never auto-suggest late fees' })
+  @IsOptional()
+  @IsBoolean()
+  lateFeeEnabled?: boolean;
+
+  @ApiPropertyOptional({ example: 150, description: 'Default cleaning fee on return' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  cleaningFee?: number;
+
+  @ApiPropertyOptional({
+    example: 1000,
+    description: 'Default damage / replacement charge suggestion',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  damageFeeDefault?: number;
 
   @ApiProperty({ example: 'BC-001' })
   @IsString()

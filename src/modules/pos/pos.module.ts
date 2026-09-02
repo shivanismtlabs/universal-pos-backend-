@@ -8,6 +8,7 @@ import { AccountingModule } from '../accounting/accounting.module';
 import { EnterpriseModule } from '../enterprise/enterprise.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { RestaurantModule } from '../restaurant/restaurant.module';
+import { CatalogModule } from '../catalog/catalog.module';
 import { CommerceModeGuard } from '../../common/guards/commerce-mode.guard';
 import { CommerceEngine } from '../commerce/commerce-engine';
 import { PosController } from './pos.controller';
@@ -27,6 +28,7 @@ import { SaleReturnsService } from './sale-returns.service';
     EnterpriseModule,
     InventoryModule,
     RestaurantModule,
+    CatalogModule,
   ],
   controllers: [PosController],
   providers: [

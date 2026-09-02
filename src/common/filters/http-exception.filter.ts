@@ -35,7 +35,12 @@ export class HttpExceptionFilter implements ExceptionFilter {
       }
     } else if (exception instanceof Error) {
       this.logger.error(exception.message, exception.stack);
-      if (
+      if (/53100|No space left on device/i.test(exception.message)) {
+        message =
+          'PostgreSQL is out of disk space. Free space on the drive that holds Docker/Postgres data, then retry.';
+        statusCode = HttpStatus.SERVICE_UNAVAILABLE;
+        error = 'Service Unavailable';
+      } else if (
         process.env.NODE_ENV === 'production' &&
         /does not exist|P2021|P2022/.test(exception.message)
       ) {

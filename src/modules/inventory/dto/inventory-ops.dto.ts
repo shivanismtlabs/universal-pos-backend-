@@ -35,6 +35,21 @@ export class StockMoveLineDto {
   @IsString()
   @MaxLength(300)
   reason?: string;
+
+  /** Single serial (serial-tracked items; one unit). Prefer serialNumbers for multi-unit receive. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  serialNumber?: string;
+
+  /** One serial per unit when receiving/removing multiple serial-tracked units. */
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(120, { each: true })
+  serialNumbers?: string[];
 }
 
 export class StockMoveDto {

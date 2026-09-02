@@ -19,6 +19,7 @@ export class MailService implements OnModuleInit {
   constructor(private readonly config: ConfigService) {
     const host = this.config.get<string>('SMTP_HOST')?.trim();
     const user = this.config.get<string>('SMTP_USER')?.trim();
+    // Gmail app passwords are often stored with spaces; nodemailer accepts either form.
     const pass = this.config.get<string>('SMTP_PASS')?.trim();
     if (!host || !user || !pass) return;
 
@@ -63,13 +64,23 @@ export class MailService implements OnModuleInit {
 
   async send(msg: OutboundEmail): Promise<boolean> {
     if (!this.transporter) return false;
-    await this.transporter.sendMail({
+    const info = await this.transporter.sendMail({
       from: this.fromAddress(),
       to: msg.to,
       subject: msg.subject,
       text: msg.text,
       html: msg.html,
     });
+    const rejected = info.rejected ?? [];
+    if (rejected.length > 0) {
+      this.log.error(
+        `SMTP rejected recipient(s): ${rejected.join(', ')} (response=${info.response ?? 'n/a'})`,
+      );
+      return false;
+    }
+    this.log.debug(
+      `SMTP accepted ${msg.to} messageId=${info.messageId ?? 'n/a'}`,
+    );
     return true;
   }
 

@@ -1,3 +1,5 @@
+import { resolveFiscalStartMonth } from '../../common/fiscal-year';
+
 export type AccountingBasis = 'cash' | 'accrual';
 
 export type AccountingSettings = {
@@ -36,7 +38,7 @@ export function parseAccountingSettings(
   const month =
     typeof monthRaw === 'number' && monthRaw >= 1 && monthRaw <= 12
       ? Math.floor(monthRaw)
-      : DEFAULT_ACCOUNTING_SETTINGS.fiscalYearStartMonth;
+      : resolveFiscalStartMonth(tenantSettings);
   return {
     enabled: Boolean(a.enabled),
     basis: a.basis === 'cash' ? 'cash' : 'accrual',

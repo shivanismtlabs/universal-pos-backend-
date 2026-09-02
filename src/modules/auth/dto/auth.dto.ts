@@ -5,6 +5,7 @@ import {
   IsArray,
   IsEmail,
   IsIn,
+  IsNotEmpty,
   IsOptional,
   IsString,
   IsUUID,
@@ -172,13 +173,14 @@ export class LoginDto {
 
   @ApiProperty({ example: 'admin@demo-shop.com' })
   @Transform(toLowerTrim)
-  @IsEmail()
+  @IsNotEmpty({ message: 'Please enter your email address.' })
+  @IsEmail({}, { message: 'Please enter a valid email address.' })
   @MaxLength(255)
   email!: string;
 
   @ApiProperty({ example: 'Password123!' })
   @IsString()
-  @MinLength(1)
+  @MinLength(1, { message: 'Please enter your password.' })
   @MaxLength(72)
   password!: string;
 }
@@ -223,6 +225,15 @@ export class SetPinDto {
   @IsString()
   @Matches(/^\d{4,6}$/, { message: 'PIN must be 4–6 digits' })
   pin!: string;
+
+  @ApiPropertyOptional({
+    example: '739204',
+    description: 'Required when changing your own PIN if one is already set',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{4,6}$/, { message: 'Current PIN must be 4–6 digits' })
+  currentPin?: string;
 }
 
 export class PinLoginDto {
@@ -247,13 +258,13 @@ export class PinLoginDto {
 export class SignupIdentityDto {
   @ApiProperty({ example: 'Riya Sharma' })
   @IsString()
-  @MinLength(2)
-  @MaxLength(255)
+  @MinLength(2, { message: 'Enter at least 2 characters' })
+  @MaxLength(255, { message: 'Name is too long' })
   fullName!: string;
 
   @ApiProperty({ example: 'riya@shop.com' })
   @Transform(toLowerTrim)
-  @IsEmail()
+  @IsEmail({}, { message: 'Enter a valid email' })
   @MaxLength(255)
   email!: string;
 
@@ -262,13 +273,12 @@ export class SignupIdentityDto {
   @IsStrongPassword()
   password!: string;
 
-  @ApiPropertyOptional({ example: '+919876543210' })
-  @IsOptional()
+  @ApiProperty({ example: '+919876543210' })
   @IsString()
   @IsInternationalPhone({
-    message: 'phone must be a valid phone number (any country)',
+    message: 'Enter a valid phone number for the selected country',
   })
-  phone?: string;
+  phone!: string;
 }
 
 /** Zoho organization setup after identity */

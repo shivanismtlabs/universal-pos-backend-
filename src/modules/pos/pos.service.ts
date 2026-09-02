@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -38,7 +39,7 @@ import {
   saveProductImage,
 } from '../../common/product-image';
 import { throwIfUnique } from '../../common/prisma/prisma-errors';
-import { nextInternalCode128Candidate } from '../../common/barcode';
+import { nextInternalCode128Candidate, parseScaleBarcode } from '../../common/barcode';
 import { resolveDefaultLocationId } from '../../common/location-access';
 import { categoryIdsWithDescendants } from '../../common/category-tree';
 import {
@@ -48,6 +49,7 @@ import {
 import { LowStockAlertService } from '../notify/low-stock-alert.service';
 import { StockMutationEngine } from '../inventory/stock-mutation.engine';
 import { RestaurantService } from '../restaurant/restaurant.service';
+import { BillingService } from '../billing/billing.service';
 
 const MAX_PRODUCT_IMAGES = 8;
 
@@ -120,6 +122,14 @@ import {
 import { expectedCash, cashVariance } from '../payments/register-cash';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { NotifyService } from '../notify/notify.service';
+import { UnitPricingService } from '../catalog/unit-pricing.service';
+import type { LineCalcResult } from '../catalog/pricing-engine';
+import { d } from '../catalog/pricing-engine';
+import {
+  calcMeta,
+  inventoryQtyOf,
+  orderLineSnapshotFields,
+} from './pos-qty';
 import {
   AddSaleCategoryDto,
   AddSaleProductDto,
@@ -135,6 +145,7 @@ import {
   UploadSaleImageDto,
 } from './dto/pos.dto';
 import { ImportSaleProductsDto } from './dto/import-sale-products.dto';
+import { resolveCashRoundOffAmount } from './payment-rounding';
 
 const READY_FROM: OrderStatus[] = [
   OrderStatus.confirmed,
@@ -163,6 +174,8 @@ function posSettingsOf(settings: unknown): {
 
 @Injectable()
 export class PosService {
+  private readonly log = new Logger(PosService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly paymentsService: PaymentsService,
@@ -174,6 +187,8 @@ export class PosService {
     private readonly approvals: EnterpriseApprovalsService,
     private readonly stock: StockMutationEngine,
     private readonly restaurant: RestaurantService,
+    private readonly billing: BillingService,
+    private readonly unitPricing: UnitPricingService,
   ) {}
 
   /**
@@ -294,15 +309,6 @@ export class PosService {
     if (qtyErr) throw new BadRequestException(qtyErr);
     const qty = normalizeQty(rawQty, sellUnit, units);
 
-    const isServiceEarly = dto.itemType === 'service';
-    const willTrack =
-      isServiceEarly ? false : dto.trackInventory !== false;
-    if (willTrack && qty < 1) {
-      throw new BadRequestException(
-        'Opening quantity must be at least 1 (not 0 or a fraction below 1)',
-      );
-    }
-
     const cat = await this.prisma.category.findFirst({
       where: { id: dto.categoryId, tenantId: user.tenantId },
       select: { id: true, name: true },
@@ -358,7 +364,9 @@ export class PosService {
             : dto.isComposite
               ? 'bundle'
               : 'physical',
-          fulfillmentMode: FulfillmentMode.sale,
+          fulfillmentMode: isService
+            ? FulfillmentMode.service
+            : FulfillmentMode.sale,
           trackQty: trackInventory,
           trackSerial,
           trackBatch: Boolean(dto.batchTracking) && !isService,
@@ -388,6 +396,12 @@ export class PosService {
             itemType: isService ? 'service' : 'goods',
             itemStructure: dto.itemStructure === 'variants' ? 'variants' : 'single',
             ...(photoUrl ? { images: [photoUrl] } : {}),
+            ...(isService &&
+            dto.durationMinutes != null &&
+            Number.isFinite(dto.durationMinutes) &&
+            dto.durationMinutes > 0
+              ? { durationMinutes: Math.round(Number(dto.durationMinutes)) }
+              : {}),
             ...(dto.manufacturer?.trim()
               ? { manufacturer: dto.manufacturer.trim() }
               : {}),
@@ -672,21 +686,31 @@ export class PosService {
           cat = await resolveCategory(row, i);
         }
 
+        const isService = row.itemType === 'service';
         const res = await this.addSaleProduct(user, {
           title: row.title,
           description: row.description,
           categoryId: cat.id,
           sku: row.sku,
-          sellUnit: row.sellUnit,
+          sellUnit: isService
+            ? row.sellUnit || 'service'
+            : row.sellUnit,
           price: row.price,
-          qty: row.qty ?? 0,
+          qty: isService ? 0 : row.qty ?? 0,
           locationId,
           manufacturer: row.manufacturer,
           barcode: row.barcode,
           costPrice: row.costPrice,
           reorderPoint: row.reorderPoint,
           hsnOrSac: row.hsnOrSac,
-          trackInventory: row.trackInventory,
+          itemType: isService ? 'service' : 'goods',
+          durationMinutes: row.durationMinutes,
+          // Services never track stock. Goods: count unless row opts out.
+          trackInventory: isService
+            ? false
+            : row.trackInventory === false && !(Number(row.qty) > 0)
+              ? false
+              : true,
           image,
         });
         created.push({
@@ -1303,7 +1327,7 @@ export class PosService {
   }
 
   /** Recent closed sale tickets for the floor */
-  async listRecentSales(user: AuthUser, limit = 20) {
+  async listRecentSales(user: AuthUser, limit = 20, locationId?: string) {
     await this.assertSaleShop(user.tenantId);
     const take = Math.min(Math.max(limit, 1), 50);
     const orders = await this.prisma.order.findMany({
@@ -1311,6 +1335,7 @@ export class PosService {
         tenantId: user.tenantId,
         kind: OrderKind.sale,
         status: { in: [OrderStatus.closed, OrderStatus.fulfilled] },
+        ...(locationId ? { locationId } : {}),
       },
       orderBy: { createdAt: 'desc' },
       take,
@@ -1472,6 +1497,117 @@ export class PosService {
     }
   }
 
+  /** Persist originalAmount / roundOffAmount / finalAmount on order meta. */
+  private async persistPaymentRoundingMeta(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    orderId: string,
+    input: {
+      originalAmount: number;
+      roundOffAmount: number;
+      finalAmount: number;
+    },
+  ) {
+    const order = await tx.order.findFirstOrThrow({
+      where: { id: orderId, tenantId },
+      select: { meta: true },
+    });
+    const prevMeta = asMeta(order.meta);
+    const originalAmount = Number(input.originalAmount.toFixed(2));
+    const roundOffAmount = Number(input.roundOffAmount.toFixed(2));
+    const finalAmount = Number(input.finalAmount.toFixed(2));
+    await tx.order.update({
+      where: { id: orderId },
+      data: {
+        meta: {
+          ...prevMeta,
+          roundOff: roundOffAmount,
+          roundOffAmount,
+          originalAmount,
+          finalAmount,
+          exactTotal: originalAmount,
+          roundedTotal: finalAmount,
+        },
+      },
+    });
+  }
+
+  /**
+   * Apply nearest-rupee half-up round-off so balanceDue matches collectable ₹.
+   * Positive → Round off fee; negative → write-off into discountTotal (not cashier %).
+   */
+  private async applyCheckoutRoundOff(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    orderId: string,
+    roundOffAmount: number | undefined,
+    exactBalanceDue: number,
+  ) {
+    const ro = Number(roundOffAmount ?? 0);
+    const originalAmount = Number(exactBalanceDue);
+
+    if (Number.isFinite(ro) && Math.abs(ro) >= 0.005) {
+      if (Math.abs(ro) > 0.99) {
+        throw new BadRequestException('Round off must be within ±0.99');
+      }
+
+      const order = await tx.order.findFirstOrThrow({
+        where: { id: orderId, tenantId },
+        select: { discountTotal: true },
+      });
+
+      if (ro > 0) {
+        await tx.orderFee.create({
+          data: {
+            tenantId,
+            orderId,
+            feeCode: 'round_off',
+            reason: 'Round off',
+            amount: money(ro).toFixed(2),
+          },
+        });
+      } else {
+        const nextDisc = money(order.discountTotal).plus(Math.abs(ro));
+        await tx.order.update({
+          where: { id: orderId },
+          data: { discountTotal: nextDisc.toFixed(2) },
+        });
+      }
+
+      await this.ordersService.recalculateTotals(tx, tenantId, orderId);
+    }
+
+    const after = await tx.order.findFirstOrThrow({
+      where: { id: orderId, tenantId },
+      select: { balanceDue: true },
+    });
+
+    await this.persistPaymentRoundingMeta(tx, tenantId, orderId, {
+      originalAmount,
+      roundOffAmount: Math.abs(ro) >= 0.005 ? ro : 0,
+      finalAmount: Number(after.balanceDue),
+    });
+  }
+
+  /** Cash-only: auto-compute or validate round-off; digital/split → reject. */
+  private resolveCashRoundOff(
+    roundOffAmount: number | undefined,
+    payments: Array<{ method: PaymentMethod }> | undefined,
+    exactBalanceDue: number,
+  ): number | undefined {
+    try {
+      return resolveCashRoundOffAmount(
+        roundOffAmount,
+        payments,
+        exactBalanceDue,
+      );
+    } catch (e) {
+      throw new BadRequestException(
+        e instanceof Error ? e.message : 'Invalid round off',
+      );
+    }
+  }
+
   /**
    * Retail catalog for the counter — searchable stock levels at a location.
    */
@@ -1499,10 +1635,21 @@ export class PosService {
     });
     if (!loc) throw new NotFoundException('Location not found');
 
-    await seedZeroStockForNewLocation(this.prisma, {
-      tenantId: user.tenantId,
-      locationId,
-    });
+    try {
+      // Cap so opening the counter never dumps the full catalog into one INSERT
+      // (that filled Postgres WAL and surfaced as 53100 disk-full).
+      await seedZeroStockForNewLocation(this.prisma, {
+        tenantId: user.tenantId,
+        locationId,
+        maxRows: 250,
+      });
+    } catch (err) {
+      this.log.warn(
+        `Could not backfill zero stock at location ${locationId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
 
     const limitCap = opts.forPurchase ? 200 : 100;
     const limit = Math.min(Math.max(opts.limit ?? 40, 1), limitCap);
@@ -1592,6 +1739,29 @@ export class PosService {
               trackSerial: true,
               trackBatch: true,
               kind: true,
+              baseUnitId: true,
+              pricingUnitId: true,
+              pricingStrategy: true,
+              pricePerPricingUnit: true,
+              baseUnit: {
+                select: {
+                  id: true,
+                  symbol: true,
+                  name: true,
+                  unitGroupId: true,
+                },
+              },
+              pricingUnit: { select: { id: true, symbol: true, name: true } },
+              productUnits: {
+                where: { effectiveTo: null },
+                select: {
+                  unitId: true,
+                  conversionToBase: true,
+                  fixedPrice: true,
+                  isDefaultSellingUnit: true,
+                  unit: { select: { id: true, symbol: true, name: true } },
+                },
+              },
             category: { select: { id: true, name: true } },
           },
         },
@@ -1601,6 +1771,22 @@ export class PosService {
     ]);
 
     const productIds = items.map((r) => r.productId);
+    const systemUnits = await this.prisma.unit.findMany({
+      where: { isActive: true, tenantId: null },
+      select: {
+        id: true,
+        symbol: true,
+        name: true,
+        unitGroupId: true,
+      },
+      orderBy: [{ isBaseUnit: 'desc' }, { symbol: 'asc' }],
+    });
+    const unitsByGroup = new Map<string, typeof systemUnits>();
+    for (const u of systemUnits) {
+      const list = unitsByGroup.get(u.unitGroupId) ?? [];
+      list.push(u);
+      unitsByGroup.set(u.unitGroupId, list);
+    }
     const [variants, batches, variantLevels] = await Promise.all([
       productIds.length
         ? this.prisma.productVariant.findMany({
@@ -1751,6 +1937,55 @@ export class PosService {
           })),
           requiresSerial: row.product.trackSerial === true,
           recipeTracked: meta.recipeTracked === true,
+          pricingStrategy: row.product.pricingStrategy,
+          pricePerPricingUnit:
+            row.product.pricePerPricingUnit != null
+              ? Number(row.product.pricePerPricingUnit)
+              : null,
+          baseUnitId: row.product.baseUnitId,
+          pricingUnitId: row.product.pricingUnitId,
+          baseUnit: row.product.baseUnit,
+          pricingUnit: row.product.pricingUnit,
+          productUnits: (row.product.productUnits ?? []).map((pu) => ({
+            unitId: pu.unitId,
+            symbol: pu.unit.symbol,
+            name: pu.unit.name,
+            conversionToBase: Number(pu.conversionToBase),
+            fixedPrice:
+              pu.fixedPrice != null ? Number(pu.fixedPrice) : null,
+            isDefaultSellingUnit: pu.isDefaultSellingUnit,
+          })),
+          /** Counter entry units: same group as base (kg↔g) + packaging rows */
+          entryUnits: (() => {
+            const map = new Map<
+              string,
+              { unitId: string; symbol: string; name: string }
+            >();
+            if (row.product.baseUnit) {
+              map.set(row.product.baseUnit.id, {
+                unitId: row.product.baseUnit.id,
+                symbol: row.product.baseUnit.symbol,
+                name: row.product.baseUnit.name,
+              });
+              for (const u of unitsByGroup.get(
+                row.product.baseUnit.unitGroupId,
+              ) ?? []) {
+                map.set(u.id, {
+                  unitId: u.id,
+                  symbol: u.symbol,
+                  name: u.name,
+                });
+              }
+            }
+            for (const pu of row.product.productUnits ?? []) {
+              map.set(pu.unitId, {
+                unitId: pu.unitId,
+                symbol: pu.unit.symbol,
+                name: pu.unit.name,
+              });
+            }
+            return [...map.values()];
+          })(),
           channelPrices: (() => {
             const nested =
               meta.channelPrices && typeof meta.channelPrices === 'object'
@@ -1774,6 +2009,21 @@ export class PosService {
             meta.soldOut === true ||
             meta.soldOut === 'true' ||
             meta.soldOut === 'yes',
+          foodType: (() => {
+            const raw = String(meta.foodType ?? '')
+              .trim()
+              .toLowerCase()
+              .replace(/[\s-]+/g, '_');
+            if (raw === 'veg' || raw === 'vegetarian') return 'veg';
+            if (
+              raw === 'non_veg' ||
+              raw === 'nonveg' ||
+              raw === 'non_vegetarian'
+            )
+              return 'non_veg';
+            if (raw === 'egg' || raw === 'eggetarian') return 'egg';
+            return null;
+          })(),
           location: row.location,
         };
       }),
@@ -1788,6 +2038,7 @@ export class PosService {
     const raw = opts.sku.trim();
     if (!raw) throw new BadRequestException('sku is required');
     const sku = raw.toUpperCase();
+    const scale = parseScaleBarcode(raw);
 
     const locationId =
       opts.locationId ?? (await this.defaultLocationId(user.tenantId, user));
@@ -1928,6 +2179,44 @@ export class PosService {
     }
 
     if (!row) {
+      const pu = await this.prisma.productUnit.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          effectiveTo: null,
+          barcode: { equals: raw, mode: 'insensitive' },
+        },
+        include: { product: { select: { id: true } } },
+      });
+      if (pu) {
+        row = await this.prisma.stockLevel.findFirst({
+          where: {
+            tenantId: user.tenantId,
+            locationId,
+            productId: pu.productId,
+          },
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+                skuCode: true,
+                barcode: true,
+                photoUrl: true,
+                taxCode: true,
+                meta: true,
+                trackQty: true,
+                trackSerial: true,
+                trackBatch: true,
+                kind: true,
+                category: { select: { id: true, name: true } },
+              },
+            },
+          },
+        });
+      }
+    }
+
+    if (!row) {
       throw new NotFoundException(`SKU / barcode not found: ${raw}`);
     }
     const onHand = Number(row.qtyOnHand);
@@ -2019,6 +2308,12 @@ export class PosService {
         expiresAt: b.expiresAt?.toISOString() ?? null,
       })),
       requiresSerial: row.product.trackSerial === true,
+      ...(scale
+        ? {
+            scanQty: Number(scale.quantity),
+            scanUnitHint: scale.unitHint ?? null,
+          }
+        : {}),
     };
   }
 
@@ -2032,6 +2327,8 @@ export class PosService {
       variantId?: string;
       batchId?: string;
       serialNumber?: string;
+      sellingUnitId?: string;
+      unitPrice?: number;
     },
   ) {
     const level = await tx.stockLevel.findFirst({
@@ -2047,11 +2344,32 @@ export class PosService {
     }
     const unit = normalizeSellUnit(level.sellUnit);
     const units = await this.tenantUnits(user.tenantId);
-    const qty = Number(line.quantity);
-    const qtyErr = validateSellQty(qty, unit, units);
-    if (qtyErr) {
+    const qtyEntered = line.quantity;
+    const qtyErr = validateSellQty(qtyEntered, unit, units);
+    let calc: LineCalcResult | null = null;
+    if (level.product.baseUnitId) {
+      try {
+        calc = await this.unitPricing.calculateLine(user, {
+          productId: level.productId,
+          enteredQty: qtyEntered,
+          sellingUnitId: line.sellingUnitId,
+          sellingUnitSymbol: line.sellingUnitId ? undefined : level.sellUnit,
+          unitPriceOverride: line.unitPrice,
+          inventorySign: -1,
+        });
+      } catch (e) {
+        if (line.sellingUnitId) {
+          throw e;
+        }
+        if (qtyErr) {
+          throw new BadRequestException(`${level.sku}: ${qtyErr}`);
+        }
+      }
+    } else if (qtyErr) {
       throw new BadRequestException(`${level.sku}: ${qtyErr}`);
     }
+
+    const inventoryQty = calc ? calc.baseQuantity : d(qtyEntered);
 
     const itemMeta = asMeta(level.product.meta);
     const itemStructure =
@@ -2094,11 +2412,10 @@ export class PosService {
     }
 
     const tracks = sellLevel.product.trackQty !== false;
-    const available =
-      Number(sellLevel.qtyOnHand) - Number(sellLevel.qtyReserved);
-    if (tracks && available + 1e-9 < qty) {
+    const available = d(sellLevel.qtyOnHand).sub(d(sellLevel.qtyReserved ?? 0));
+    if (tracks && available.add('0.000000001').lt(inventoryQty)) {
       throw new BadRequestException(
-        `Insufficient stock for ${sellLevel.sku} (available ${available} ${unit}, need ${qty})`,
+        `Insufficient stock for ${sellLevel.sku} (available ${available.toFixed()} ${calc?.baseUnitSymbol ?? unit}, need ${inventoryQty.toFixed()} ${calc?.baseUnitSymbol ?? unit})`,
       );
     }
 
@@ -2125,7 +2442,7 @@ export class PosService {
       throw new BadRequestException(`${sellLevel.sku}: serial is required`);
     }
 
-    return { level: sellLevel, qty, tracks, unit };
+    return { level: sellLevel, qty: Number(inventoryQty.toFixed()), tracks, calc, inventoryQty };
   }
 
   /**
@@ -2134,6 +2451,15 @@ export class PosService {
    */
   async prepareSaleCheckout(user: AuthUser, dto: PrepareSaleCheckoutDto) {
     await this.assertSaleShop(user.tenantId);
+
+    if (
+      dto.roundOffAmount !== undefined &&
+      Math.abs(Number(dto.roundOffAmount)) >= 0.005
+    ) {
+      throw new BadRequestException(
+        'Round off applies only to cash checkout — card/UPI/QR pay the exact amount',
+      );
+    }
 
     const loc = await this.prisma.location.findFirst({
       where: {
@@ -2215,28 +2541,32 @@ export class PosService {
       });
 
       for (const line of dto.items) {
-        const { level, qty } = await this.resolvePosSaleLine(
+        const { level, qty, calc, inventoryQty } = await this.resolvePosSaleLine(
           tx,
           user,
           dto.locationId,
           line,
         );
 
-        const unitPrice =
-          line.unitPrice !== undefined
-            ? money(line.unitPrice)
-            : money(level.sellPrice);
-        const lineGross = unitPrice.mul(qty);
         const productRatePct = resolveProductTaxRatePercent({
           taxCode: level.product.taxCode,
           meta: level.product.meta,
         });
+        const unitPrice = calc
+          ? calc.unitPrice
+          : line.unitPrice !== undefined
+            ? money(line.unitPrice)
+            : money(level.sellPrice);
+        const lineGross = calc
+          ? calc.grossAmount
+          : unitPrice.mul(qty);
         const taxed = computeLineTax(taxProfile, {
           lineGross,
           ...(productRatePct != null
             ? { rate: productRatePct / 100 }
             : {}),
         });
+        const snap = calc ? orderLineSnapshotFields(calc) : null;
         const lineMeta: Record<string, unknown> = {
           taxRate:
             productRatePct != null ? productRatePct / 100 : taxProfile.rate,
@@ -2247,6 +2577,7 @@ export class PosService {
           ...(line.serialNumber?.trim()
             ? { serialNumber: line.serialNumber.trim() }
             : {}),
+          ...(calc ? calcMeta(calc) : {}),
         };
 
         await tx.orderItem.create({
@@ -2257,10 +2588,22 @@ export class PosService {
             productId: level.productId,
             stockLevelId: level.id,
             description: level.product.name,
-            quantity: qty,
-            unitPrice: unitPrice.toFixed(2),
+            quantity: snap?.quantity ?? qty,
+            unitPrice: (snap?.unitPrice ?? unitPrice.toFixed(4)) as string,
             lineTotal: taxed.lineTotal.toFixed(2),
             taxAmount: taxed.taxAmount.toFixed(2),
+            ...(snap
+              ? {
+                  orderedQuantity: snap.orderedQuantity,
+                  orderedUnitId: snap.orderedUnitId,
+                  orderedUnitSymbol: snap.orderedUnitSymbol,
+                  baseQuantity: snap.baseQuantity,
+                  baseUnitId: snap.baseUnitId,
+                  baseUnitSymbol: snap.baseUnitSymbol,
+                  conversionFactor: snap.conversionFactor,
+                  priceSource: snap.priceSource,
+                }
+              : { baseQuantity: inventoryQty }),
             meta: lineMeta as Prisma.InputJsonValue,
           },
         });
@@ -2343,6 +2686,17 @@ export class PosService {
         user.tenantId,
         created.id,
       );
+
+      const preRound = await tx.order.findFirstOrThrow({
+        where: { id: created.id },
+        select: { balanceDue: true },
+      });
+      const exactDue = Number(preRound.balanceDue);
+      await this.persistPaymentRoundingMeta(tx, user.tenantId, created.id, {
+        originalAmount: exactDue,
+        roundOffAmount: 0,
+        finalAmount: exactDue,
+      });
 
       const after = await tx.order.findFirstOrThrow({
         where: { id: created.id },
@@ -2490,7 +2844,7 @@ export class PosService {
     await this.prisma.$transaction(async (tx) => {
       for (const item of order.items) {
         if (!item.stockLevelId) continue;
-        const qty = Number(item.quantity);
+        const qty = Number(inventoryQtyOf(item).toFixed());
         const level = await tx.stockLevel.findFirst({
           where: { id: item.stockLevelId, tenantId: user.tenantId },
           include: { product: { select: { trackQty: true } } },
@@ -2619,6 +2973,24 @@ export class PosService {
       await this.restaurant.ensureKotAfterSale(user, orderId);
     } catch {
       /* dining overlay optional */
+    }
+
+    const latestPay = await this.prisma.payment.findFirst({
+      where: {
+        tenantId: user.tenantId,
+        orderId,
+        status: PaymentStatus.succeeded,
+        type: { in: [PaymentType.payment, PaymentType.deposit] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (latestPay) {
+      await this.issueCheckoutInvoices(
+        user,
+        orderId,
+        [latestPay],
+        Number(latestPay.amount),
+      );
     }
 
     return this.getReceipt(user, orderId);
@@ -2750,28 +3122,35 @@ export class PosService {
       });
 
       for (const line of dto.items) {
-        const { level, qty, tracks } = await this.resolvePosSaleLine(
-          tx,
-          user,
-          dto.locationId,
-          line,
-        );
+        const { level, qty, tracks, calc, inventoryQty } =
+          await this.resolvePosSaleLine(
+            tx,
+            user,
+            dto.locationId,
+            line,
+          );
 
-        const unitPrice =
-          line.unitPrice !== undefined
-            ? money(line.unitPrice)
-            : money(level.sellPrice);
-        const lineGross = unitPrice.mul(qty);
         const productRatePct = resolveProductTaxRatePercent({
           taxCode: level.product.taxCode,
           meta: level.product.meta,
         });
+        const unitPrice = calc
+          ? calc.unitPrice
+          : line.unitPrice !== undefined
+            ? money(line.unitPrice)
+            : money(level.sellPrice);
+        const lineGross = calc
+          ? calc.grossAmount
+          : unitPrice.mul(qty);
         const taxed = computeLineTax(taxProfile, {
           lineGross,
           ...(productRatePct != null
             ? { rate: productRatePct / 100 }
             : {}),
         });
+        const snap = calc ? orderLineSnapshotFields(calc) : null;
+        const inv = inventoryQty;
+        const invKey = inv.toFixed();
         const lineMeta: Record<string, unknown> = {
           taxRate:
             productRatePct != null ? productRatePct / 100 : taxProfile.rate,
@@ -2782,6 +3161,7 @@ export class PosService {
           ...(line.serialNumber?.trim()
             ? { serialNumber: line.serialNumber.trim() }
             : {}),
+          ...(calc ? calcMeta(calc) : {}),
         };
 
         if (tracks) {
@@ -2796,7 +3176,7 @@ export class PosService {
               actorUserId: user.userId,
               locationId: dto.locationId,
               productId: level.productId,
-              parentQty: qty,
+              parentQty: Number(invKey),
               referenceType: 'order',
               referenceId: created.id,
             });
@@ -2810,11 +3190,11 @@ export class PosService {
               variantId: line.variantId,
               batchId: line.batchId,
               serialNumber: line.serialNumber,
-              qty: -qty,
+              qty: `-${invKey}`,
               type: StockLedgerType.sale,
               referenceType: 'order',
               referenceId: created.id,
-              idempotencyKey: `sale:${created.id}:${level.id}:${qty}:${line.variantId ?? ''}:${line.batchId ?? ''}:${line.serialNumber ?? ''}`,
+              idempotencyKey: `sale:${created.id}:${level.id}:${invKey}:${line.variantId ?? ''}:${line.batchId ?? ''}:${line.serialNumber ?? ''}`,
             });
             if (mut.batchId) lineMeta.batchId = mut.batchId;
             if (mut.stockUnitId) lineMeta.stockUnitId = mut.stockUnitId;
@@ -2825,7 +3205,7 @@ export class PosService {
             actorUserId: user.userId,
             locationId: dto.locationId,
             productId: level.productId,
-            parentQty: qty,
+            parentQty: Number(invKey),
             referenceType: 'order',
             referenceId: created.id,
           });
@@ -2839,10 +3219,22 @@ export class PosService {
             productId: level.productId,
             stockLevelId: level.id,
             description: level.product.name,
-            quantity: qty,
-            unitPrice: unitPrice.toFixed(2),
+            quantity: snap?.quantity ?? qty,
+            unitPrice: (snap?.unitPrice ?? unitPrice.toFixed(4)) as string,
             lineTotal: taxed.lineTotal.toFixed(2),
             taxAmount: taxed.taxAmount.toFixed(2),
+            ...(snap
+              ? {
+                  orderedQuantity: snap.orderedQuantity,
+                  orderedUnitId: snap.orderedUnitId,
+                  orderedUnitSymbol: snap.orderedUnitSymbol,
+                  baseQuantity: snap.baseQuantity,
+                  baseUnitId: snap.baseUnitId,
+                  baseUnitSymbol: snap.baseUnitSymbol,
+                  conversionFactor: snap.conversionFactor,
+                  priceSource: snap.priceSource,
+                }
+              : { baseQuantity: inv }),
             meta: lineMeta as Prisma.InputJsonValue,
           },
         });
@@ -2970,6 +3362,30 @@ export class PosService {
         }
       }
 
+      const preRoundRow = await tx.order.findFirstOrThrow({
+        where: { id: created.id },
+        select: { balanceDue: true },
+      });
+      const exactDue = Number(preRoundRow.balanceDue);
+
+      const paymentLines = dto.payments.map((p) => ({
+        ...p,
+        amount: Number(p.amount),
+      }));
+      const cashRoundOff = this.resolveCashRoundOff(
+        dto.roundOffAmount,
+        paymentLines,
+        exactDue,
+      );
+
+      await this.applyCheckoutRoundOff(
+        tx,
+        user.tenantId,
+        created.id,
+        cashRoundOff,
+        exactDue,
+      );
+
       const dueRow = await tx.order.findFirstOrThrow({
         where: { id: created.id },
         select: { balanceDue: true },
@@ -2980,10 +3396,6 @@ export class PosService {
       }
 
       // Do not force single-cash to full due — supports partial payments
-      const paymentLines = dto.payments.map((p) => ({
-        ...p,
-        amount: Number(p.amount),
-      }));
       const clientPayHint = paymentLines.reduce((s, p) => s + p.amount, 0);
       // Full-ticket cash: lift to server Due only when cashier is already
       // collecting ~the whole ticket (tax/settings drift). Never silently
@@ -3055,7 +3467,8 @@ export class PosService {
       }
 
       const payments = [];
-      const openRegister =
+      // Cash attaches to an open drawer; auto-open if the shift was never started.
+      let openRegister =
         paymentLines.some((p) => p.method === PaymentMethod.cash)
           ? await tx.registerSession.findFirst({
               where: {
@@ -3067,12 +3480,17 @@ export class PosService {
             })
           : null;
       if (
-        paymentLines.some((p) => p.method === PaymentMethod.cash) &&
-        !openRegister
+        !openRegister &&
+        paymentLines.some((p) => p.method === PaymentMethod.cash)
       ) {
-        throw new BadRequestException(
-          'Open the register before recording a cash payment',
-        );
+        openRegister = await tx.registerSession.create({
+          data: {
+            tenantId: user.tenantId,
+            locationId: dto.locationId,
+            openedById: user.userId,
+            openingFloat: '0.00',
+          },
+        });
       }
 
       for (const p of paymentLines) {
@@ -3346,6 +3764,13 @@ export class PosService {
       }
     }
 
+    const partInvoice = await this.issueCheckoutInvoices(
+      user,
+      result.orderId,
+      result.payments,
+      result.paidSum,
+    );
+
     const receipt = await this.getReceipt(user, result.orderId);
 
     let receiptNotifications: unknown[] = [];
@@ -3393,6 +3818,14 @@ export class PosService {
       change: money(change).toFixed(2),
       cashTendered: money(tendered).toFixed(2),
       receipt,
+      invoice: partInvoice
+        ? {
+            id: partInvoice.id,
+            invoiceNumber: partInvoice.invoiceNumber,
+            grandTotal: Number(partInvoice.grandTotal),
+            taxBreakdown: partInvoice.taxBreakdown,
+          }
+        : null,
       replayed: false,
       partial: money(order?.balanceDue ?? 0).gt(0),
       balanceDue: money(order?.balanceDue ?? 0).toFixed(2),
@@ -3401,6 +3834,108 @@ export class PosService {
       pointsEarned: result.pointsEarned,
       receiptNotifications,
     };
+  }
+
+  /**
+   * Split bill → one GST invoice per part. Full pay → single invoice if missing.
+   */
+  private async issueCheckoutInvoices(
+    user: AuthUser,
+    orderId: string,
+    payments: Array<{ id: string; amount: Prisma.Decimal | string | number }>,
+    paidSum: number,
+  ) {
+    try {
+      const order = await this.prisma.order.findFirst({
+        where: { id: orderId, tenantId: user.tenantId },
+        select: {
+          id: true,
+          balanceDue: true,
+          meta: true,
+          invoices: {
+            select: { id: true, taxBreakdown: true },
+            orderBy: { createdAt: 'asc' },
+          },
+        },
+      });
+      if (!order) return null;
+
+      const meta =
+        order.meta && typeof order.meta === 'object' && !Array.isArray(order.meta)
+          ? (order.meta as Record<string, unknown>)
+          : {};
+      const splitRaw = meta.splitBill;
+      const split =
+        splitRaw && typeof splitRaw === 'object' && !Array.isArray(splitRaw)
+          ? (splitRaw as {
+              parts?: Array<{ label?: string; amount?: number }>;
+            })
+          : null;
+      const parts = Array.isArray(split?.parts) ? split!.parts! : [];
+
+      if (parts.length >= 2) {
+        const used = new Set(
+          order.invoices
+            .map((inv) => {
+              const b =
+                inv.taxBreakdown && typeof inv.taxBreakdown === 'object'
+                  ? (inv.taxBreakdown as Record<string, unknown>)
+                  : {};
+              return b.splitPartIndex != null
+                ? Number(b.splitPartIndex)
+                : null;
+            })
+            .filter((n): n is number => n != null && Number.isFinite(n)),
+        );
+        let nextIndex = 0;
+        while (used.has(nextIndex) && nextIndex < parts.length) nextIndex += 1;
+        if (nextIndex >= parts.length) return null;
+
+        const part = parts[nextIndex]!;
+        const partAmt = Math.round(
+          (Number(part.amount) > 0 ? Number(part.amount) : 0) * 100,
+        ) / 100;
+        // Callers pass the payment(s) just recorded; use the last entry.
+        const lastPay = payments[payments.length - 1];
+        const lastPayAmt = Math.round(Number(lastPay?.amount ?? 0) * 100) / 100;
+        const ticketSettled = Number(order.balanceDue) <= 0.009;
+        // Do not mint a part invoice on mid-part partials — wait until
+        // this payment covers the part (or the whole ticket is closed).
+        if (
+          !ticketSettled &&
+          partAmt > 0.009 &&
+          lastPayAmt + 0.009 < partAmt
+        ) {
+          return null;
+        }
+        const amount =
+          partAmt > 0.009
+            ? partAmt
+            : Math.round(
+                (lastPayAmt > 0 ? lastPayAmt : paidSum) * 100,
+              ) / 100;
+        return this.billing.issueSaleInvoice(user, orderId, {
+          amount,
+          splitPartIndex: nextIndex,
+          splitPartLabel:
+            typeof part.label === 'string' && part.label.trim()
+              ? part.label.trim()
+              : `Part ${nextIndex + 1}`,
+          paymentId: lastPay?.id,
+        });
+      }
+
+      // Non-split (or single part): one invoice when ticket is fully paid
+      if (Number(order.balanceDue) <= 0.009) {
+        return this.billing.issueSaleInvoice(user, orderId, {
+          onlyIfMissing: true,
+          paymentId: payments[payments.length - 1]?.id,
+        });
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   private async releaseDiningIfAny(
@@ -3642,6 +4177,24 @@ export class PosService {
         reason: f.reason,
         amount: f.amount,
       })),
+      paymentRounding: {
+        originalAmount:
+          typeof meta.originalAmount === 'number'
+            ? meta.originalAmount
+            : typeof meta.exactTotal === 'number'
+              ? meta.exactTotal
+              : Number(order.balanceDue),
+        roundOffAmount:
+          typeof meta.roundOffAmount === 'number'
+            ? meta.roundOffAmount
+            : typeof meta.roundOff === 'number'
+              ? meta.roundOff
+              : 0,
+        finalAmount:
+          typeof meta.finalAmount === 'number'
+            ? meta.finalAmount
+            : Number(order.balanceDue),
+      },
       payments: order.payments.map((p) => ({
         id: p.id,
         type: p.type,
@@ -3661,6 +4214,31 @@ export class PosService {
         .filter((p) => p.type === 'payment' || p.type === 'deposit')
         .reduce((s, p) => s + Number(p.amount), 0),
       remainingDue: order.balanceDue,
+      invoices: (
+        await this.prisma.invoice.findMany({
+          where: { tenantId: user.tenantId, orderId },
+          orderBy: { createdAt: 'asc' },
+          select: {
+            id: true,
+            invoiceNumber: true,
+            grandTotal: true,
+            cgst: true,
+            sgst: true,
+            igst: true,
+            taxBreakdown: true,
+            createdAt: true,
+          },
+        })
+      ).map((inv) => ({
+        id: inv.id,
+        invoiceNumber: inv.invoiceNumber,
+        grandTotal: inv.grandTotal,
+        cgst: inv.cgst,
+        sgst: inv.sgst,
+        igst: inv.igst,
+        taxBreakdown: inv.taxBreakdown,
+        createdAt: inv.createdAt,
+      })),
       cashTendered:
         typeof meta.cashTendered === 'string' ||
         typeof meta.cashTendered === 'number'
@@ -3749,6 +4327,24 @@ export class PosService {
             ? money(line.unitPrice)
             : money(level.sellPrice);
         const lineTotal = unitPrice.mul(line.quantity);
+        let snap: ReturnType<typeof orderLineSnapshotFields> | null = null;
+        if (level.product.baseUnitId) {
+          try {
+            const calc = await this.unitPricing.calculateLine(user, {
+              productId: level.productId,
+              enteredQty: line.quantity,
+              sellingUnitId: line.sellingUnitId,
+              sellingUnitSymbol: line.sellingUnitId
+                ? undefined
+                : level.sellUnit,
+              unitPriceOverride: line.unitPrice,
+              inventorySign: -1,
+            });
+            snap = orderLineSnapshotFields(calc);
+          } catch {
+            /* preserve cart even if conversion isn't configured yet */
+          }
+        }
         await tx.orderItem.create({
           data: {
             tenantId: user.tenantId,
@@ -3757,9 +4353,24 @@ export class PosService {
             productId: level.productId,
             stockLevelId: level.id,
             description: level.product.name,
-            quantity: line.quantity,
-            unitPrice: unitPrice.toFixed(2),
-            lineTotal: lineTotal.toFixed(2),
+            quantity: snap?.quantity ?? line.quantity,
+            unitPrice: snap?.unitPrice ?? unitPrice.toFixed(2),
+            lineTotal: (snap ? snap.unitPrice : lineTotal.toFixed(2)) as string,
+            ...(snap
+              ? {
+                  orderedQuantity: snap.orderedQuantity,
+                  orderedUnitId: snap.orderedUnitId,
+                  orderedUnitSymbol: snap.orderedUnitSymbol,
+                  baseQuantity: snap.baseQuantity,
+                  baseUnitId: snap.baseUnitId,
+                  baseUnitSymbol: snap.baseUnitSymbol,
+                  conversionFactor: snap.conversionFactor,
+                  priceSource: snap.priceSource,
+                  lineTotal: money(snap.unitPrice)
+                    .mul(snap.orderedQuantity)
+                    .toFixed(2),
+                }
+              : {}),
           },
         });
       }
@@ -3853,7 +4464,9 @@ export class PosService {
           unitPrice: Number(i.unitPrice),
           qty: Number(i.quantity),
           maxQty: Number(i.stockLevel?.qtyOnHand ?? i.quantity),
-          sellUnit: i.stockLevel?.sellUnit ?? 'pcs',
+          sellUnit: i.orderedUnitSymbol ?? i.stockLevel?.sellUnit ?? 'pcs',
+          sellingUnitId: i.orderedUnitId ?? undefined,
+          baseQty: i.baseQuantity != null ? Number(i.baseQuantity) : undefined,
         })),
       discountAmount: Number(order.discountTotal),
       customerId: order.customerId,

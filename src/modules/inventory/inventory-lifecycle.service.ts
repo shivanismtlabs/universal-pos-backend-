@@ -11,6 +11,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../database/database.module';
 import type { AuthUser } from '../auth/types';
+import { EnterpriseApprovalsService } from '../enterprise/enterprise-approvals.service';
 import { StockMutationEngine } from './stock-mutation.engine';
 
 @Injectable()
@@ -18,6 +19,7 @@ export class InventoryLifecycleService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stock: StockMutationEngine,
+    private readonly approvals: EnterpriseApprovalsService,
   ) {}
 
   async reserveQty(
@@ -149,7 +151,56 @@ export class InventoryLifecycleService {
     if (dto.fromLocationId === dto.toLocationId) {
       throw new BadRequestException('Source and destination must differ');
     }
-    if (!dto.lines?.length) throw new BadRequestException('lines required');
+    if (!dto.lines?.length) throw new BadRequestException('Add at least one line');
+
+    const [fromLoc, toLoc] = await Promise.all([
+      this.prisma.location.findFirst({
+        where: { id: dto.fromLocationId, tenantId: user.tenantId, isActive: true },
+      }),
+      this.prisma.location.findFirst({
+        where: { id: dto.toLocationId, tenantId: user.tenantId, isActive: true },
+      }),
+    ]);
+    if (!fromLoc) throw new BadRequestException('From location not found');
+    if (!toLoc) throw new BadRequestException('To location not found');
+
+    for (const line of dto.lines) {
+      const qty = Number(line.qty);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        throw new BadRequestException('Each line qty must be greater than 0');
+      }
+      const product = await this.prisma.product.findFirst({
+        where: {
+          id: line.productId,
+          tenantId: user.tenantId,
+          isActive: true,
+        },
+        select: { id: true, name: true, trackQty: true },
+      });
+      if (!product) {
+        throw new NotFoundException(`Product ${line.productId} not found`);
+      }
+      if (!product.trackQty) {
+        throw new BadRequestException(
+          `"${product.name}" is not quantity-tracked and cannot be transferred in bulk`,
+        );
+      }
+      const onHand = await this.prisma.stockLevel.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          locationId: dto.fromLocationId,
+          productId: line.productId,
+          variantKey: line.variantId ?? '',
+        },
+        select: { qtyOnHand: true },
+      });
+      if (!onHand || Number(onHand.qtyOnHand) + 1e-9 < qty) {
+        throw new BadRequestException(
+          `Insufficient stock for "${product.name}" at source (have ${Number(onHand?.qtyOnHand ?? 0)})`,
+        );
+      }
+    }
+
     return this.prisma.stockTransfer.create({
       data: {
         tenantId: user.tenantId,
@@ -173,6 +224,29 @@ export class InventoryLifecycleService {
   }
 
   async issueTransfer(user: AuthUser, id: string) {
+    const preview = await this.prisma.stockTransfer.findFirst({
+      where: { id, tenantId: user.tenantId },
+      include: { lines: true },
+    });
+    if (!preview) throw new NotFoundException('Transfer not found');
+
+    await this.approvals.assertOrQueue(user, {
+      type: 'stock_transfer',
+      tenantId: user.tenantId,
+      entityType: 'stock_transfer',
+      entityId: id,
+      reason: `Issue transfer ${id.slice(0, 8)} (${preview.lines.length} line(s))`,
+      payload: {
+        transferId: id,
+        fromLocationId: preview.fromLocationId,
+        toLocationId: preview.toLocationId,
+        lines: preview.lines.map((l) => ({
+          productId: l.productId,
+          qty: Number(l.qty),
+        })),
+      },
+    });
+
     return this.prisma.$transaction(async (tx) => {
       const doc = await tx.stockTransfer.findFirst({
         where: { id, tenantId: user.tenantId },
@@ -555,12 +629,82 @@ export class InventoryLifecycleService {
     });
   }
 
-  listTransfers(user: AuthUser) {
-    return this.prisma.stockTransfer.findMany({
+  async listTransfers(user: AuthUser) {
+    const rows = await this.prisma.stockTransfer.findMany({
       where: { tenantId: user.tenantId },
       orderBy: { createdAt: 'desc' },
-      take: 50,
-      include: { lines: true, from: { select: { name: true } }, to: { select: { name: true } } },
+      take: 100,
+      include: {
+        lines: true,
+        from: { select: { id: true, name: true, code: true } },
+        to: { select: { id: true, name: true, code: true } },
+      },
+    });
+    const productIds = [
+      ...new Set(rows.flatMap((r) => r.lines.map((l) => l.productId))),
+    ];
+    const products = productIds.length
+      ? await this.prisma.product.findMany({
+          where: { tenantId: user.tenantId, id: { in: productIds } },
+          select: {
+            id: true,
+            name: true,
+            skuCode: true,
+            unitOfMeasure: true,
+          },
+        })
+      : [];
+    const productMap = new Map(products.map((p) => [p.id, p]));
+    const actorIds = [
+      ...new Set(
+        rows
+          .map((r) => r.actorUserId)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    const actors = actorIds.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: actorIds } },
+          select: { id: true, fullName: true },
+        })
+      : [];
+    const actorMap = new Map(actors.map((a) => [a.id, a.fullName]));
+
+    return rows.map((r) => {
+      const lines = r.lines.map((l) => {
+        const p = productMap.get(l.productId);
+        return {
+          id: l.id,
+          productId: l.productId,
+          variantId: l.variantId,
+          batchId: l.batchId,
+          productName: p?.name ?? '—',
+          sku: p?.skuCode ?? '—',
+          unit: p?.unitOfMeasure ?? 'pcs',
+          qty: Number(l.qty),
+          qtyReceived: Number(l.qtyReceived),
+          qtyDamaged: Number(l.qtyDamaged),
+        };
+      });
+      const totalQty = lines.reduce((s, l) => s + l.qty, 0);
+      return {
+        id: r.id,
+        status: r.status,
+        notes: r.notes,
+        createdAt: r.createdAt,
+        issuedAt: r.issuedAt,
+        receivedAt: r.receivedAt,
+        fromLocationId: r.fromLocationId,
+        toLocationId: r.toLocationId,
+        fromLocationName: r.from.name,
+        toLocationName: r.to.name,
+        lineCount: lines.length,
+        totalQty,
+        lines,
+        actorName: r.actorUserId
+          ? (actorMap.get(r.actorUserId) ?? 'Staff')
+          : 'Staff',
+      };
     });
   }
 }

@@ -145,7 +145,9 @@ export class EnterpriseApprovalsService {
     if (evaled.allowed && !evaled.needsApproval) return { queued: false as const };
     const req = await this.createRequest(user, input);
     throw new ForbiddenException({
-      message: evaled.reason ?? 'Approval required',
+      message:
+        evaled.reason ??
+        `Approval required — open Approvals and approve request ${req.id.slice(0, 8)} before this stock transfer can run.`,
       approvalRequestId: req.id,
       status: 'pending',
     });
@@ -206,7 +208,7 @@ export class EnterpriseApprovalsService {
       title: `Approval needed: ${input.type}`,
       body: input.reason || `${input.type} awaiting approval`,
       severity: 'critical',
-      href: '/group/approvals',
+      href: '/group?tab=approvals',
       recipientRoles: ['manager', 'admin'],
       payload: { approvalRequestId: row.id, type: input.type },
     });
@@ -225,11 +227,19 @@ export class EnterpriseApprovalsService {
     });
   }
 
-  async listGroup(groupId: string, status?: string) {
+  async listGroup(
+    groupId: string,
+    status?: string,
+    visibleTenantIds?: string[],
+  ) {
+    if (visibleTenantIds && visibleTenantIds.length === 0) return [];
     return this.prisma.approvalRequest.findMany({
       where: {
         businessGroupId: groupId,
         ...(status ? { status } : {}),
+        ...(visibleTenantIds
+          ? { tenantId: { in: visibleTenantIds } }
+          : {}),
       },
       include: { steps: { orderBy: { stepIndex: 'asc' } } },
       orderBy: { createdAt: 'desc' },

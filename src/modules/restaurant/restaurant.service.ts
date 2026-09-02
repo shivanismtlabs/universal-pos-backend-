@@ -433,12 +433,19 @@ export class RestaurantService {
             orderNumber: true,
             status: true,
             customerId: true,
+            subtotal: true,
+            taxTotal: true,
+            discountTotal: true,
+            balanceDue: true,
+            createdAt: true,
             restaurantExt: {
               select: {
                 diningMode: true,
                 covers: true,
                 guestName: true,
                 meta: true,
+                kitchenPhase: true,
+                billedAt: true,
               },
             },
           },
@@ -448,6 +455,15 @@ export class RestaurantService {
     return rows.map((t) => {
       const layout = parseTableLayout(t.meta);
       const floorSettings = parseFloorDiningSettings(t.floor?.meta);
+      const ord = t.currentOrder;
+      const ext = ord?.restaurantExt;
+      const subtotal = ord ? Number(ord.subtotal) : null;
+      const tax = ord ? Number(ord.taxTotal ?? 0) : 0;
+      const discount = ord ? Number(ord.discountTotal ?? 0) : 0;
+      const runningTotal =
+        subtotal != null
+          ? Math.max(0, subtotal + tax - discount)
+          : null;
       return {
         id: t.id,
         locationId: t.locationId,
@@ -458,12 +474,16 @@ export class RestaurantService {
         capacity: t.capacity,
         status: t.status,
         currentOrderId: t.currentOrderId,
-        orderNumber: t.currentOrder?.orderNumber ?? null,
-        diningMode: t.currentOrder?.restaurantExt?.diningMode ?? null,
-        covers: t.currentOrder?.restaurantExt?.covers ?? null,
-        guestName: t.currentOrder?.restaurantExt?.guestName ?? null,
-        guestOccasion:
-          parseGuestSpecials(t.currentOrder?.restaurantExt?.meta).occasion,
+        orderNumber: ord?.orderNumber ?? null,
+        orderCreatedAt: ord?.createdAt?.toISOString?.() ?? null,
+        runningTotal,
+        balanceDue: ord != null ? Number(ord.balanceDue) : null,
+        kitchenPhase: ext?.kitchenPhase ?? null,
+        billedAt: ext?.billedAt?.toISOString?.() ?? null,
+        diningMode: ext?.diningMode ?? null,
+        covers: ext?.covers ?? null,
+        guestName: ext?.guestName ?? null,
+        guestOccasion: parseGuestSpecials(ext?.meta).occasion,
         qrToken: t.qrToken,
         sortOrder: t.sortOrder,
         layoutX: layout.layoutX,

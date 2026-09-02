@@ -16,7 +16,7 @@ export class StrongPasswordConstraint implements ValidatorConstraintInterface {
   }
 
   defaultMessage(): string {
-    return 'Password must be 8–72 chars and include upper, lower, number, and special character';
+    return 'Use 8–72 characters with uppercase, lowercase, a number, and a special character';
   }
 }
 

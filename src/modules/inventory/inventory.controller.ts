@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   Param,
@@ -39,6 +40,12 @@ import {
 import { InventoryOpsService } from './inventory-ops.service';
 import { InventoryService } from './inventory.service';
 import { InventoryLifecycleService } from './inventory-lifecycle.service';
+import { StockAdjustmentService } from './stock-adjustment.service';
+import {
+  CreateStockAdjustmentDto,
+  ListStockAdjustmentsQueryDto,
+  UpdateStockAdjustmentDto,
+} from './dto/stock-adjustment.dto';
 
 @ApiTags('inventory')
 @ApiBearerAuth('access-token')
@@ -48,6 +55,7 @@ export class InventoryController {
     private readonly inventoryService: InventoryService,
     private readonly ops: InventoryOpsService,
     private readonly lifecycle: InventoryLifecycleService,
+    private readonly adjustments: StockAdjustmentService,
   ) {}
 
   @Post('categories')
@@ -299,6 +307,7 @@ export class InventoryController {
     @Query('locationId') locationId?: string,
     @Query('q') q?: string,
     @Query('lowStock') lowStock?: string,
+    @Query('damaged') damaged?: string,
     @Query('includeZero') includeZero?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
@@ -307,6 +316,7 @@ export class InventoryController {
       locationId,
       q,
       lowStockOnly: lowStock === '1' || lowStock === 'true',
+      damagedOnly: damaged === '1' || damaged === 'true',
       includeZero: includeZero === '1' || includeZero === 'true',
       page: page ? Number(page) : undefined,
       limit: limit ? Number(limit) : undefined,
@@ -470,5 +480,79 @@ export class InventoryController {
     @Body() dto: { productId?: string; fromUnit: string; toUnit: string; factor: number },
   ) {
     return this.lifecycle.upsertConversion(user, dto);
+  }
+
+  // ─── Stock Adjustments CRUD & Lifecycle ────────────────────────────────────
+
+  @Post('inventory/adjustments')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Create stock adjustment (draft or finalized)' })
+  createAdjustment(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateStockAdjustmentDto,
+  ) {
+    return this.adjustments.create(user, dto);
+  }
+
+  @Get('inventory/adjustments')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'List stock adjustments with filtering & pagination' })
+  listAdjustments(
+    @CurrentUser() user: AuthUser,
+    @Query() query: ListStockAdjustmentsQueryDto,
+  ) {
+    return this.adjustments.findAll(user, query);
+  }
+
+  @Get('inventory/adjustments/:id')
+  @Roles(...RoleGroup.catalogRead)
+  @ApiOperation({ summary: 'Get stock adjustment details by ID' })
+  getAdjustment(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.adjustments.findOne(user, id);
+  }
+
+  @Patch('inventory/adjustments/:id')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Update draft stock adjustment' })
+  updateAdjustment(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateStockAdjustmentDto,
+  ) {
+    return this.adjustments.update(user, id, dto);
+  }
+
+  @Delete('inventory/adjustments/:id')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Delete draft stock adjustment' })
+  deleteAdjustment(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.adjustments.delete(user, id);
+  }
+
+  @Post('inventory/adjustments/:id/finalize')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Finalize draft adjustment & apply stock mutations' })
+  finalizeAdjustment(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.adjustments.finalize(user, id);
+  }
+
+  @Post('inventory/adjustments/:id/cancel')
+  @Roles(...RoleGroup.catalogWrite)
+  @ApiOperation({ summary: 'Cancel adjustment (reverses stock if finalized)' })
+  cancelAdjustment(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('reason') reason?: string,
+  ) {
+    return this.adjustments.cancel(user, id, reason);
   }
 }

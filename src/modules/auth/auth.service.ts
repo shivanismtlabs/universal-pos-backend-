@@ -925,6 +925,47 @@ export class AuthService {
   async setOwnPin(actor: AuthUser, dto: SetPinDto) {
     await this.assertPinSwitchOn(actor.tenantId);
     assertPinAllowed(dto.pin);
+
+    const existing = await this.prisma.user.findFirst({
+      where: { id: actor.userId, tenantId: actor.tenantId },
+      select: {
+        id: true,
+        tenantId: true,
+        pinHash: true,
+        failedPinAttempts: true,
+        pinLockedUntil: true,
+      },
+    });
+    if (!existing) {
+      throw new BadRequestException('User not found');
+    }
+    if (existing.pinLockedUntil && existing.pinLockedUntil > new Date()) {
+      throw new UnauthorizedException(
+        'PIN temporarily locked. Ask a manager to reset, or try later.',
+      );
+    }
+    if (existing.pinHash) {
+      if (!dto.currentPin) {
+        throw new BadRequestException(
+          'Current PIN is required to change your PIN',
+        );
+      }
+      const currentOk = await bcrypt.compare(dto.currentPin, existing.pinHash);
+      if (!currentOk) {
+        await this.bumpPinFailures(existing);
+        await this.prisma.auditLog.create({
+          data: {
+            tenantId: actor.tenantId,
+            actorUserId: actor.userId,
+            entityType: 'auth',
+            entityId: actor.userId,
+            action: 'auth.pin_change_failed',
+          },
+        });
+        throw new UnauthorizedException('Current PIN is incorrect');
+      }
+    }
+
     const locationId = actor.locationId ?? null;
     await this.applyPinToUser({
       tenantId: actor.tenantId,

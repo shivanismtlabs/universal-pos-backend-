@@ -66,6 +66,29 @@ import {
 export class RestaurantService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private formatFloorResponse(r: {
+    id: string;
+    locationId: string;
+    name: string;
+    sortOrder: number;
+    isActive: boolean;
+    meta: unknown;
+    _count?: { tables: number };
+  }) {
+    const settings = parseFloorDiningSettings(r.meta);
+    return {
+      id: r.id,
+      locationId: r.locationId,
+      name: r.name,
+      sortOrder: r.sortOrder,
+      isActive: r.isActive,
+      tableCount: r._count?.tables ?? 0,
+      categoryIds: settings.categoryIds,
+      taxRatePercent: settings.taxRatePercent,
+      serviceChargePercent: settings.serviceChargePercent,
+    };
+  }
+
   async getConfig(user: AuthUser) {
     const existing = await this.prisma.restaurantConfig.findUnique({
       where: { tenantId: user.tenantId },

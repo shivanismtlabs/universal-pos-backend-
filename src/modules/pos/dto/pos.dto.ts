@@ -401,6 +401,7 @@ export class AddSaleProductDto {
   @MaxLength(2000)
   photoUrl?: string;
 
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
@@ -719,6 +720,21 @@ export class ImportSaleProductRowDto {
   @IsOptional()
   @IsBoolean()
   trackInventory?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  itemType?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  type?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  kind?: string;
 }
 
 export class ImportSaleProductsDto {

@@ -123,6 +123,21 @@ export class ImportSaleProductRowDto {
   @IsString()
   @MaxLength(2000)
   photoUrl?: string;
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  itemType?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  type?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  kind?: string;
+
 }
 
 export class ImportSaleProductsDto {

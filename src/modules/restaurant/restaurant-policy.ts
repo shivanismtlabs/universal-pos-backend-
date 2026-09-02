@@ -194,6 +194,46 @@ export function canOpenTable(status: string): boolean {
   return status === 'available' || status === 'cleaning';
 }
 
+export function canAssignTable(opts: {
+  status: string;
+  hasBookedReservation?: boolean;
+  hasSeatedReservation?: boolean;
+  currentOrderId?: string | null;
+  isSeatingReservation?: boolean;
+}): { ok: true } | { ok: false; reason: string } {
+  if (opts.status === 'blocked') {
+    return { ok: false, reason: 'Table is blocked' };
+  }
+  if (opts.status === 'occupied' || opts.currentOrderId) {
+    if (!opts.isSeatingReservation) {
+      return {
+        ok: false,
+        reason: 'Table is occupied with a running order',
+      };
+    }
+  }
+  if (opts.status === 'cleaning') {
+    return {
+      ok: false,
+      reason:
+        'Table is currently being cleaned. Mark as cleaned/available first',
+    };
+  }
+  if (
+    (opts.status === 'reserved' || opts.hasBookedReservation) &&
+    !opts.isSeatingReservation
+  ) {
+    return {
+      ok: false,
+      reason: 'Table is reserved and cannot be assigned to another customer',
+    };
+  }
+  if (opts.status !== 'available' && !opts.isSeatingReservation) {
+    return { ok: false, reason: `Table status is ${opts.status}` };
+  }
+  return { ok: true };
+}
+
 export function canMergeTables(opts: {
   sourceStatus: string;
   targetStatus: string;
@@ -420,13 +460,18 @@ export function parseFloorDiningSettings(meta: unknown): FloorDiningSettings {
     meta && typeof meta === 'object' && !Array.isArray(meta)
       ? (meta as Record<string, unknown>)
       : {};
-  const categoryIds = Array.isArray(m.categoryIds)
-    ? m.categoryIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+  const inner =
+    m.diningSettings && typeof m.diningSettings === 'object' && !Array.isArray(m.diningSettings)
+      ? (m.diningSettings as Record<string, unknown>)
+      : m;
+  const rawCat = inner.categoryIds ?? m.categoryIds;
+  const categoryIds = Array.isArray(rawCat)
+    ? rawCat.filter((id): id is string => typeof id === 'string' && id.length > 0)
     : [];
   return {
     categoryIds,
-    taxRatePercent: optionalPercent(m.taxRatePercent),
-    serviceChargePercent: optionalPercent(m.serviceChargePercent),
+    taxRatePercent: optionalPercent(inner.taxRatePercent ?? m.taxRatePercent),
+    serviceChargePercent: optionalPercent(inner.serviceChargePercent ?? m.serviceChargePercent),
   };
 }
 

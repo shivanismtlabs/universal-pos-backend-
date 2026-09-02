@@ -71,6 +71,10 @@ export class UpsertRestaurantConfigDto {
 
   @IsOptional()
   @IsBoolean()
+  seatingBasedReservation?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
   tokenManagement?: boolean;
 
   @ApiPropertyOptional({ enum: ['order_finalize', 'kot_confirm'] })
@@ -121,6 +125,7 @@ export class UpsertRestaurantConfigDto {
   sellingMenus?: unknown[];
 }
 
+// Note: taxRatePercent + serviceChargePercent should not exceed 100%
 export class CreateFloorDto {
   @IsUUID()
   locationId!: string;
@@ -134,8 +139,36 @@ export class CreateFloorDto {
   @Type(() => Number)
   @IsInt()
   sortOrder?: number;
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  categoryIds?: string[];
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === null || value === '' ? null : value,
+  )
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  taxRatePercent?: number | null;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === null || value === '' ? null : value,
+  )
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  serviceChargePercent?: number | null;
 }
 
+// Note: taxRatePercent + serviceChargePercent should not exceed 100%
 export class UpdateFloorDto {
   @IsOptional()
   @IsString()
@@ -711,6 +744,13 @@ export class CreateReservationDto {
 
   @IsString()
   startAt!: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(15)
+  @Max(720)
+  durationMinutes?: number;
 
   @IsOptional()
   @IsString()

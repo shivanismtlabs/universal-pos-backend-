@@ -20,6 +20,7 @@ import { throwIfUnique } from '../../common/prisma/prisma-errors';
 import type { AuthUser } from '../auth/types';
 import {
   canMergeTables,
+  canAssignTable,
   canOpenTable,
   canSeatReservation,
   canTransitionKot,
@@ -64,6 +65,29 @@ import {
 @Injectable()
 export class RestaurantService {
   constructor(private readonly prisma: PrismaService) {}
+
+  private formatFloorResponse(r: {
+    id: string;
+    locationId: string;
+    name: string;
+    sortOrder: number;
+    isActive: boolean;
+    meta: unknown;
+    _count?: { tables: number };
+  }) {
+    const settings = parseFloorDiningSettings(r.meta);
+    return {
+      id: r.id,
+      locationId: r.locationId,
+      name: r.name,
+      sortOrder: r.sortOrder,
+      isActive: r.isActive,
+      tableCount: r._count?.tables ?? 0,
+      categoryIds: settings.categoryIds,
+      taxRatePercent: settings.taxRatePercent,
+      serviceChargePercent: settings.serviceChargePercent,
+    };
+  }
 
   async getConfig(user: AuthUser) {
     const existing = await this.prisma.restaurantConfig.findUnique({
@@ -115,13 +139,15 @@ export class RestaurantService {
       prev?.meta && typeof prev.meta === 'object' && !Array.isArray(prev.meta)
         ? (prev.meta as Record<string, unknown>)
         : {};
-    const nextMeta =
-      dto.sellingMenus !== undefined
-        ? {
-            ...prevMeta,
-            sellingMenus: parseSellingMenus(dto.sellingMenus),
-          }
-        : undefined;
+    const nextMeta = {
+      ...prevMeta,
+      ...(dto.sellingMenus !== undefined
+        ? { sellingMenus: parseSellingMenus(dto.sellingMenus) }
+        : {}),
+      ...(dto.seatingBasedReservation !== undefined
+        ? { seatingBasedReservation: dto.seatingBasedReservation }
+        : {}),
+    };
     const row = await this.prisma.restaurantConfig.upsert({
       where: { tenantId: user.tenantId },
       create: {
@@ -234,12 +260,22 @@ export class RestaurantService {
 
   async createFloor(user: AuthUser, dto: CreateFloorDto) {
     await assertLocationAccess(this.prisma, user, dto.locationId);
+    const diningSettings = {
+      categoryIds: dto.categoryIds ?? [],
+      taxRatePercent: dto.taxRatePercent !== undefined ? dto.taxRatePercent : null,
+      serviceChargePercent: dto.serviceChargePercent !== undefined ? dto.serviceChargePercent : null,
+    };
     return this.prisma.restaurantFloor.create({
       data: {
         tenantId: user.tenantId,
         locationId: dto.locationId,
         name: dto.name.trim(),
         sortOrder: dto.sortOrder ?? 0,
+        meta: {
+          categoryIds: diningSettings.categoryIds,
+          taxRatePercent: diningSettings.taxRatePercent,
+          serviceChargePercent: diningSettings.serviceChargePercent,
+        },
       },
     });
   }
@@ -461,6 +497,16 @@ export class RestaurantService {
 
   async createTable(user: AuthUser, dto: CreateDiningTableDto) {
     await assertLocationAccess(this.prisma, user, dto.locationId);
+    const existingName = await this.prisma.restaurantTable.findFirst({
+      where: {
+        tenantId: user.tenantId,
+        locationId: dto.locationId,
+        name: { equals: dto.name.trim(), mode: 'insensitive' },
+      },
+    });
+    if (existingName) {
+      throw new BadRequestException(`Table name "${dto.name.trim()}" already exists in this location`);
+    }
     if (dto.floorId) await this.requireFloor(user, dto.floorId);
     return this.prisma.$transaction(async (tx) => {
       const resource = await tx.resource.create({
@@ -492,6 +538,19 @@ export class RestaurantService {
 
   async updateTable(user: AuthUser, id: string, dto: UpdateDiningTableDto) {
     const table = await this.requireTable(user, id);
+    if (dto.name !== undefined && dto.name.trim().toLowerCase() !== table.name.toLowerCase()) {
+      const existingName = await this.prisma.restaurantTable.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          locationId: table.locationId,
+          id: { not: table.id },
+          name: { equals: dto.name.trim(), mode: 'insensitive' },
+        },
+      });
+      if (existingName) {
+        throw new BadRequestException(`Table name "${dto.name.trim()}" already exists in this location`);
+      }
+    }
     if (dto.status === DiningTableStatus.available && table.currentOrderId) {
       throw new BadRequestException(
         'Free the table by billing or transferring the order first',
@@ -609,8 +668,28 @@ export class RestaurantService {
       if (table.locationId !== dto.locationId) {
         throw new BadRequestException('Table is on another location');
       }
-      if (table.currentOrderId) {
-        throw new BadRequestException('Table already has an open order');
+      const seatedReservation = await this.prisma.diningReservation.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          tableId: table.id,
+          status: 'seated',
+        },
+      });
+      const bookedReservation = await this.prisma.diningReservation.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          tableId: table.id,
+          status: 'booked',
+        },
+      });
+      const assignCheck = canAssignTable({
+        status: table.status,
+        currentOrderId: table.currentOrderId,
+        hasBookedReservation: Boolean(bookedReservation),
+        isSeatingReservation: Boolean(seatedReservation),
+      });
+      if (!assignCheck.ok) {
+        throw new BadRequestException(`Table ${table.name}: ${assignCheck.reason}`);
       }
     }
 
@@ -809,6 +888,12 @@ export class RestaurantService {
     }
     if (to.status === DiningTableStatus.blocked) {
       throw new BadRequestException('Target table is blocked');
+    }
+    if (to.status === DiningTableStatus.cleaning) {
+      throw new BadRequestException('Target table is currently being cleaned');
+    }
+    if (to.status === DiningTableStatus.reserved) {
+      throw new BadRequestException('Target table is reserved');
     }
     const orderId = from.currentOrderId;
     await this.prisma.$transaction(async (tx) => {
@@ -1716,6 +1801,10 @@ export class RestaurantService {
     createdAt: Date;
     updatedAt: Date;
   }) {
+    const metaObj =
+      row.meta && typeof row.meta === 'object' && !Array.isArray(row.meta)
+        ? (row.meta as Record<string, unknown>)
+        : {};
     return {
       id: row.id || null,
       tenantId: row.tenantId,
@@ -1730,6 +1819,7 @@ export class RestaurantService {
       recipesEnabled: row.recipesEnabled,
       reservationsEnabled: row.reservationsEnabled,
       tokenManagement: row.tokenManagement,
+      seatingBasedReservation: metaObj.seatingBasedReservation === true,
       consumptionPolicy: normalizeConsumptionPolicy(row.consumptionPolicy),
       serviceChargePercent:
         row.serviceChargePercent != null
@@ -1796,25 +1886,96 @@ export class RestaurantService {
     if (Number.isNaN(startAt.getTime())) {
       throw new BadRequestException('Invalid reservation time');
     }
-    if (dto.tableId) {
-      const table = await this.requireTable(user, dto.tableId);
+    const durationMinutes = Math.max(15, dto.durationMinutes ?? 60);
+    const endAt = new Date(startAt.getTime() + durationMinutes * 60 * 1000);
+    const covers = dto.covers ?? 2;
+    const cfg = await this.getConfig(user);
+
+    // Fetch all active reservations for this location to check time slot overlaps
+    const activeReservations = await this.prisma.diningReservation.findMany({
+      where: {
+        tenantId: user.tenantId,
+        locationId: dto.locationId,
+        status: { in: ['booked', 'seated'] },
+      },
+      select: { id: true, tableId: true, startAt: true, notes: true, guestName: true },
+    });
+
+    const unavailableTableIds = new Set<string>();
+    for (const res of activeReservations) {
+      if (!res.tableId) continue;
+      const resStart = new Date(res.startAt).getTime();
+      const durationMatch = res.notes?.match(/\[Duration:\s*(\d+)m\]/);
+      const resDuration = durationMatch ? parseInt(durationMatch[1], 10) : 60;
+      const resEnd = resStart + resDuration * 60 * 1000;
+      if (startAt.getTime() < resEnd && endAt.getTime() > resStart) {
+        unavailableTableIds.add(res.tableId);
+      }
+    }
+
+    let targetTableId = dto.tableId ?? null;
+
+    if (targetTableId) {
+      const table = await this.requireTable(user, targetTableId);
       if (table.locationId !== dto.locationId) {
         throw new BadRequestException('Table is on another location');
       }
+      if (cfg.seatingBasedReservation && table.capacity < covers) {
+        throw new BadRequestException(
+          `Table ${table.name} has only ${table.capacity} seats, but ${covers} guests were requested.`,
+        );
+      }
+      if (unavailableTableIds.has(targetTableId)) {
+        const res = activeReservations.find((r) => r.tableId === targetTableId);
+        const resStart = new Date(res?.startAt || startAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        throw new BadRequestException(
+          `Table ${table.name} is already booked around ${resStart} for ${res?.guestName || 'another guest'}.`,
+        );
+      }
+    } else if (cfg.seatingBasedReservation) {
+      // Auto-allocate smallest suitable available table for seatingBasedReservation
+      const allTables = await this.prisma.restaurantTable.findMany({
+        where: {
+          tenantId: user.tenantId,
+          locationId: dto.locationId,
+          status: { not: DiningTableStatus.blocked },
+        },
+        select: { id: true, name: true, capacity: true },
+        orderBy: { capacity: 'asc' },
+      });
+
+      const suitableAvailable = allTables.filter(
+        (t) => !unavailableTableIds.has(t.id) && t.capacity >= covers,
+      );
+
+      if (suitableAvailable.length === 0) {
+        throw new BadRequestException(
+          `No available table can accommodate ${covers} guests for this time slot.`,
+        );
+      }
+
+      // Automatically assign the smallest suitable available table
+      targetTableId = suitableAvailable[0].id;
     }
+
+    const durationTag = `[Duration: ${durationMinutes}m]`;
+    const notesWithDuration = dto.notes
+      ? `${dto.notes.trim()} ${durationTag}`
+      : durationTag;
+
     const row = await this.prisma.diningReservation.create({
       data: {
         tenantId: user.tenantId,
         locationId: dto.locationId,
-        tableId: dto.tableId ?? null,
+        tableId: targetTableId,
         guestName: dto.guestName.trim(),
         guestPhone: dto.guestPhone?.trim() || null,
-        covers: dto.covers ?? 2,
+        covers,
         startAt,
-        notes: dto.notes?.trim() || null,
+        notes: notesWithDuration,
       },
     });
-    if (dto.tableId) await this.syncTableHold(user.tenantId, dto.tableId);
+    if (targetTableId) await this.syncTableHold(user.tenantId, targetTableId);
     return row;
   }
 

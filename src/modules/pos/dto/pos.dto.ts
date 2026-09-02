@@ -434,6 +434,7 @@ export class AddSaleProductDto {
   @MaxLength(2000)
   photoUrl?: string;
 
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
@@ -763,6 +764,22 @@ export class ImportSaleProductRowDto {
   @IsBoolean()
   trackInventory?: boolean;
 
+<<<<<<< HEAD
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  itemType?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  type?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  kind?: string;
+=======
   @ApiPropertyOptional({ enum: ['goods', 'service'] })
   @IsOptional()
   @IsIn(['goods', 'service'])
@@ -774,6 +791,7 @@ export class ImportSaleProductRowDto {
   @IsNumber()
   @Min(1)
   durationMinutes?: number;
+>>>>>>> a91e49de027a7047554016472689f0e4be4081e0
 }
 
 export class ImportSaleProductsDto {

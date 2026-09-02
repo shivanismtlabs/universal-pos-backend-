@@ -125,6 +125,7 @@ export class UpsertRestaurantConfigDto {
   sellingMenus?: unknown[];
 }
 
+// Note: taxRatePercent + serviceChargePercent should not exceed 100%
 export class CreateFloorDto {
   @IsUUID()
   locationId!: string;
@@ -167,6 +168,7 @@ export class CreateFloorDto {
   serviceChargePercent?: number | null;
 }
 
+// Note: taxRatePercent + serviceChargePercent should not exceed 100%
 export class UpdateFloorDto {
   @IsOptional()
   @IsString()

@@ -191,7 +191,7 @@ export function normalizeWastageReason(raw: string | undefined): WastageReason {
 }
 
 export function canOpenTable(status: string): boolean {
-  return status === 'available';
+  return status === 'available' || status === 'cleaning';
 }
 
 export function canAssignTable(opts: {
@@ -460,13 +460,18 @@ export function parseFloorDiningSettings(meta: unknown): FloorDiningSettings {
     meta && typeof meta === 'object' && !Array.isArray(meta)
       ? (meta as Record<string, unknown>)
       : {};
-  const categoryIds = Array.isArray(m.categoryIds)
-    ? m.categoryIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+  const inner =
+    m.diningSettings && typeof m.diningSettings === 'object' && !Array.isArray(m.diningSettings)
+      ? (m.diningSettings as Record<string, unknown>)
+      : m;
+  const rawCat = inner.categoryIds ?? m.categoryIds;
+  const categoryIds = Array.isArray(rawCat)
+    ? rawCat.filter((id): id is string => typeof id === 'string' && id.length > 0)
     : [];
   return {
     categoryIds,
-    taxRatePercent: optionalPercent(m.taxRatePercent),
-    serviceChargePercent: optionalPercent(m.serviceChargePercent),
+    taxRatePercent: optionalPercent(inner.taxRatePercent ?? m.taxRatePercent),
+    serviceChargePercent: optionalPercent(inner.serviceChargePercent ?? m.serviceChargePercent),
   };
 }
 

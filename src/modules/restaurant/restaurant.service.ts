@@ -248,7 +248,11 @@ export class RestaurantService {
         locationId: dto.locationId,
         name: dto.name.trim(),
         sortOrder: dto.sortOrder ?? 0,
-        meta: { diningSettings },
+        meta: {
+          categoryIds: diningSettings.categoryIds,
+          taxRatePercent: diningSettings.taxRatePercent,
+          serviceChargePercent: diningSettings.serviceChargePercent,
+        },
       },
     });
   }
@@ -584,9 +588,9 @@ export class RestaurantService {
         `Table ${table.name} is ${table.status} — cannot open`,
       );
     }
-    if (table.currentOrderId || table.status === DiningTableStatus.occupied) {
-        throw new BadRequestException('Cannot reserve table while it is currently occupied');
-      }
+    if (table.currentOrderId) {
+      throw new BadRequestException('Table already has an open order');
+    }
     return this.openDiningOrder(user, {
       locationId: table.locationId,
       diningMode: DiningMode.dine_in,
@@ -1762,7 +1766,7 @@ export class RestaurantService {
       id: row.id || null,
       tenantId: row.tenantId,
       locationId: row.locationId,
-      enabledDiningModes: row.enabledDiningModes,
+      enabledDiningModes: normalizeDiningModes(row.enabledDiningModes),
       tableManagement: row.tableManagement,
       kotEnabled: row.kotEnabled,
       kdsEnabled: row.kdsEnabled,

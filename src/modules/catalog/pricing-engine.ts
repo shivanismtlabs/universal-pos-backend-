@@ -31,6 +31,8 @@ export type UnitRef = {
   unitGroupId: string;
   unitGroupCode: string;
   conversionToGroupBase: DecimalValue;
+  name?: string;
+  decimals?: number;
   isActive?: boolean;
 };
 
@@ -38,6 +40,7 @@ export type ProductUnitRef = {
   unitId: string;
   conversionToBase: DecimalValue;
   fixedPrice: DecimalValue | null;
+  sellPrice?: DecimalValue | null;
   effectiveFrom: Date;
   effectiveTo: Date | null;
   quantityPrecision?: number | null;
@@ -57,12 +60,17 @@ export type ConversionEdge = {
 };
 
 export type ProductDiscountRule = {
-  type: 'percent' | 'fixed';
+  type: 'percent' | 'percentage' | 'fixed' | 'fixed_amount' | 'fixed_line';
   value: DecimalValue;
+  startDate?: Date | string | null;
+  endDate?: Date | string | null;
   effectiveFrom?: Date | string | null;
   effectiveTo?: Date | string | null;
   minQuantity?: DecimalValue | null;
   maxQuantity?: DecimalValue | null;
+  customerTiers?: string[];
+  customerTags?: string[];
+  customerIds?: string[];
   customerEligibility?:
     | 'all'
     | {
@@ -105,7 +113,12 @@ export type LineDiscountInput = {
   value: DecimalValue;
 };
 
-export type PriceSource = 'unit_fixed' | 'converted' | 'override' | 'discounted';
+export type PriceSource =
+  | 'unit_fixed'
+  | 'converted'
+  | 'override'
+  | 'discounted'
+  | 'product_unit';
 
 export type LineCalcResult = {
   orderedQuantity: Prisma.Decimal;
@@ -603,19 +616,6 @@ export function convertQuantityDetailed(opts: {
   };
 }
 
-function catalogUnitPrice(
-  product: ProductPricingRef,
-  sellingUnit: UnitRef,
-  at: Date,
-): { unitPrice: Prisma.Decimal; source: PriceSource } | null {
-  const pu = activeProductUnit(product, sellingUnit.id, at);
-  if (pu?.fixedPrice != null) {
-    const p = d(pu.fixedPrice);
-    if (p.gte(0)) return { unitPrice: p, source: 'unit_fixed' };
-  }
-  return null;
-}
-
 export function isProductDiscountEligible(
   rule: ProductDiscountRule,
   qty: Prisma.Decimal,
@@ -713,8 +713,11 @@ export function calculateLineAmount(opts: {
     id: 'u-pcs',
     symbol: 'pcs',
     name: 'Pieces',
+    unitGroupId: 'ug-count',
     unitGroupCode: 'COUNT',
+    conversionToGroupBase: 1,
     decimals: 0,
+    isActive: true,
   };
   const sellingUnit = opts.sellingUnit ?? defaultUnit;
   const unitsById =
@@ -766,7 +769,7 @@ export function calculateLineAmount(opts: {
   let priceUnit = sellingUnit;
 
   let baselineUnitPrice: Prisma.Decimal;
-  let priceSource: LineCalcResult['priceSource'] = 'base';
+  let priceSource: LineCalcResult['priceSource'] = 'converted';
 
   if (opts.unitPriceOverride != null) {
     const o = d(opts.unitPriceOverride);

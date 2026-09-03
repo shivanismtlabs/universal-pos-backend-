@@ -2504,13 +2504,14 @@ export class PosService {
     if (dto.customerId) {
       const customer = await this.prisma.customer.findFirst({
         where: { id: dto.customerId, tenantId: user.tenantId, deletedAt: null },
-        select: { id: true, tags: true, tier: true },
+        select: { id: true, meta: true },
       });
       if (customer) {
+        const meta = (customer.meta as Record<string, unknown> | null) ?? {};
         customerCtx = {
           id: customer.id,
-          tags: Array.isArray(customer.tags) ? (customer.tags as string[]) : [],
-          tier: customer.tier ?? undefined,
+          tags: Array.isArray(meta.tags) ? (meta.tags as string[]) : [],
+          tier: typeof meta.tier === 'string' ? meta.tier : undefined,
         };
       }
     }
@@ -2596,7 +2597,10 @@ export class PosService {
     let couponDiscount = money(0);
     if (dto.couponCode?.trim()) {
       try {
-        const c = await this.loyalty.validateCoupon(user, dto.couponCode.trim(), Number(productNetTotal.toFixed(2)));
+        const c = await this.loyalty.validate(user, {
+          code: dto.couponCode.trim(),
+          orderSubtotal: Number(productNetTotal.toFixed(2)),
+        });
         if (c?.amountOff) {
           couponDiscount = money(c.amountOff);
         }
@@ -2608,9 +2612,15 @@ export class PosService {
     // Evaluate loyalty discount if points provided
     let loyaltyDiscount = money(0);
     if (dto.loyaltyPointsToRedeem && dto.loyaltyPointsToRedeem > 0 && dto.customerId) {
-      const loyaltySettings = this.loyalty.parseLoyaltySettings(tenant.settings);
-      const val = (dto.loyaltyPointsToRedeem / (loyaltySettings.pointsPerRedeemUnit || 100)) * (loyaltySettings.rupeesPerRedeemUnit || 1);
-      loyaltyDiscount = money(val);
+      try {
+        const loyaltySettings = await this.loyalty.getLoyaltySettings(user);
+        if (loyaltySettings.enabled && loyaltySettings.currencyPerPoint > 0) {
+          const val = dto.loyaltyPointsToRedeem * loyaltySettings.currencyPerPoint;
+          loyaltyDiscount = money(val);
+        }
+      } catch {
+        // invalid loyalty settings ignored for quote preview
+      }
     }
 
     const cashierDiscount = money(dto.discountAmount ?? 0);

@@ -18,6 +18,7 @@ import {
   serializeLineCalc,
   UnitPricingError,
   type ConversionEdge,
+  type CustomerContext,
   type LineCalcResult,
   type LineDiscountInput,
   type ProductPricingRef,

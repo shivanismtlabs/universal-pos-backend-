@@ -698,7 +698,7 @@ async function provisionIfAbsent(
         data: {
           tenantId: existing.id,
           name: 'Main Branch',
-          slug: 'main',
+          code: 'main',
           isActive: true,
         },
       });

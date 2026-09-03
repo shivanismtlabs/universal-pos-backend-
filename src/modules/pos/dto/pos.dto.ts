@@ -764,8 +764,7 @@ export class ImportSaleProductRowDto {
   @IsBoolean()
   trackInventory?: boolean;
 
-<<<<<<< HEAD
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ enum: ['goods', 'service', 'rental'] })
   @IsOptional()
   @IsString()
   itemType?: string;
@@ -779,11 +778,6 @@ export class ImportSaleProductRowDto {
   @IsOptional()
   @IsString()
   kind?: string;
-=======
-  @ApiPropertyOptional({ enum: ['goods', 'service'] })
-  @IsOptional()
-  @IsIn(['goods', 'service'])
-  itemType?: 'goods' | 'service';
 
   @ApiPropertyOptional({ example: 30 })
   @IsOptional()
@@ -791,7 +785,6 @@ export class ImportSaleProductRowDto {
   @IsNumber()
   @Min(1)
   durationMinutes?: number;
->>>>>>> a91e49de027a7047554016472689f0e4be4081e0
 }
 
 export class ImportSaleProductsDto {

@@ -359,13 +359,20 @@ export class UnitPricingService {
       }>;
     },
     edges: ConversionEdge[],
+    unitsById?: Map<string, UnitRef>,
   ): ProductPricingRef {
-    if (!product.baseUnitId) {
+    let baseUnitId = product.baseUnitId;
+    if (!baseUnitId && unitsById) {
+      const match = this.resolveUnit(unitsById, null, (product as any).sellUnit ?? 'pcs')
+        ?? this.resolveUnit(unitsById, null, 'pcs');
+      if (match) baseUnitId = match.id;
+    }
+    if (!baseUnitId) {
       throw new BadRequestException(
         'Product has no base unit configured — set Unit & Pricing on the item',
       );
     }
-    const productUnits: ProductUnitRef[] = product.productUnits.map((pu) => ({
+    const productUnits: ProductUnitRef[] = (product.productUnits ?? []).map((pu) => ({
       unitId: pu.unitId,
       conversionToBase: pu.conversionToBase,
       fixedPrice: pu.fixedPrice,
@@ -381,8 +388,8 @@ export class UnitPricingService {
     }));
     return {
       id: product.id,
-      baseUnitId: product.baseUnitId,
-      pricingUnitId: product.pricingUnitId,
+      baseUnitId,
+      pricingUnitId: product.pricingUnitId ?? baseUnitId,
       pricingStrategy:
         product.pricingStrategy === PricingStrategy.fixed_tier
           ? 'FIXED_TIER'
@@ -390,10 +397,17 @@ export class UnitPricingService {
       pricePerPricingUnit:
         product.pricePerPricingUnit != null
           ? product.pricePerPricingUnit
-          : product.pricingStrategy === PricingStrategy.converted
+          : product.basePrice != null
             ? product.basePrice
             : null,
       basePrice: product.basePrice,
+      mrp: (product as any).mrp != null ? d((product as any).mrp) : null,
+      meta: (product as any).meta ?? null,
+      productDiscount:
+        (product as any).productDiscount ??
+        (product as any).meta?.productDiscount ??
+        (product as any).meta?.discountRule ??
+        null,
       productUnits,
       conversionEdges: edges,
       availableInPos: product.availableInPos,
@@ -428,7 +442,7 @@ export class UnitPricingService {
       edges.push({
         fromUnitId: from.id,
         toUnitId: to.id,
-        factor: row.factor,
+        factor: d(row.factor),
       });
     }
     return edges;
@@ -443,6 +457,7 @@ export class UnitPricingService {
       sellingUnitSymbol?: string | null;
       unitPriceOverride?: number | string | null;
       lineDiscount?: LineDiscountInput | null;
+      customer?: CustomerContext | null;
       taxProfile?: TaxProfile | null;
       taxRate?: number | null;
       inventorySign?: 1 | -1;
@@ -477,7 +492,7 @@ export class UnitPricingService {
       product.id,
       unitsById,
     );
-    const ref = this.toProductRef(product, edges);
+    const ref = this.toProductRef(product, edges, unitsById);
 
     try {
       return calculateLineAmount({
@@ -488,6 +503,7 @@ export class UnitPricingService {
         extraEdges: edges,
         unitPriceOverride: body.unitPriceOverride,
         lineDiscount: body.lineDiscount,
+        customer: body.customer,
         taxProfile: body.taxProfile,
         taxRate: body.taxRate,
         inventorySign: body.inventorySign,
@@ -505,7 +521,13 @@ export class UnitPricingService {
 
   async quoteLine(
     user: AuthUser,
-    body: { productId: string; enteredQty: number; sellingUnitId: string },
+    body: {
+      productId: string;
+      enteredQty: number;
+      sellingUnitId?: string;
+      sellingUnitSymbol?: string;
+      customer?: CustomerContext;
+    },
   ) {
     const line = await this.calculateLine(user, body);
     return serializeLineCalc(line);

@@ -166,6 +166,15 @@ export class SaleCheckoutItemDto {
   @IsUUID()
   sellingUnitId?: string;
 
+  @ApiPropertyOptional({
+    description: 'Transaction unit symbol (e.g. g, kg, ml, L, pcs). Alternate to sellingUnitId.',
+    example: 'g',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  sellingUnitSymbol?: string;
+
   @ApiPropertyOptional({ description: 'Selected product variant id when variants are enabled' })
   @IsOptional()
   @IsUUID()
@@ -359,6 +368,13 @@ export class PrepareSaleCheckoutDto {
   @MaxLength(40)
   couponCode?: string;
 
+  @ApiPropertyOptional({ description: 'Loyalty points to redeem (needs customerId)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  loyaltyPointsToRedeem?: number;
+
   @ApiPropertyOptional({
     description:
       'Structured order extras (tableId, orderType, covers). Same as cash checkout meta.',
@@ -367,6 +383,84 @@ export class PrepareSaleCheckoutDto {
   @IsOptional()
   @IsObject()
   meta?: Record<string, unknown>;
+}
+
+export class SaleQuoteItemDto {
+  @ApiProperty()
+  @IsUUID()
+  stockLevelId!: string;
+
+  @ApiProperty({ example: 1 })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.001)
+  quantity!: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  unitPrice?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  sellingUnitId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  sellingUnitSymbol?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  variantId?: string;
+}
+
+export class SaleQuoteDto {
+  @ApiProperty()
+  @IsUUID()
+  locationId!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  customerId?: string;
+
+  @ApiProperty({ type: [SaleQuoteItemDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => SaleQuoteItemDto)
+  items!: SaleQuoteItemDto[];
+
+  @ApiPropertyOptional({ description: 'Cart-level bill discount' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  discountAmount?: number;
+
+  @ApiPropertyOptional({ description: 'Coupon code' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  couponCode?: string;
+
+  @ApiPropertyOptional({ description: 'Loyalty points' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  loyaltyPointsToRedeem?: number;
+
+  @ApiPropertyOptional({ description: 'Payment method (e.g. cash, upi, card)' })
+  @IsOptional()
+  @IsString()
+  paymentMethod?: string;
 }
 
 /**

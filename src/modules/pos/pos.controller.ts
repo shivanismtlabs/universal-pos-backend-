@@ -36,6 +36,7 @@ import {
   RentalExchangeDto,
   ExtendRentalDto,
   SaleCheckoutDto,
+  SaleQuoteDto,
   SaleReturnDto,
   SaleExchangeDto,
   CreateRefundReasonDto,
@@ -294,6 +295,18 @@ export class PosController {
     @Query('locationId') locationId?: string,
   ) {
     return this.posService.saleLookup(user, { sku: sku ?? '', locationId });
+  }
+
+  @Post('sale/quote')
+  @Roles(...RoleGroup.pos)
+  @ApiOperation({
+    summary:
+      'Authoritative cart calculation preview (Flipkart product discounts, bill discounts, GST, round-off)',
+  })
+  @UseGuards(CommerceModeGuard)
+  @RequireCommerceModes('sale')
+  quoteSale(@CurrentUser() user: AuthUser, @Body() dto: SaleQuoteDto) {
+    return this.posService.quoteSale(user, dto);
   }
 
   @Post('sale/checkout')

@@ -88,10 +88,12 @@ export type CustomerContext = {
 
 export type ProductPricingRef = {
   id: string;
-  baseUnitId: string;
-  pricingUnitId: string | null;
-  pricingStrategy: 'CONVERTED' | 'FIXED_TIER';
-  pricePerPricingUnit: DecimalValue | null;
+  name?: string;
+  sku?: string;
+  baseUnitId?: string;
+  pricingUnitId?: string | null;
+  pricingStrategy?: 'CONVERTED' | 'FIXED_TIER';
+  pricePerPricingUnit?: DecimalValue | null;
   /** Catalog selling price in the pricing/base unit (fallback). */
   basePrice?: DecimalValue | null;
   /** Maximum Retail Price / list price (per base/pricing unit). */
@@ -99,7 +101,7 @@ export type ProductPricingRef = {
   /** Product-level discount rule */
   productDiscount?: ProductDiscountRule | null;
   meta?: Record<string, unknown> | null;
-  productUnits: ProductUnitRef[];
+  productUnits?: ProductUnitRef[];
   conversionEdges?: ConversionEdge[];
   availableInPos?: boolean;
   canSell?: boolean;

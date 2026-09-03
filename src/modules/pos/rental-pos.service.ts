@@ -118,17 +118,13 @@ export class RentalPosService {
             status: StockUnitStatus.available,
           },
         }),
-        // Service catalog items (no stock units) — rentable as product lines
+        // Catalog products and services (no stock units) — rentable as product lines
         this.prisma.product.findMany({
           where: {
             tenantId: user.tenantId,
             isActive: true,
             availableInPos: true,
             status: ProductStatus.active,
-            OR: [
-              { kind: ProductKind.service },
-              { fulfillmentMode: FulfillmentMode.service },
-            ],
           },
           orderBy: { name: 'asc' },
           take: 80,
@@ -138,6 +134,7 @@ export class RentalPosService {
             skuCode: true,
             basePrice: true,
             photoUrl: true,
+            kind: true,
             category: { select: { id: true, name: true } },
           },
         }),
@@ -181,7 +178,7 @@ export class RentalPosService {
         sku: p.skuCode,
         rentalPrice: Number(p.basePrice),
         deposit: 0,
-        kind: 'service' as const,
+        kind: p.kind ?? 'service',
         category: p.category,
         image: p.photoUrl,
         photoUrl: p.photoUrl,

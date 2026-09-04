@@ -126,7 +126,7 @@ import { expectedCash, cashVariance } from '../payments/register-cash';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { NotifyService } from '../notify/notify.service';
 import { UnitPricingService } from '../catalog/unit-pricing.service';
-import type { LineCalcResult } from '../catalog/pricing-engine';
+import type { LineCalcResult, CustomerContext } from '../catalog/pricing-engine';
 import { d } from '../catalog/pricing-engine';
 import {
   calcMeta,
@@ -144,6 +144,7 @@ import {
   PrepareSaleCheckoutDto,
   RenameSaleCategoryDto,
   SaleCheckoutDto,
+  SaleQuoteDto,
   UpdateSaleProductDto,
   UploadSaleImageDto,
 } from './dto/pos.dto';
@@ -1988,20 +1989,27 @@ export class PosService {
               pu.fixedPrice != null ? Number(pu.fixedPrice) : null,
             isDefaultSellingUnit: pu.isDefaultSellingUnit,
           })),
-          /** Counter entry units: same group as base (kg↔g) + packaging rows */
+          /** Counter entry units: same group as base/sellUnit (kg↔g, L↔ml) + packaging rows */
           entryUnits: (() => {
             const map = new Map<
               string,
               { unitId: string; symbol: string; name: string }
             >();
-            if (row.product.baseUnit) {
-              map.set(row.product.baseUnit.id, {
-                unitId: row.product.baseUnit.id,
-                symbol: row.product.baseUnit.symbol,
-                name: row.product.baseUnit.name,
+            const matchedUnit =
+              row.product.baseUnit ??
+              systemUnits.find(
+                (u) =>
+                  u.symbol.toLowerCase() ===
+                  (row.sellUnit ?? '').trim().toLowerCase(),
+              );
+            if (matchedUnit) {
+              map.set(matchedUnit.id, {
+                unitId: matchedUnit.id,
+                symbol: matchedUnit.symbol,
+                name: matchedUnit.name,
               });
               for (const u of unitsByGroup.get(
-                row.product.baseUnit.unitGroupId,
+                matchedUnit.unitGroupId,
               ) ?? []) {
                 map.set(u.id, {
                   unitId: u.id,
@@ -2361,6 +2369,7 @@ export class PosService {
       batchId?: string;
       serialNumber?: string;
       sellingUnitId?: string;
+      sellingUnitSymbol?: string;
       unitPrice?: number;
     },
   ) {
@@ -2380,26 +2389,22 @@ export class PosService {
     const qtyEntered = line.quantity;
     const qtyErr = validateSellQty(qtyEntered, unit, units);
     let calc: LineCalcResult | null = null;
-    if (level.product.baseUnitId) {
-      try {
-        calc = await this.unitPricing.calculateLine(user, {
-          productId: level.productId,
-          enteredQty: qtyEntered,
-          sellingUnitId: line.sellingUnitId,
-          sellingUnitSymbol: line.sellingUnitId ? undefined : level.sellUnit,
-          unitPriceOverride: line.unitPrice,
-          inventorySign: -1,
-        });
-      } catch (e) {
-        if (line.sellingUnitId) {
-          throw e;
-        }
-        if (qtyErr) {
-          throw new BadRequestException(`${level.sku}: ${qtyErr}`);
-        }
+    try {
+      calc = await this.unitPricing.calculateLine(user, {
+        productId: level.productId,
+        enteredQty: qtyEntered,
+        sellingUnitId: line.sellingUnitId,
+        sellingUnitSymbol: line.sellingUnitSymbol ?? (line.sellingUnitId ? undefined : level.sellUnit),
+        unitPriceOverride: line.unitPrice,
+        inventorySign: -1,
+      });
+    } catch (e) {
+      if (line.sellingUnitId || line.sellingUnitSymbol) {
+        throw e;
       }
-    } else if (qtyErr) {
-      throw new BadRequestException(`${level.sku}: ${qtyErr}`);
+      if (qtyErr) {
+        throw new BadRequestException(`${level.sku}: ${qtyErr}`);
+      }
     }
 
     const inventoryQty = calc ? calc.baseQuantity : d(qtyEntered);
@@ -2446,9 +2451,9 @@ export class PosService {
 
     const tracks = sellLevel.product.trackQty !== false;
     const available = d(sellLevel.qtyOnHand).sub(d(sellLevel.qtyReserved ?? 0));
-    if (tracks && available.add('0.000000001').lt(inventoryQty)) {
+    if (tracks && (available.lte(0) || available.add('0.000000001').lt(inventoryQty))) {
       throw new BadRequestException(
-        `Insufficient stock for ${sellLevel.sku} (available ${available.toFixed()} ${calc?.baseUnitSymbol ?? unit}, need ${inventoryQty.toFixed()} ${calc?.baseUnitSymbol ?? unit})`,
+        `Insufficient stock for ${sellLevel.sku} (${sellLevel.product.name}): available ${available.toFixed(2)} ${calc?.baseUnitSymbol ?? unit}, need ${inventoryQty.toFixed(2)} ${calc?.baseUnitSymbol ?? unit}`,
       );
     }
 
@@ -2475,7 +2480,250 @@ export class PosService {
       throw new BadRequestException(`${sellLevel.sku}: serial is required`);
     }
 
-    return { level: sellLevel, qty: Number(inventoryQty.toFixed()), tracks, calc, inventoryQty };
+    return { level: sellLevel, qty: qtyEntered, tracks, calc, inventoryQty };
+  }
+
+  /**
+   * Authoritative cart calculation preview (Flipkart product discounts, bill discounts, GST, round-off).
+   * Frontend only displays results from backend authoritative calculation.
+   */
+  async quoteSale(user: AuthUser, dto: SaleQuoteDto) {
+    await this.assertCounterShop(user.tenantId);
+
+    const tenant = await this.prisma.tenant.findFirstOrThrow({
+      where: { id: user.tenantId },
+      select: { currencyCode: true, taxMode: true, taxId: true, settings: true },
+    });
+    const taxProfile = buildTaxProfile({
+      taxMode: tenant.taxMode,
+      taxId: tenant.taxId,
+      settings: tenant.settings,
+    });
+
+    let customerCtx: CustomerContext | undefined;
+    if (dto.customerId) {
+      const customer = await this.prisma.customer.findFirst({
+        where: { id: dto.customerId, tenantId: user.tenantId, deletedAt: null },
+        select: { id: true, meta: true },
+      });
+      if (customer) {
+        const meta = (customer.meta as Record<string, unknown> | null) ?? {};
+        customerCtx = {
+          id: customer.id,
+          tags: Array.isArray(meta.tags) ? (meta.tags as string[]) : [],
+          tier: typeof meta.tier === 'string' ? meta.tier : undefined,
+        };
+      }
+    }
+
+    const calculatedLines: Array<{
+      stockLevelId: string;
+      sku: string;
+      name: string;
+      quantity: number;
+      mrp: string;
+      grossMrp: string;
+      sellingPrice: string;
+      productDiscountPerUnit: string;
+      productDiscount: string;
+      productDiscountPercent: number;
+      productNet: string;
+      hasProductDiscount: boolean;
+      taxRatePercent: number;
+      taxInclusive: boolean;
+      taxCode: string | null;
+      hsnOrSac: string | null;
+      calc: LineCalcResult;
+    }> = [];
+
+    let grossMrpTotal = new Prisma.Decimal(0);
+    let productDiscountTotal = new Prisma.Decimal(0);
+    let productNetTotal = new Prisma.Decimal(0);
+
+    for (const item of dto.items) {
+      const level = await this.prisma.stockLevel.findFirst({
+        where: { id: item.stockLevelId, tenantId: user.tenantId },
+        include: { product: true },
+      });
+      if (!level) {
+        throw new NotFoundException(`Stock level not found: ${item.stockLevelId}`);
+      }
+
+      const productRatePct = resolveProductTaxRatePercent({
+        taxCode: level.product.taxCode,
+        meta: level.product.meta,
+      });
+      const isProductInclusive = resolveProductTaxInclusive({
+        meta: level.product.meta,
+        storeDefault: taxProfile.inclusive,
+      });
+
+      const calc = await this.unitPricing.calculateLine(user, {
+        productId: level.productId,
+        enteredQty: item.quantity,
+        sellingUnitId: item.sellingUnitId,
+        sellingUnitSymbol: item.sellingUnitSymbol ?? (item.sellingUnitId ? undefined : level.sellUnit),
+        unitPriceOverride: item.unitPrice,
+        customer: customerCtx,
+        inventorySign: -1,
+      });
+
+      grossMrpTotal = grossMrpTotal.add(calc.grossMrp);
+      productDiscountTotal = productDiscountTotal.add(calc.productDiscount);
+      productNetTotal = productNetTotal.add(calc.productNet);
+
+      calculatedLines.push({
+        stockLevelId: level.id,
+        sku: level.sku,
+        name: level.product.name,
+        quantity: item.quantity,
+        mrp: calc.mrp.toFixed(2),
+        grossMrp: calc.grossMrp.toFixed(2),
+        sellingPrice: calc.sellingPrice.toFixed(2),
+        productDiscountPerUnit: calc.productDiscountPerUnit.toFixed(2),
+        productDiscount: calc.productDiscount.toFixed(2),
+        productDiscountPercent: calc.productDiscountPercent,
+        productNet: calc.productNet.toFixed(2),
+        hasProductDiscount: calc.hasProductDiscount,
+        taxRatePercent: productRatePct != null ? productRatePct : Number((taxProfile.rate * 100).toFixed(2)),
+        taxInclusive: isProductInclusive,
+        taxCode: level.product.taxCode ?? null,
+        hsnOrSac: ((level.product.meta as Record<string, unknown>)?.hsnOrSac as string) ?? level.product.taxCode ?? null,
+        calc,
+      });
+    }
+
+    // Evaluate coupon discount if code provided
+    let couponDiscount = money(0);
+    if (dto.couponCode?.trim()) {
+      try {
+        const c = await this.loyalty.validate(user, {
+          code: dto.couponCode.trim(),
+          orderSubtotal: Number(productNetTotal.toFixed(2)),
+        });
+        if (c?.amountOff) {
+          couponDiscount = money(c.amountOff);
+        }
+      } catch {
+        // invalid coupon ignored for quote preview
+      }
+    }
+
+    // Evaluate loyalty discount if points provided
+    let loyaltyDiscount = money(0);
+    if (dto.loyaltyPointsToRedeem && dto.loyaltyPointsToRedeem > 0 && dto.customerId) {
+      try {
+        const loyaltySettings = await this.loyalty.getLoyaltySettings(user);
+        if (loyaltySettings.enabled && loyaltySettings.currencyPerPoint > 0) {
+          const val = dto.loyaltyPointsToRedeem * loyaltySettings.currencyPerPoint;
+          loyaltyDiscount = money(val);
+        }
+      } catch {
+        // invalid loyalty settings ignored for quote preview
+      }
+    }
+
+    const cashierDiscount = money(dto.discountAmount ?? 0);
+    const totalBillDiscount = Prisma.Decimal.min(
+      cashierDiscount.add(couponDiscount).add(loyaltyDiscount),
+      productNetTotal,
+    );
+
+    // Proportional bill discount allocation across lines before GST (Rule 8)
+    let billDiscountLeft = totalBillDiscount;
+    let taxableValueTotal = money(0);
+    let taxTotal = money(0);
+    const taxSlabMap = new Map<number, Prisma.Decimal>();
+
+    const linesOutput = calculatedLines.map((line, idx) => {
+      let lineBillDiscount = money(0);
+      if (totalBillDiscount.gt(0) && productNetTotal.gt(0)) {
+        if (idx === calculatedLines.length - 1) {
+          lineBillDiscount = billDiscountLeft;
+        } else {
+          lineBillDiscount = totalBillDiscount
+            .mul(line.calc.productNet)
+            .div(productNetTotal)
+            .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+          billDiscountLeft = billDiscountLeft.sub(lineBillDiscount);
+        }
+      }
+      const lineTaxableGross = Prisma.Decimal.max(money(0), line.calc.productNet.sub(lineBillDiscount));
+      const taxed = computeLineTax(taxProfile, {
+        lineGross: lineTaxableGross,
+        inclusive: line.taxInclusive,
+        rate: line.taxRatePercent / 100,
+      });
+
+      taxableValueTotal = taxableValueTotal.add(taxed.lineTotal);
+      taxTotal = taxTotal.add(taxed.taxAmount);
+
+      const slabRate = line.taxRatePercent;
+      taxSlabMap.set(slabRate, (taxSlabMap.get(slabRate) ?? money(0)).add(taxed.taxAmount));
+
+      return {
+        stockLevelId: line.stockLevelId,
+        sku: line.sku,
+        name: line.name,
+        quantity: line.quantity,
+        mrp: line.mrp,
+        grossMrp: line.grossMrp,
+        sellingPrice: line.sellingPrice,
+        productDiscountPerUnit: line.productDiscountPerUnit,
+        productDiscount: line.productDiscount,
+        productDiscountPercent: line.productDiscountPercent,
+        productNet: line.productNet,
+        hasProductDiscount: line.hasProductDiscount,
+        allocatedBillDiscount: lineBillDiscount.toFixed(2),
+        taxRatePercent: line.taxRatePercent,
+        taxInclusive: line.taxInclusive,
+        taxCode: line.taxCode,
+        hsnOrSac: line.hsnOrSac,
+        taxableAmount: taxed.lineTotal.toFixed(2),
+        taxAmount: taxed.taxAmount.toFixed(2),
+        lineTotal: taxed.lineTotal.toFixed(2),
+        finalAmount: line.taxInclusive
+          ? lineTaxableGross.toFixed(2)
+          : taxed.lineTotal.add(taxed.taxAmount).toFixed(2),
+      };
+    });
+
+    const taxSlabs = [...taxSlabMap.entries()].map(([rate, taxDec]) => {
+      const halfRate = Math.round((rate / 2) * 100) / 100;
+      const cgstDec = taxDec.div(2).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+      const sgstDec = taxDec.sub(cgstDec);
+      return {
+        rate,
+        tax: Number(taxDec.toFixed(2)),
+        halfRate,
+        cgst: Number(cgstDec.toFixed(2)),
+        sgst: Number(sgstDec.toFixed(2)),
+      };
+    });
+
+    const exactGrand = taxableValueTotal.add(taxTotal);
+    const exactGrandNum = Number(exactGrand.toFixed(2));
+    const isCash = dto.paymentMethod === 'cash';
+    const roundedTotal = isCash ? Math.round(exactGrandNum) : exactGrandNum;
+    const roundOff = Number((roundedTotal - exactGrandNum).toFixed(2));
+
+    return {
+      items: linesOutput,
+      grossMrpTotal: grossMrpTotal.toFixed(2),
+      productDiscountTotal: productDiscountTotal.toFixed(2),
+      productNetTotal: productNetTotal.toFixed(2),
+      billDiscountTotal: totalBillDiscount.toFixed(2),
+      cashierDiscount: cashierDiscount.toFixed(2),
+      couponDiscount: couponDiscount.toFixed(2),
+      loyaltyDiscount: loyaltyDiscount.toFixed(2),
+      taxableValue: taxableValueTotal.toFixed(2),
+      taxTotal: taxTotal.toFixed(2),
+      taxSlabs,
+      roundOff: roundOff.toFixed(2),
+      grandTotal: exactGrand.toFixed(2),
+      amountDue: roundedTotal.toFixed(2),
+      finalPayable: roundedTotal.toFixed(2),
+    };
   }
 
   /**
@@ -2590,15 +2838,15 @@ export class PosService {
           storeDefault: taxProfile.inclusive,
         });
         const unitPrice = calc
-          ? calc.unitPrice
+          ? calc.sellingPrice
           : line.unitPrice !== undefined
             ? money(line.unitPrice)
             : money(level.sellPrice);
-        const lineGross = calc
-          ? calc.grossAmount
+        const lineNet = calc
+          ? calc.productNet
           : unitPrice.mul(qty);
         const taxed = computeLineTax(taxProfile, {
-          lineGross,
+          lineGross: lineNet,
           inclusive: isProductInclusive,
           ...(productRatePct != null
             ? { rate: productRatePct / 100 }
@@ -3185,15 +3433,15 @@ export class PosService {
           storeDefault: taxProfile.inclusive,
         });
         const unitPrice = calc
-          ? calc.unitPrice
+          ? calc.sellingPrice
           : line.unitPrice !== undefined
             ? money(line.unitPrice)
             : money(level.sellPrice);
-        const lineGross = calc
-          ? calc.grossAmount
+        const lineNet = calc
+          ? calc.productNet
           : unitPrice.mul(qty);
         const taxed = computeLineTax(taxProfile, {
-          lineGross,
+          lineGross: lineNet,
           inclusive: isProductInclusive,
           ...(productRatePct != null
             ? { rate: productRatePct / 100 }

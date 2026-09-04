@@ -48,5 +48,14 @@ export function calcMeta(calc: LineCalcResult, extra: Record<string, unknown> = 
     baseUnit: calc.baseUnitSymbol,
     baseQuantity: calc.baseQuantity.toFixed(),
     conversionFactor: calc.conversionFactor.toFixed(),
+    // Flipkart pricing snapshot
+    mrp: calc.mrp.toFixed(2),
+    grossMrp: calc.grossMrp.toFixed(2),
+    sellingPrice: calc.sellingPrice.toFixed(2),
+    productDiscountPerUnit: calc.productDiscountPerUnit.toFixed(2),
+    productDiscount: calc.productDiscount.toFixed(2),
+    productDiscountPercent: calc.productDiscountPercent,
+    productNet: calc.productNet.toFixed(2),
+    hasProductDiscount: calc.hasProductDiscount,
   };
 }

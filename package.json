@@ -28,7 +28,9 @@
     "postinstall": "node ./node_modules/prisma/build/index.js generate",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
-    "postman:strip-examples": "node postman/strip-examples.js"
+    "postman:strip-examples": "node postman/strip-examples.js",
+    "seed:demo": "ts-node --compiler-options {\"module\":\"CommonJS\"} -r tsconfig-paths/register prisma/seed-demo.ts",
+    "test:pos": "ts-node --compiler-options {\"module\":\"CommonJS\"} -r tsconfig-paths/register scripts/test/test-runner.ts"
   },
   "prisma": {
     "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts"

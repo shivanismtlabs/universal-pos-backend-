@@ -31,6 +31,8 @@ export type UnitRef = {
   unitGroupId: string;
   unitGroupCode: string;
   conversionToGroupBase: DecimalValue;
+  name?: string;
+  decimals?: number;
   isActive?: boolean;
 };
 
@@ -38,6 +40,7 @@ export type ProductUnitRef = {
   unitId: string;
   conversionToBase: DecimalValue;
   fixedPrice: DecimalValue | null;
+  sellPrice?: DecimalValue | null;
   effectiveFrom: Date;
   effectiveTo: Date | null;
   quantityPrecision?: number | null;
@@ -56,15 +59,49 @@ export type ConversionEdge = {
   factor: DecimalValue;
 };
 
+export type ProductDiscountRule = {
+  type: 'percent' | 'percentage' | 'fixed' | 'fixed_amount' | 'fixed_line';
+  value: DecimalValue;
+  startDate?: Date | string | null;
+  endDate?: Date | string | null;
+  effectiveFrom?: Date | string | null;
+  effectiveTo?: Date | string | null;
+  minQuantity?: DecimalValue | null;
+  maxQuantity?: DecimalValue | null;
+  customerTiers?: string[];
+  customerTags?: string[];
+  customerIds?: string[];
+  customerEligibility?:
+    | 'all'
+    | {
+        customerIds?: string[];
+        customerTags?: string[];
+        customerTiers?: string[];
+      };
+};
+
+export type CustomerContext = {
+  id?: string | null;
+  tags?: string[] | null;
+  tier?: string | null;
+};
+
 export type ProductPricingRef = {
   id: string;
-  baseUnitId: string;
-  pricingUnitId: string | null;
-  pricingStrategy: 'CONVERTED' | 'FIXED_TIER';
-  pricePerPricingUnit: DecimalValue | null;
+  name?: string;
+  sku?: string;
+  baseUnitId?: string;
+  pricingUnitId?: string | null;
+  pricingStrategy?: 'CONVERTED' | 'FIXED_TIER';
+  pricePerPricingUnit?: DecimalValue | null;
   /** Catalog selling price in the pricing/base unit (fallback). */
   basePrice?: DecimalValue | null;
-  productUnits: ProductUnitRef[];
+  /** Maximum Retail Price / list price (per base/pricing unit). */
+  mrp?: DecimalValue | null;
+  /** Product-level discount rule */
+  productDiscount?: ProductDiscountRule | null;
+  meta?: Record<string, unknown> | null;
+  productUnits?: ProductUnitRef[];
   conversionEdges?: ConversionEdge[];
   availableInPos?: boolean;
   canSell?: boolean;
@@ -78,7 +115,12 @@ export type LineDiscountInput = {
   value: DecimalValue;
 };
 
-export type PriceSource = 'unit_fixed' | 'converted' | 'override';
+export type PriceSource =
+  | 'unit_fixed'
+  | 'converted'
+  | 'override'
+  | 'discounted'
+  | 'product_unit';
 
 export type LineCalcResult = {
   orderedQuantity: Prisma.Decimal;
@@ -102,6 +144,25 @@ export type LineCalcResult = {
   finalAmount: Prisma.Decimal;
   inventoryImpact: Prisma.Decimal;
   validationWarnings: string[];
+
+  // ─── Flipkart-Style Explicit Separation ───
+  /** List price / Maximum Retail Price per selling unit */
+  mrp: Prisma.Decimal;
+  /** Total MRP for the line: MRP × quantity */
+  grossMrp: Prisma.Decimal;
+  /** Selling price per unit after product discount: MRP − productDiscountPerUnit */
+  sellingPrice: Prisma.Decimal;
+  /** Product discount per unit: MRP − sellingPrice */
+  productDiscountPerUnit: Prisma.Decimal;
+  /** Total product discount for the line: (MRP − sellingPrice) × quantity (or capped) */
+  productDiscount: Prisma.Decimal;
+  /** Percentage discount off MRP (e.g. 5 for 5% OFF) */
+  productDiscountPercent: number;
+  /** Net line value before bill/coupon discount: grossMrp − productDiscount */
+  productNet: Prisma.Decimal;
+  /** True when product discount is active */
+  hasProductDiscount: boolean;
+
   /** Back-compat aliases used by quote API / existing tests */
   qtyBase: Prisma.Decimal;
   amount: Prisma.Decimal;
@@ -181,12 +242,36 @@ export function activeProductUnit(
   unitId: string,
   at: Date,
 ): ProductUnitRef | undefined {
-  return product.productUnits.find(
+  return (product.productUnits ?? []).find(
     (pu) =>
       pu.unitId === unitId &&
       pu.effectiveFrom <= at &&
       (pu.effectiveTo == null || pu.effectiveTo > at),
   );
+}
+
+export function catalogUnitPrice(
+  product: ProductPricingRef,
+  sellingUnit: UnitRef,
+  at: Date,
+): { unitPrice: Prisma.Decimal; source: PriceSource } | null {
+  const pu = activeProductUnit(product, sellingUnit.id, at);
+  if (!pu) return null;
+  if (pu.fixedPrice != null) {
+    const f = d(pu.fixedPrice);
+    if (!f.gte(0)) {
+      throw new UnitPricingError('fixed_price must be ≥ 0', 'INVALID_PRICE');
+    }
+    return { unitPrice: f, source: 'unit_fixed' };
+  }
+  if (pu.sellPrice != null) {
+    const s = d(pu.sellPrice);
+    if (!s.gte(0)) {
+      throw new UnitPricingError('sell_price must be ≥ 0', 'INVALID_PRICE');
+    }
+    return { unitPrice: s, source: 'product_unit' };
+  }
+  return null;
 }
 
 function unitFactor(unit: UnitRef): Prisma.Decimal {
@@ -342,7 +427,7 @@ function buildGraph(opts: {
     }
   }
 
-  if (opts.product) {
+  if (opts.product && opts.product.productUnits && opts.product.baseUnitId) {
     const baseId = opts.product.baseUnitId;
     for (const pu of opts.product.productUnits) {
       if (pu.effectiveFrom > opts.at) continue;
@@ -533,17 +618,77 @@ export function convertQuantityDetailed(opts: {
   };
 }
 
-function catalogUnitPrice(
-  product: ProductPricingRef,
-  sellingUnit: UnitRef,
+export function isProductDiscountEligible(
+  rule: ProductDiscountRule,
+  qty: Prisma.Decimal,
   at: Date,
-): { unitPrice: Prisma.Decimal; source: PriceSource } | null {
-  const pu = activeProductUnit(product, sellingUnit.id, at);
-  if (pu?.fixedPrice != null) {
-    const p = d(pu.fixedPrice);
-    if (p.gte(0)) return { unitPrice: p, source: 'unit_fixed' };
+  customer?: CustomerContext | null,
+): boolean {
+  const fromDate = rule.startDate ?? rule.effectiveFrom;
+  if (fromDate) {
+    const from = new Date(fromDate);
+    if (!Number.isNaN(from.getTime()) && at < from) return false;
   }
-  return null;
+  const toDate = rule.endDate ?? rule.effectiveTo;
+  if (toDate) {
+    const to = new Date(toDate);
+    if (!Number.isNaN(to.getTime()) && at > to) return false;
+  }
+  if (rule.minQuantity != null) {
+    const min = d(rule.minQuantity);
+    if (min.gt(0) && qty.lt(min)) return false;
+  }
+
+  const customerTiers =
+    rule.customerTiers ??
+    (typeof rule.customerEligibility === 'object'
+      ? rule.customerEligibility?.customerTiers
+      : undefined);
+  const customerTags =
+    rule.customerTags ??
+    (typeof rule.customerEligibility === 'object'
+      ? rule.customerEligibility?.customerTags
+      : undefined);
+  const customerIds =
+    rule.customerIds ??
+    (typeof rule.customerEligibility === 'object'
+      ? rule.customerEligibility?.customerIds
+      : undefined);
+
+  const hasSpecificCustomerRules =
+    (customerTiers && customerTiers.length > 0) ||
+    (customerTags && customerTags.length > 0) ||
+    (customerIds && customerIds.length > 0) ||
+    (rule.customerEligibility != null && rule.customerEligibility !== 'all');
+
+  if (hasSpecificCustomerRules) {
+    if (!customer?.id && !customer?.tags?.length && !customer?.tier) {
+      return false;
+    }
+    let matches = false;
+    if (
+      customerIds?.length &&
+      customer?.id &&
+      customerIds.includes(customer.id)
+    ) {
+      matches = true;
+    }
+    if (
+      customerTags?.length &&
+      customer?.tags?.some((t) => customerTags.includes(t))
+    ) {
+      matches = true;
+    }
+    if (
+      customerTiers?.length &&
+      customer?.tier &&
+      customerTiers.includes(customer.tier)
+    ) {
+      matches = true;
+    }
+    if (!matches) return false;
+  }
+  return true;
 }
 
 /**
@@ -552,20 +697,35 @@ function catalogUnitPrice(
 export function calculateLineAmount(opts: {
   product: ProductPricingRef;
   enteredQty: DecimalValue;
-  sellingUnit: UnitRef;
-  unitsById: Map<string, UnitRef>;
+  sellingUnit?: UnitRef;
+  unitsById?: Map<string, UnitRef>;
   at?: Date;
   settings?: TenantQtyMoneySettings;
   extraEdges?: ConversionEdge[];
   unitPriceOverride?: DecimalValue | null;
   lineDiscount?: LineDiscountInput | null;
+  customer?: CustomerContext | null;
   taxProfile?: TaxProfile | null;
   taxRate?: number | null;
   validate?: boolean;
   /** +1 purchase/receive, −1 sale (default). */
   inventorySign?: 1 | -1;
 }): LineCalcResult {
-  const { product, sellingUnit, unitsById } = opts;
+  const defaultUnit: UnitRef = {
+    id: 'u-pcs',
+    symbol: 'pcs',
+    name: 'Pieces',
+    unitGroupId: 'ug-count',
+    unitGroupCode: 'COUNT',
+    conversionToGroupBase: 1,
+    decimals: 0,
+    isActive: true,
+  };
+  const sellingUnit = opts.sellingUnit ?? defaultUnit;
+  const unitsById =
+    opts.unitsById ??
+    new Map<string, UnitRef>([[sellingUnit.id, sellingUnit]]);
+  const { product } = opts;
   const settings = opts.settings ?? DEFAULT_SETTINGS;
   const at = opts.at ?? new Date();
   const enteredQty = d(opts.enteredQty);
@@ -588,8 +748,16 @@ export function calculateLineAmount(opts: {
     );
   }
 
-  const baseUnit = unitsById.get(product.baseUnitId);
-  if (!baseUnit) throw new UnitPricingError('Product base unit is missing', 'NO_BASE_UNIT');
+  const rawBaseUnit = product.baseUnitId ? unitsById.get(product.baseUnitId) : undefined;
+  const hasUnitConversions = Boolean(
+    (product.productUnits && product.productUnits.length > 0) ||
+      (opts.extraEdges && opts.extraEdges.length > 0),
+  );
+  const baseUnit =
+    rawBaseUnit &&
+    (rawBaseUnit.unitGroupId === sellingUnit.unitGroupId || hasUnitConversions)
+      ? rawBaseUnit
+      : sellingUnit;
 
   const converted = convertQuantityDetailed({
     quantity: enteredQty,
@@ -605,22 +773,25 @@ export function calculateLineAmount(opts: {
     QTY_INTERNAL_PLACES,
     Decimal.ROUND_HALF_UP,
   );
-
   const conversionFactor = enteredQty.gt(0)
     ? qtyBase.div(enteredQty)
     : new Decimal(1);
-
-  let unitPrice: Prisma.Decimal;
-  let priceSource: PriceSource;
   let priceUnit = sellingUnit;
 
-  if (opts.unitPriceOverride != null && d(opts.unitPriceOverride).gte(0)) {
-    unitPrice = d(opts.unitPriceOverride);
+  let baselineUnitPrice: Prisma.Decimal;
+  let priceSource: LineCalcResult['priceSource'] = 'converted';
+
+  if (opts.unitPriceOverride != null) {
+    const o = d(opts.unitPriceOverride);
+    if (!o.gte(0)) {
+      throw new UnitPricingError('unit_price_override must be ≥ 0', 'INVALID_OVERRIDE');
+    }
+    baselineUnitPrice = o;
     priceSource = 'override';
   } else {
     const specific = catalogUnitPrice(product, sellingUnit, at);
     if (specific) {
-      unitPrice = specific.unitPrice;
+      baselineUnitPrice = specific.unitPrice;
       priceSource = specific.source;
     } else if (product.pricingStrategy === 'FIXED_TIER') {
       throw new UnitPricingError(
@@ -628,21 +799,20 @@ export function calculateLineAmount(opts: {
         'MISSING_FIXED_PRICE',
       );
     } else {
-      const price =
-        product.pricePerPricingUnit != null
-          ? d(product.pricePerPricingUnit)
-          : product.basePrice != null
-            ? d(product.basePrice)
-            : null;
-      if (price == null || !price.gte(0)) {
+      const rawPrice = product.pricePerPricingUnit ?? product.basePrice;
+      if (rawPrice == null || !d(rawPrice).gte(0)) {
         throw new UnitPricingError(
           'Converted pricing requires price_per_pricing_unit ≥ 0',
           'MISSING_PRICE',
         );
       }
-      const pricingUnitId = product.pricingUnitId ?? product.baseUnitId;
-      const pricingUnit = unitsById.get(pricingUnitId);
-      if (!pricingUnit) throw new UnitPricingError('Pricing unit is missing', 'NO_PRICING_UNIT');
+      const price = d(rawPrice);
+      const rawPricingUnit = product.pricingUnitId ? unitsById.get(product.pricingUnitId) : undefined;
+      const pricingUnit =
+        rawPricingUnit &&
+        (rawPricingUnit.unitGroupId === baseUnit.unitGroupId || hasUnitConversions)
+          ? rawPricingUnit
+          : baseUnit;
       const pricingQty = convertQuantity({
         quantity: qtyBase,
         fromUnit: baseUnit,
@@ -653,35 +823,160 @@ export function calculateLineAmount(opts: {
         at,
         validate: false,
       });
-      const grossFromBase = pricingQty.mul(price);
-      unitPrice = enteredQty.gt(0)
-        ? grossFromBase.div(enteredQty)
+      baselineUnitPrice = enteredQty.gt(0)
+        ? pricingQty.mul(price).div(enteredQty)
         : price;
       priceSource = 'converted';
       priceUnit = pricingUnit;
     }
   }
 
-  const grossRaw = unitPrice.mul(enteredQty);
-  let discountAmount = new Decimal(0);
+  // ─── 1. Determine MRP per Selling Unit ───
+  let mrpPerSellingUnit: Prisma.Decimal;
+  if (product.mrp != null && d(product.mrp).gt(0)) {
+    const baseMrp = d(product.mrp);
+    if (sellingUnit.id === (product.baseUnitId || sellingUnit.id)) {
+      mrpPerSellingUnit = baseMrp;
+    } else {
+      const rawPricingUnit = product.pricingUnitId ? unitsById.get(product.pricingUnitId) : undefined;
+      const pricingUnit =
+        rawPricingUnit &&
+        (rawPricingUnit.unitGroupId === baseUnit.unitGroupId || hasUnitConversions)
+          ? rawPricingUnit
+          : baseUnit;
+      const pricingQty = convertQuantity({
+        quantity: qtyBase,
+        fromUnit: baseUnit,
+        toUnit: pricingUnit,
+        product,
+        unitsById,
+        extraEdges: opts.extraEdges,
+        at,
+        validate: false,
+      });
+      mrpPerSellingUnit = enteredQty.gt(0)
+        ? pricingQty.mul(baseMrp).div(enteredQty)
+        : baseMrp;
+    }
+  } else if (opts.unitPriceOverride != null) {
+    mrpPerSellingUnit = baselineUnitPrice;
+  } else {
+    mrpPerSellingUnit = baselineUnitPrice;
+  }
+
+  // Ensure MRP is at least baselineUnitPrice if basePrice was explicitly lower
+  if (mrpPerSellingUnit.lt(baselineUnitPrice)) {
+    mrpPerSellingUnit = baselineUnitPrice;
+  }
+
+  // ─── 2. Evaluate Product / SKU Discount ───
+  let productDiscountPerUnit = new Decimal(0);
+  let sellingPricePerUnit = baselineUnitPrice;
+  let productDiscountPercent = 0;
+  let hasProductDiscount = false;
+  let lineProductDiscount = new Decimal(0);
+  let lineProductNet = new Decimal(0);
+
+  // Check discount rule configured on product or metadata
+  const metaDiscountRule =
+    product.productDiscount ??
+    ((product.meta as Record<string, unknown> | null)?.productDiscount as ProductDiscountRule | undefined) ??
+    ((product.meta as Record<string, unknown> | null)?.discountRule as ProductDiscountRule | undefined);
+
   if (opts.lineDiscount) {
+    // Explicit line discount passed into call
     const v = d(opts.lineDiscount.value);
-    if (opts.lineDiscount.type === 'percent') {
+    if (opts.lineDiscount.type === 'percent' || (opts.lineDiscount.type as string) === 'percentage') {
       if (v.lt(0) || v.gt(100)) {
         throw new UnitPricingError('Percent discount must be 0–100', 'DISCOUNT');
       }
-      discountAmount = grossRaw.mul(v).div(100);
+      productDiscountPercent = v.toNumber();
+      productDiscountPerUnit = mrpPerSellingUnit.mul(v).div(100);
+      sellingPricePerUnit = Decimal.max(new Decimal(0), mrpPerSellingUnit.sub(productDiscountPerUnit));
+      lineProductDiscount = mrpPerSellingUnit.mul(enteredQty).mul(v).div(100);
+      lineProductNet = mrpPerSellingUnit.mul(enteredQty).sub(lineProductDiscount);
+      hasProductDiscount = v.gt(0);
+      priceSource = 'discounted';
     } else {
-      if (v.lt(0) || v.gt(grossRaw)) {
+      const gross = mrpPerSellingUnit.mul(enteredQty);
+      if (v.lt(0) || v.gt(gross)) {
         throw new UnitPricingError('Fixed discount cannot exceed line gross', 'DISCOUNT');
       }
-      discountAmount = v;
+      lineProductDiscount = v;
+      lineProductNet = gross.sub(lineProductDiscount);
+      productDiscountPerUnit = enteredQty.gt(0) ? v.div(enteredQty) : v;
+      sellingPricePerUnit = Decimal.max(new Decimal(0), mrpPerSellingUnit.sub(productDiscountPerUnit));
+      productDiscountPercent = mrpPerSellingUnit.gt(0)
+        ? productDiscountPerUnit.div(mrpPerSellingUnit).mul(100).toNumber()
+        : 0;
+      hasProductDiscount = v.gt(0);
+      priceSource = 'discounted';
     }
+  } else if (metaDiscountRule && isProductDiscountEligible(metaDiscountRule, enteredQty, at, opts.customer)) {
+    // Product rule active
+    const ruleVal = d(metaDiscountRule.value);
+    const maxQty = metaDiscountRule.maxQuantity != null ? d(metaDiscountRule.maxQuantity) : null;
+    const discountedQty = maxQty != null && maxQty.gt(0)
+      ? Decimal.min(enteredQty, maxQty)
+      : enteredQty;
+    const regularQty = Decimal.max(new Decimal(0), enteredQty.sub(discountedQty));
+    const isPercent =
+      metaDiscountRule.type === 'percent' ||
+      (metaDiscountRule.type as string) === 'percentage';
+
+    if (isPercent) {
+      if (ruleVal.lt(0) || ruleVal.gt(100)) {
+        throw new UnitPricingError('Percent discount must be 0–100', 'DISCOUNT');
+      }
+      productDiscountPercent = ruleVal.toNumber();
+      const discPerUnit = mrpPerSellingUnit.mul(ruleVal).div(100);
+      const discountedUnitSell = Decimal.max(new Decimal(0), mrpPerSellingUnit.sub(discPerUnit));
+      lineProductDiscount = discPerUnit.mul(discountedQty);
+      lineProductNet = discountedUnitSell.mul(discountedQty).add(mrpPerSellingUnit.mul(regularQty));
+      productDiscountPerUnit = enteredQty.gt(0) ? lineProductDiscount.div(enteredQty) : discPerUnit;
+      sellingPricePerUnit = enteredQty.gt(0) ? lineProductNet.div(enteredQty) : discountedUnitSell;
+      hasProductDiscount = ruleVal.gt(0);
+      priceSource = 'discounted';
+    } else {
+      const discPerUnit = Decimal.min(mrpPerSellingUnit, ruleVal);
+      const discountedUnitSell = Decimal.max(new Decimal(0), mrpPerSellingUnit.sub(discPerUnit));
+      lineProductDiscount = discPerUnit.mul(discountedQty);
+      lineProductNet = discountedUnitSell.mul(discountedQty).add(mrpPerSellingUnit.mul(regularQty));
+      productDiscountPerUnit = enteredQty.gt(0) ? lineProductDiscount.div(enteredQty) : discPerUnit;
+      sellingPricePerUnit = enteredQty.gt(0) ? lineProductNet.div(enteredQty) : discountedUnitSell;
+      productDiscountPercent = mrpPerSellingUnit.gt(0)
+        ? productDiscountPerUnit.div(mrpPerSellingUnit).mul(100).toNumber()
+        : 0;
+      hasProductDiscount = ruleVal.gt(0);
+      priceSource = 'discounted';
+    }
+  } else if (mrpPerSellingUnit.gt(baselineUnitPrice) && opts.unitPriceOverride == null) {
+    // Implicit product discount: MRP > Selling Rate
+    productDiscountPerUnit = mrpPerSellingUnit.sub(baselineUnitPrice);
+    sellingPricePerUnit = baselineUnitPrice;
+    lineProductDiscount = productDiscountPerUnit.mul(enteredQty);
+    lineProductNet = sellingPricePerUnit.mul(enteredQty);
+    productDiscountPercent = mrpPerSellingUnit.gt(0)
+      ? productDiscountPerUnit.div(mrpPerSellingUnit).mul(100).toNumber()
+      : 0;
+    hasProductDiscount = lineProductDiscount.gt(0);
+  } else {
+    // No product discount
+    sellingPricePerUnit = baselineUnitPrice;
+    lineProductDiscount = new Decimal(0);
+    lineProductNet = sellingPricePerUnit.mul(enteredQty);
+    productDiscountPerUnit = new Decimal(0);
+    productDiscountPercent = 0;
+    hasProductDiscount = false;
   }
 
-  const netAfterDisc = grossRaw.sub(discountAmount).lt(0)
-    ? new Decimal(0)
-    : grossRaw.sub(discountAmount);
+  // ─── 3. Flipkart Formula Invariants ───
+  // grossMrp = MRP × quantity
+  // productDiscount = (MRP − sellingPrice) × quantity
+  // productNet = grossMrp − productDiscount
+  // NEVER apply the same product discount again after productNet.
+  const grossMrp = mrpPerSellingUnit.mul(enteredQty);
+
   const places = moneyPlaces(settings);
   const mode = roundingOf(settings);
 
@@ -689,20 +984,19 @@ export function calculateLineAmount(opts: {
   let taxAmount: Prisma.Decimal;
   if (opts.taxProfile) {
     const taxed = computeLineTax(opts.taxProfile, {
-      lineGross: netAfterDisc,
+      lineGross: lineProductNet,
+      inclusive: opts.taxProfile.inclusive,
       ...(opts.taxRate != null ? { rate: opts.taxRate } : {}),
     });
     lineTotal = taxed.lineTotal;
     taxAmount = taxed.taxAmount;
   } else {
-    lineTotal = roundMoney(netAfterDisc, places, mode);
+    lineTotal = roundMoney(lineProductNet, places, mode);
     taxAmount = new Decimal(0);
   }
 
-  const discountRounded = roundMoney(discountAmount, places, mode);
-  const grossRounded = roundMoney(grossRaw, places, mode);
   const finalAmount = opts.taxProfile?.inclusive
-    ? roundMoney(netAfterDisc, places, mode)
+    ? roundMoney(lineProductNet, places, mode)
     : lineTotal.add(taxAmount);
 
   const sign = opts.inventorySign ?? -1;
@@ -719,7 +1013,12 @@ export function calculateLineAmount(opts: {
     warnings.push(`Conversion graph contains a cycle (${cycle}); shortest path was used`);
   }
 
-  const unitPriceRounded = roundMoney(unitPrice, Math.max(places, 4), mode);
+  const mrpRounded = roundMoney(mrpPerSellingUnit, Math.max(places, 4), mode);
+  const grossMrpRounded = roundMoney(grossMrp, places, mode);
+  const sellingPriceRounded = roundMoney(sellingPricePerUnit, Math.max(places, 4), mode);
+  const productDiscountPerUnitRounded = roundMoney(productDiscountPerUnit, Math.max(places, 4), mode);
+  const productDiscountRounded = roundMoney(lineProductDiscount, places, mode);
+  const productNetRounded = roundMoney(lineProductNet, places, mode);
 
   return {
     orderedQuantity: enteredQty,
@@ -730,20 +1029,31 @@ export function calculateLineAmount(opts: {
     baseUnitSymbol: baseUnit.symbol,
     conversionFactor: conversionFactor.toDecimalPlaces(8, Decimal.ROUND_HALF_UP),
     conversionPath: converted.path,
-    unitPrice: unitPriceRounded,
+    unitPrice: sellingPriceRounded,
     priceUnitId: priceUnit.id,
     priceUnitSymbol: priceUnit.symbol,
     priceSource,
-    grossAmount: grossRounded,
-    discountAmount: discountRounded,
+    grossAmount: grossMrpRounded,
+    discountAmount: productDiscountRounded,
     taxableAmount: lineTotal,
     taxAmount,
     lineTotal,
     finalAmount,
     inventoryImpact: qtyBase.mul(sign),
     validationWarnings: warnings,
+
+    // Flipkart Explicit Fields
+    mrp: mrpRounded,
+    grossMrp: grossMrpRounded,
+    sellingPrice: sellingPriceRounded,
+    productDiscountPerUnit: productDiscountPerUnitRounded,
+    productDiscount: productDiscountRounded,
+    productDiscountPercent: Math.round(productDiscountPercent * 100) / 100,
+    productNet: productNetRounded,
+    hasProductDiscount,
+
     qtyBase,
-    amount: grossRounded,
+    amount: grossMrpRounded,
     conversionFactorUsed: conversionFactor.toDecimalPlaces(8, Decimal.ROUND_HALF_UP),
     enteredUnitId: sellingUnit.id,
     enteredQty,
@@ -774,6 +1084,14 @@ export function serializeLineCalc(line: LineCalcResult): Record<string, unknown>
     finalAmount: line.finalAmount.toFixed(),
     inventoryImpact: line.inventoryImpact.toFixed(),
     validationWarnings: line.validationWarnings,
+    mrp: line.mrp.toFixed(2),
+    grossMrp: line.grossMrp.toFixed(2),
+    sellingPrice: line.sellingPrice.toFixed(2),
+    productDiscountPerUnit: line.productDiscountPerUnit.toFixed(2),
+    productDiscount: line.productDiscount.toFixed(2),
+    productDiscountPercent: line.productDiscountPercent,
+    productNet: line.productNet.toFixed(2),
+    hasProductDiscount: line.hasProductDiscount,
     qtyBase: Number(line.qtyBase.toFixed()),
     amount: Number(line.amount.toFixed(2)),
     conversionFactorUsed: Number(line.conversionFactorUsed.toFixed(8)),

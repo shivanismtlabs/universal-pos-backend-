@@ -56,10 +56,7 @@ export class UpdateTenantDto {
   @IsOptional()
   @IsString()
   @ValidateIf((_, v) => typeof v === 'string' && v.trim().length > 0)
-  @Matches(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/i, {
-    message: 'gstin must be a valid GSTIN format',
-  })
-  @MaxLength(15)
+  @MaxLength(32)
   gstin?: string;
 
   @ApiPropertyOptional({ example: '29AABCU9603R1ZM' })

@@ -101,8 +101,6 @@ export class UsersService {
     const email = dto.email.trim().toLowerCase();
     const roleCode = (dto.roleCode ?? DEFAULT_ROLE_CODE).trim().toLowerCase();
     this.assertCanAssignRole(user, roleCode);
-    const locationId = dto.primaryLocationId ?? dto.primaryStoreId;
-
     const existing = await this.prisma.user.findFirst({
       where: { tenantId: user.tenantId, email },
       select: { id: true },
@@ -111,8 +109,15 @@ export class UsersService {
       throw new ConflictException('User with this email already exists');
     }
 
+    let locationId = dto.primaryLocationId ?? dto.primaryStoreId;
     if (locationId) {
       await this.assertLocation(user.tenantId, locationId);
+    } else {
+      const defaultLoc = await this.prisma.location.findFirst({
+        where: { tenantId: user.tenantId, isActive: true },
+        orderBy: [{ code: 'asc' }, { createdAt: 'asc' }],
+      });
+      locationId = defaultLoc?.id;
     }
 
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);

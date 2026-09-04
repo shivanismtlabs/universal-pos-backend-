@@ -178,8 +178,16 @@ export function computeLineTax(
     return { lineTotal: net, taxAmount: tax };
   }
 
-  // exclusive: tax on net; lineTotal stays net
-  const tax = gross.mul(rate).toDecimalPlaces(2);
+  // exclusive: for India GST compute balanced CGST + SGST halves
+  if (profile.taxMode === TaxMode.in_gst) {
+    const halfRate = rate / 2;
+    const cgst = gross.mul(halfRate).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+    const sgst = gross.mul(halfRate).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+    const tax = cgst.add(sgst);
+    return { lineTotal: gross.toDecimalPlaces(2), taxAmount: tax };
+  }
+
+  const tax = gross.mul(rate).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
   return { lineTotal: gross.toDecimalPlaces(2), taxAmount: tax };
 }
 

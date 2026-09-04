@@ -361,11 +361,27 @@ export class UnitPricingService {
     },
     edges: ConversionEdge[],
     unitsById?: Map<string, UnitRef>,
+    preferredSellingUnit?: UnitRef,
   ): ProductPricingRef {
     let baseUnitId = product.baseUnitId;
-    if (!baseUnitId && unitsById) {
-      const match = this.resolveUnit(unitsById, null, (product as any).sellUnit ?? 'pcs')
-        ?? this.resolveUnit(unitsById, null, 'pcs');
+    const baseUnitRef = baseUnitId && unitsById ? unitsById.get(baseUnitId) : undefined;
+    const hasConversions =
+      (product.productUnits && product.productUnits.length > 0) ||
+      (edges && edges.length > 0);
+
+    if (
+      (!baseUnitId ||
+        (preferredSellingUnit &&
+          baseUnitRef &&
+          baseUnitRef.unitGroupId !== preferredSellingUnit.unitGroupId &&
+          !hasConversions)) &&
+      unitsById
+    ) {
+      const uom = (product as any).unitOfMeasure ?? (product as any).sellUnit;
+      const match =
+        preferredSellingUnit ??
+        (uom ? this.resolveUnit(unitsById, null, uom) : null) ??
+        this.resolveUnit(unitsById, null, 'pcs');
       if (match) baseUnitId = match.id;
     }
     if (!baseUnitId) {
@@ -387,10 +403,26 @@ export class UnitPricingService {
       isDefaultSellingUnit: pu.isDefaultSellingUnit,
       isPurchaseUnit: pu.isPurchaseUnit,
     }));
+
+    const rawPricingUnitRef =
+      product.pricingUnitId && unitsById
+        ? unitsById.get(product.pricingUnitId)
+        : undefined;
+    const effectiveBaseRef =
+      baseUnitId && unitsById ? unitsById.get(baseUnitId) : undefined;
+    const pricingUnitId =
+      product.pricingUnitId &&
+      (!effectiveBaseRef ||
+        !rawPricingUnitRef ||
+        rawPricingUnitRef.unitGroupId === effectiveBaseRef.unitGroupId ||
+        hasConversions)
+        ? product.pricingUnitId
+        : baseUnitId;
+
     return {
       id: product.id,
       baseUnitId,
-      pricingUnitId: product.pricingUnitId ?? baseUnitId,
+      pricingUnitId,
       pricingStrategy:
         product.pricingStrategy === PricingStrategy.fixed_tier
           ? 'FIXED_TIER'
@@ -493,7 +525,7 @@ export class UnitPricingService {
       product.id,
       unitsById,
     );
-    const ref = this.toProductRef(product, edges, unitsById);
+    const ref = this.toProductRef(product, edges, unitsById, sellingUnit);
 
     try {
       return calculateLineAmount({

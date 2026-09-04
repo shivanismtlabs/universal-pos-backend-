@@ -427,7 +427,7 @@ function buildGraph(opts: {
     }
   }
 
-  if (opts.product && opts.product.productUnits) {
+  if (opts.product && opts.product.productUnits && opts.product.baseUnitId) {
     const baseId = opts.product.baseUnitId;
     for (const pu of opts.product.productUnits) {
       if (pu.effectiveFrom > opts.at) continue;
@@ -748,8 +748,16 @@ export function calculateLineAmount(opts: {
     );
   }
 
-  const baseUnitId = product.baseUnitId || sellingUnit.id;
-  const baseUnit = unitsById.get(baseUnitId) ?? sellingUnit;
+  const rawBaseUnit = product.baseUnitId ? unitsById.get(product.baseUnitId) : undefined;
+  const hasUnitConversions = Boolean(
+    (product.productUnits && product.productUnits.length > 0) ||
+      (opts.extraEdges && opts.extraEdges.length > 0),
+  );
+  const baseUnit =
+    rawBaseUnit &&
+    (rawBaseUnit.unitGroupId === sellingUnit.unitGroupId || hasUnitConversions)
+      ? rawBaseUnit
+      : sellingUnit;
 
   const converted = convertQuantityDetailed({
     quantity: enteredQty,
@@ -799,8 +807,12 @@ export function calculateLineAmount(opts: {
         );
       }
       const price = d(rawPrice);
-      const pricingUnitId = product.pricingUnitId ?? product.baseUnitId ?? baseUnit.id;
-      const pricingUnit = unitsById.get(pricingUnitId) ?? baseUnit;
+      const rawPricingUnit = product.pricingUnitId ? unitsById.get(product.pricingUnitId) : undefined;
+      const pricingUnit =
+        rawPricingUnit &&
+        (rawPricingUnit.unitGroupId === baseUnit.unitGroupId || hasUnitConversions)
+          ? rawPricingUnit
+          : baseUnit;
       const pricingQty = convertQuantity({
         quantity: qtyBase,
         fromUnit: baseUnit,
@@ -826,8 +838,12 @@ export function calculateLineAmount(opts: {
     if (sellingUnit.id === (product.baseUnitId || sellingUnit.id)) {
       mrpPerSellingUnit = baseMrp;
     } else {
-      const pricingUnitId = product.pricingUnitId ?? product.baseUnitId ?? baseUnit.id;
-      const pricingUnit = unitsById.get(pricingUnitId) ?? baseUnit;
+      const rawPricingUnit = product.pricingUnitId ? unitsById.get(product.pricingUnitId) : undefined;
+      const pricingUnit =
+        rawPricingUnit &&
+        (rawPricingUnit.unitGroupId === baseUnit.unitGroupId || hasUnitConversions)
+          ? rawPricingUnit
+          : baseUnit;
       const pricingQty = convertQuantity({
         quantity: qtyBase,
         fromUnit: baseUnit,

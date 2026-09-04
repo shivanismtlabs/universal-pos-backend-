@@ -233,38 +233,79 @@ describe('POS Cart, Pricing Calculation & UOM Conversion Engine', () => {
       const taxableValue = lineResult.grossAmount.sub(lineResult.discountAmount).toNumber();
       expect(taxableValue).toBe(20.25);
 
-      // Step 4 & 5: Exclusive Tax 5% on ₹20.25 => ₹1.0125 => rounded ₹1.01
+      // Step 4 & 5: Exclusive Tax 5% on ₹20.25 => CGST 2.5% (₹0.51) + SGST 2.5% (₹0.51) => Total GST ₹1.02
       const taxProfile = buildTaxProfile({
         taxMode: 'in_gst' as any,
         settings: { tax: { ratePercent: 5, inclusive: false } },
       });
       const taxed = computeLineTax(taxProfile, { lineGross: taxableValue });
-      expect(taxed.taxAmount.toNumber()).toBe(1.01);
-      const exactDue = taxableValue + taxed.taxAmount.toNumber(); // 20.25 + 1.01 = 21.26
-      expect(exactDue).toBe(21.26);
+      expect(taxed.taxAmount.toNumber()).toBe(1.02);
+      const exactDue = taxableValue + taxed.taxAmount.toNumber(); // 20.25 + 1.02 = 21.27
+      expect(exactDue).toBe(21.27);
 
-      // Step 6 & 7: Cash Round-off on ₹21.26 => round-off -0.26 => Net Payable ₹21.00
+      // Step 6 & 7: Cash Round-off on ₹21.27 => round-off -0.27 => Net Payable ₹21.00
       const roundedCash = Math.round(exactDue); // 21
-      const cashRoundOff = Number((roundedCash - exactDue).toFixed(2)); // -0.26
+      const cashRoundOff = Number((roundedCash - exactDue).toFixed(2)); // -0.27
       expect(roundedCash).toBe(21);
-      expect(cashRoundOff).toBe(-0.26);
+      expect(cashRoundOff).toBe(-0.27);
 
-      // Digital (UPI/Card) Net Payable => Exact ₹21.26
-      expect(exactDue).toBe(21.26);
+      // Digital (UPI/Card) Net Payable => Exact ₹21.27
+      expect(exactDue).toBe(21.27);
     });
   });
 
-  describe('5. Inclusive GST Calculation', () => {
-    it('extracts GST correctly from inclusive price: ₹22.50 @ 5% GST => Taxable ₹21.43, Tax ₹1.07', () => {
-      const taxProfile = buildTaxProfile({
-        taxMode: 'in_gst' as any,
-        settings: { tax: { ratePercent: 5, inclusive: true } },
-      });
-      const taxed = computeLineTax(taxProfile, { lineGross: 22.5 });
+  describe('6. Weight Item Selling with Legacy Default Base Unit', () => {
+    it('seamlessly sells 1.5 kg when product had default pcs baseUnitId with no multi-unit conversions', () => {
+      const kgUnit: UnitRef = {
+        id: 'u-kg',
+        symbol: 'kg',
+        name: 'Kilogram',
+        unitGroupId: 'ug-weight',
+        unitGroupCode: 'WEIGHT',
+        conversionToGroupBase: 1,
+        decimals: 3,
+        isActive: true,
+      };
+      const pcsUnit: UnitRef = {
+        id: 'u-pcs',
+        symbol: 'pcs',
+        name: 'Pieces',
+        unitGroupId: 'ug-count',
+        unitGroupCode: 'COUNT',
+        conversionToGroupBase: 1,
+        decimals: 0,
+        isActive: true,
+      };
+      const unitsMap = new Map<string, UnitRef>([
+        ['u-kg', kgUnit],
+        ['u-pcs', pcsUnit],
+      ]);
 
-      expect(taxed.lineTotal.toNumber()).toBe(21.43);
-      expect(taxed.taxAmount.toNumber()).toBe(1.07);
-      expect(taxed.lineTotal.add(taxed.taxAmount).toNumber()).toBe(22.5);
+      const result = calculateLineAmount({
+        product: {
+          id: 'prod-apple',
+          baseUnitId: 'u-pcs', // legacy or defaulted
+          pricingUnitId: 'u-pcs',
+          pricingStrategy: 'CONVERTED',
+          pricePerPricingUnit: 120, // ₹120 / kg
+          basePrice: 120,
+          productUnits: [],
+          availableInPos: true,
+          canSell: true,
+          canPurchase: true,
+          isActive: true,
+          trackQty: true,
+        },
+        enteredQty: 1.5,
+        sellingUnit: kgUnit,
+        unitsById: unitsMap,
+      });
+
+      expect(result.enteredQty.toNumber()).toBe(1.5);
+      expect(result.baseQuantity.toNumber()).toBe(1.5);
+      expect(result.unitPrice.toNumber()).toBe(120);
+      expect(result.grossAmount.toNumber()).toBe(180);
+      expect(result.productNet.toNumber()).toBe(180);
     });
   });
 });

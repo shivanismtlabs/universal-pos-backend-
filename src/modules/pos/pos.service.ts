@@ -2689,14 +2689,15 @@ export class PosService {
     });
 
     const taxSlabs = [...taxSlabMap.entries()].map(([rate, taxDec]) => {
-      const tax = Number(taxDec.toFixed(2));
-      const half = Math.round((tax / 2) * 100) / 100;
+      const halfRate = Math.round((rate / 2) * 100) / 100;
+      const cgstDec = taxDec.div(2).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+      const sgstDec = taxDec.sub(cgstDec);
       return {
         rate,
-        tax,
-        halfRate: Math.round((rate / 2) * 100) / 100,
-        cgst: half,
-        sgst: Math.round((tax - half) * 100) / 100,
+        tax: Number(taxDec.toFixed(2)),
+        halfRate,
+        cgst: Number(cgstDec.toFixed(2)),
+        sgst: Number(sgstDec.toFixed(2)),
       };
     });
 

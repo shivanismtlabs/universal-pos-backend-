@@ -254,6 +254,76 @@ describe('POS Cart, Pricing Calculation & UOM Conversion Engine', () => {
     });
   });
 
+  describe('5. Stock Validation with UOM Conversions (Gram & Liter Right / Wrong Qty)', () => {
+    it('Gram vs Kg: Right quantity (500g against 2kg stock) is allowed with correct price', () => {
+      const stockOnHandKg = 2; // 2 kg in inventory
+      const enteredQtyGrams = 500; // 500 g requested
+      
+      const line = calculateLineAmount({
+        product: tomatoProduct,
+        enteredQty: enteredQtyGrams,
+        sellingUnit: unitG,
+        unitsById,
+      });
+
+      const requiredStockInBase = line.baseQuantity.toNumber(); // 0.5 kg
+      expect(requiredStockInBase).toBe(0.5);
+      expect(requiredStockInBase <= stockOnHandKg).toBe(true); // Allowed
+      expect(line.grossAmount.toNumber()).toBe(22.5); // ₹22.50
+    });
+
+    it('Gram vs Kg: Wrong/Excess quantity (2500g against 2kg stock) exceeds available stock', () => {
+      const stockOnHandKg = 2; // 2 kg in inventory
+      const enteredQtyGrams = 2500; // 2500 g = 2.5 kg requested
+      
+      const line = calculateLineAmount({
+        product: tomatoProduct,
+        enteredQty: enteredQtyGrams,
+        sellingUnit: unitG,
+        unitsById,
+      });
+
+      const requiredStockInBase = line.baseQuantity.toNumber(); // 2.5 kg
+      expect(requiredStockInBase).toBe(2.5);
+      const isStockSufficient = requiredStockInBase <= stockOnHandKg;
+      expect(isStockSufficient).toBe(false); // Correctly detected as Insufficient Stock
+    });
+
+    it('Liter vs ml: Right quantity (500ml against 1L stock) is allowed with correct price', () => {
+      const stockOnHandLitre = 1; // 1 L in inventory
+      const enteredQtyMl = 500; // 500 ml requested
+      
+      const line = calculateLineAmount({
+        product: milkProduct,
+        enteredQty: enteredQtyMl,
+        sellingUnit: unitMl,
+        unitsById,
+      });
+
+      const requiredStockInBase = line.baseQuantity.toNumber(); // 0.5 L
+      expect(requiredStockInBase).toBe(0.5);
+      expect(requiredStockInBase <= stockOnHandLitre).toBe(true); // Allowed
+      expect(line.grossAmount.toNumber()).toBe(30); // ₹30.00
+    });
+
+    it('Liter vs ml: Wrong/Excess quantity (1500ml against 1L stock) exceeds available stock', () => {
+      const stockOnHandLitre = 1; // 1 L in inventory
+      const enteredQtyMl = 1500; // 1500 ml = 1.5 L requested
+      
+      const line = calculateLineAmount({
+        product: milkProduct,
+        enteredQty: enteredQtyMl,
+        sellingUnit: unitMl,
+        unitsById,
+      });
+
+      const requiredStockInBase = line.baseQuantity.toNumber(); // 1.5 L
+      expect(requiredStockInBase).toBe(1.5);
+      const isStockSufficient = requiredStockInBase <= stockOnHandLitre;
+      expect(isStockSufficient).toBe(false); // Correctly detected as Insufficient Stock
+    });
+  });
+
   describe('6. Weight Item Selling with Legacy Default Base Unit', () => {
     it('seamlessly sells 1.5 kg when product had default pcs baseUnitId with no multi-unit conversions', () => {
       const kgUnit: UnitRef = {

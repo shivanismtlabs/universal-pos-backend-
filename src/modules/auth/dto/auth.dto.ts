@@ -175,6 +175,10 @@ export class LoginDto {
   @Transform(toLowerTrim)
   @IsNotEmpty({ message: 'Please enter your email address.' })
   @IsEmail({}, { message: 'Please enter a valid email address.' })
+  @Matches(
+    /^[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/,
+    { message: 'Enter a valid email address with a valid domain (e.g. name@company.com)' },
+  )
   @MaxLength(255)
   email!: string;
 
@@ -265,6 +269,10 @@ export class SignupIdentityDto {
   @ApiProperty({ example: 'riya@shop.com' })
   @Transform(toLowerTrim)
   @IsEmail({}, { message: 'Enter a valid email' })
+  @Matches(
+    /^[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/,
+    { message: 'Enter a valid email address with a valid domain (e.g. name@company.com)' },
+  )
   @MaxLength(255)
   email!: string;
 

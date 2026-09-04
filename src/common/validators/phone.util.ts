@@ -20,10 +20,12 @@ export function isInternationalPhoneValue(
   if (!trimmed || trimmed.length > 22) return false;
   try {
     if (trimmed.startsWith('+')) {
-      return isValidPhoneNumber(trimmed);
+      const parsed = parsePhoneNumberFromString(trimmed);
+      return Boolean(parsed?.isValid());
     }
     const cc = asCountry(defaultCountry) ?? 'IN';
-    return isValidPhoneNumber(trimmed, cc);
+    const parsed = parsePhoneNumberFromString(trimmed, cc);
+    return Boolean(parsed?.isValid());
   } catch {
     return false;
   }

@@ -46,6 +46,8 @@ type OrgRow = {
   slug: string;
   currencyCode: string;
   role?: string;
+  businessType?: string | null;
+  businessLabel?: string | null;
 };
 
 @Injectable()
@@ -518,7 +520,11 @@ export class PortalAuthService {
       include: {
         memberships: {
           include: {
-            tenant: true,
+            tenant: {
+              include: {
+                businessConfig: true,
+              },
+            },
             user: {
               include: { userRoles: { include: { role: true } } },
             },
@@ -532,13 +538,24 @@ export class PortalAuthService {
         (m) =>
           m.tenant?.status === 'active' && Boolean(m.user?.isActive),
       )
-      .map((m) => ({
-        tenantId: m.tenantId,
-        name: m.tenant.name,
-        slug: m.tenant.slug,
-        currencyCode: m.tenant.currencyCode,
-        role: m.user.userRoles[0]?.role.code,
-      }));
+      .map((m) => {
+        const settings = (m.tenant?.settings as Record<string, any>) || {};
+        const businessType =
+          m.tenant?.businessConfig?.businessType ||
+          settings.businessType ||
+          null;
+        const businessLabel = settings.businessLabel || null;
+
+        return {
+          tenantId: m.tenantId,
+          name: m.tenant.name,
+          slug: m.tenant.slug,
+          currencyCode: m.tenant.currencyCode,
+          role: m.user.userRoles[0]?.role.code,
+          businessType,
+          businessLabel,
+        };
+      });
 
     const identityTokens = await this.issueIdentityTokens(identity.id);
     void ensureBusinessGroupForIdentity(this.prisma, identity.id);

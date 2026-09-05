@@ -107,9 +107,7 @@ export function validateSellQty(
 
   if (requiresWholeQty(unit, units)) {
     if (!Number.isInteger(qty)) {
-      return unit === 'pcs' || unit === 'pack'
-        ? `Quantity for ${unit} must be a whole number (no decimals)`
-        : `Quantity for ${unit} must be a whole number`;
+      return `Quantity for ${unit} must be a whole number`;
     }
   } else {
     const rounded = Math.round(qty * 1000) / 1000;

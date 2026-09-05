@@ -526,14 +526,32 @@ export class SaleReturnsService {
     return this.completeSaleReturn(user, {
       order,
       lines: returnOnly.map((l) => ({
-        stockLevelId: l.stockLevelId,
+        stockLevelId: l.stockLevelId as string,
         quantity: Number(l.quantity),
+        returnBaseQty: Number(
+          (l as any).returnBaseQty ?? (l as any).baseQuantity ?? l.quantity,
+        ),
         unitPrice: Number(l.unitPrice ?? 0),
-        condition: l.condition || 'good',
+        condition: (l.condition as string) || 'good',
         netShare: Number(l.netShare ?? 0),
         taxShare: Number(l.taxShare ?? 0),
         discountShare: Number(l.discountShare ?? 0),
         refundShare: Number(l.refundShare ?? l.unitPrice ?? 0),
+        orderedQuantity:
+          (l as any).orderedQuantity != null
+            ? Number((l as any).orderedQuantity)
+            : undefined,
+        orderedUnitSymbol: (l as any).orderedUnitSymbol ?? undefined,
+        baseQuantity:
+          (l as any).baseQuantity != null
+            ? Number((l as any).baseQuantity)
+            : undefined,
+        baseUnitSymbol: (l as any).baseUnitSymbol ?? undefined,
+        priceQuantity:
+          (l as any).priceQuantity != null
+            ? Number((l as any).priceQuantity)
+            : undefined,
+        priceUnitSymbol: (l as any).priceUnitSymbol ?? undefined,
       })),
       refundAmount,
       refundMethod: (ev.refundMethod as PaymentMethod) || PaymentMethod.cash,

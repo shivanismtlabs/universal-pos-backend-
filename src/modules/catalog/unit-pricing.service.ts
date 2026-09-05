@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { PricingStrategy, Prisma } from '@prisma/client';
 import type { TaxProfile } from '../../common/tax-engine';
@@ -79,7 +80,7 @@ const SYSTEM_UNITS: Array<[string, string, string, boolean, number]> = [
 ];
 
 @Injectable()
-export class UnitPricingService implements import('@nestjs/common').OnModuleInit {
+export class UnitPricingService implements OnModuleInit {
   constructor(private readonly prisma: PrismaService) {}
 
   async onModuleInit() {

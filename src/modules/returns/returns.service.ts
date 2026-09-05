@@ -173,15 +173,11 @@ export class ReturnsService {
     const orders = await this.prisma.order.findMany({
       where: {
         tenantId: user.tenantId,
-        kind: OrderKind.rental,
-        rentalExt: {
-          lifecycle: {
-            in: [
-              RentalOrderLifecycle.checked_out,
-              RentalOrderLifecycle.returned,
-            ],
-          },
-        },
+        OR: [
+          { kind: OrderKind.rental },
+          { rentalExt: { isNot: null } },
+        ],
+        status: { not: OrderStatus.cancelled },
       },
       orderBy: { createdAt: 'desc' },
       take: 80,
@@ -194,8 +190,11 @@ export class ReturnsService {
             returnDueDate: true,
           },
         },
+        payments: {
+          where: { status: PaymentStatus.succeeded },
+          select: { id: true, amount: true, type: true },
+        },
         items: {
-          where: { stockUnitId: { not: null } },
           include: {
             stockUnit: {
               select: {
@@ -208,44 +207,80 @@ export class ReturnsService {
             product: { select: { id: true, name: true, skuCode: true } },
           },
         },
-        returnEvents: { select: { stockUnitId: true } },
+        returnEvents: { select: { stockUnitId: true, itemsJson: true } },
       },
     });
 
     return {
-      items: orders
-        .map((o) => {
-          const returnedIds = new Set(
-            o.returnEvents.map((r) => r.stockUnitId).filter(Boolean),
-          );
-          const unitsOut = o.items
-            .filter(
-              (i) =>
-                i.stockUnitId &&
-                !returnedIds.has(i.stockUnitId) &&
-                i.stockUnit?.status === StockUnitStatus.checked_out,
-            )
-            .map((i) => ({
-              stockUnitId: i.stockUnitId!,
-              barcode: i.stockUnit!.barcodeSku,
-              barcodeSku: i.stockUnit!.barcodeSku,
-              variant: i.stockUnit!.variantLabel,
-              size: i.stockUnit!.variantLabel,
-              title: i.product?.name ?? i.description,
-              productId: i.product?.id ?? null,
-            }));
-          return {
-            id: o.id,
-            orderNumber: o.orderNumber,
-            lifecycle: o.rentalExt?.lifecycle ?? null,
-            customerName: o.customer?.fullName ?? 'Walk-in',
-            customerPhone: o.customer?.phone ?? null,
-            pickupDate: o.rentalExt?.pickupDate ?? null,
-            returnDueDate: o.rentalExt?.returnDueDate ?? null,
-            unitsOut,
-          };
-        })
-        .filter((o) => o.unitsOut.length > 0),
+      items: orders.map((o) => {
+        const totalAmount = Number(o.totalAmount ?? 0);
+        let paidAmount = 0;
+        let heldDeposit = 0;
+        let depositRefunded = 0;
+
+        for (const p of o.payments ?? []) {
+          const amt = Number(p.amount ?? 0);
+          if (p.type === PaymentType.deposit) {
+            heldDeposit += amt;
+          } else if (p.type === PaymentType.deposit_refund) {
+            depositRefunded += amt;
+          } else {
+            paidAmount += amt;
+          }
+        }
+        heldDeposit = Math.max(0, heldDeposit - depositRefunded);
+        const balanceDue = Math.max(0, totalAmount - paidAmount);
+
+        const returnedUnitIds = new Set(
+          o.returnEvents.map((r) => r.stockUnitId).filter(Boolean),
+        );
+        const returnedItemIds = new Set(
+          o.returnEvents.flatMap((r) => {
+            if (Array.isArray(r.itemsJson)) {
+              return (r.itemsJson as Array<{ orderItemId?: string }>)
+                .map((x) => x.orderItemId)
+                .filter(Boolean);
+            }
+            return [];
+          }),
+        );
+
+        const unitsOut = o.items
+          .filter((i) => {
+            if (i.stockUnitId && returnedUnitIds.has(i.stockUnitId)) return false;
+            if (returnedItemIds.has(i.id)) return false;
+            return true;
+          })
+          .map((i) => ({
+            stockUnitId: i.stockUnitId ?? i.id,
+            barcode:
+              i.stockUnit?.barcodeSku ??
+              i.product?.skuCode ??
+              i.id.slice(0, 8),
+            barcodeSku:
+              i.stockUnit?.barcodeSku ??
+              i.product?.skuCode ??
+              i.id.slice(0, 8),
+            variant: i.stockUnit?.variantLabel ?? null,
+            size: i.stockUnit?.variantLabel ?? null,
+            title: i.product?.name ?? i.description ?? 'Rental Item',
+            productId: i.product?.id ?? null,
+          }));
+        return {
+          id: o.id,
+          orderNumber: o.orderNumber,
+          lifecycle: o.rentalExt?.lifecycle ?? null,
+          customerName: o.customer?.fullName ?? 'Walk-in',
+          customerPhone: o.customer?.phone ?? null,
+          pickupDate: o.rentalExt?.pickupDate ?? null,
+          returnDueDate: o.rentalExt?.returnDueDate ?? null,
+          totalAmount,
+          paidAmount,
+          balanceDue,
+          heldDeposit,
+          unitsOut,
+        };
+      }),
     };
   }
 

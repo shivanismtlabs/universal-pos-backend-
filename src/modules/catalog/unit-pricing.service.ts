@@ -79,8 +79,16 @@ const SYSTEM_UNITS: Array<[string, string, string, boolean, number]> = [
 ];
 
 @Injectable()
-export class UnitPricingService {
+export class UnitPricingService implements import('@nestjs/common').OnModuleInit {
   constructor(private readonly prisma: PrismaService) {}
+
+  async onModuleInit() {
+    try {
+      await this.ensureSystemUnits();
+    } catch {
+      // ignore init race conditions
+    }
+  }
 
   /** Idempotent seed of unit groups + system units */
   async ensureSystemUnits() {
@@ -300,13 +308,27 @@ export class UnitPricingService {
   }
 
   async loadUnitsMap(tenantId: string): Promise<Map<string, UnitRef>> {
-    const units = await this.prisma.unit.findMany({
+    let units = await this.prisma.unit.findMany({
       where: {
         isActive: true,
         OR: [{ tenantId: null }, { tenantId }],
       },
       include: { unitGroup: true },
     });
+    if (units.length === 0) {
+      try {
+        await this.ensureSystemUnits();
+        units = await this.prisma.unit.findMany({
+          where: {
+            isActive: true,
+            OR: [{ tenantId: null }, { tenantId }],
+          },
+          include: { unitGroup: true },
+        });
+      } catch {
+        // seed fallback
+      }
+    }
     const unitsById = new Map<string, UnitRef>();
     for (const u of units) {
       unitsById.set(u.id, {
@@ -327,10 +349,91 @@ export class UnitPricingService {
     symbol?: string | null,
   ): UnitRef | undefined {
     if (unitId && unitsById.has(unitId)) return unitsById.get(unitId);
-    const want = (symbol ?? '').trim().toLowerCase();
-    if (!want) return undefined;
+    const raw = (symbol ?? '').trim().toLowerCase();
+    if (!raw) return undefined;
     for (const u of unitsById.values()) {
-      if (u.symbol.toLowerCase() === want) return u;
+      if (u.symbol.toLowerCase() === raw) return u;
+    }
+    const aliases: Record<string, string> = {
+      nos: 'pcs',
+      no: 'pcs',
+      item: 'pcs',
+      items: 'pcs',
+      unit: 'pcs',
+      units: 'pcs',
+      piece: 'pcs',
+      pieces: 'pcs',
+      each: 'pcs',
+      pc: 'pcs',
+      service: 'service',
+      services: 'service',
+      svc: 'service',
+      session: 'session',
+      sessions: 'session',
+      visit: 'visit',
+      visits: 'visit',
+      month: 'month',
+      months: 'month',
+      mo: 'month',
+      mon: 'month',
+      year: 'year',
+      years: 'year',
+      yr: 'year',
+      yrs: 'year',
+      day: 'day',
+      days: 'day',
+      hour: 'hour',
+      hours: 'hour',
+      hr: 'hour',
+      hrs: 'hour',
+      minute: 'min',
+      minutes: 'min',
+      min: 'min',
+      mins: 'min',
+      box: 'box',
+      boxes: 'box',
+      pack: 'pack',
+      packs: 'pack',
+      packet: 'pack',
+      packets: 'pack',
+      pkt: 'pack',
+      pkts: 'pack',
+      kg: 'kg',
+      kgs: 'kg',
+      kilo: 'kg',
+      kilogram: 'kg',
+      kilograms: 'kg',
+      g: 'g',
+      gm: 'g',
+      gms: 'g',
+      gram: 'g',
+      grams: 'g',
+      l: 'L',
+      ltr: 'L',
+      ltrs: 'L',
+      litre: 'L',
+      litres: 'L',
+      liter: 'L',
+      liters: 'L',
+      ml: 'ml',
+      mls: 'ml',
+      millilitre: 'ml',
+      milliliter: 'ml',
+      m: 'm',
+      mtr: 'm',
+      mtrs: 'm',
+      meter: 'm',
+      meters: 'm',
+      pair: 'pair',
+      pairs: 'pair',
+      set: 'set',
+      sets: 'set',
+    };
+    const target = aliases[raw];
+    if (target) {
+      for (const u of unitsById.values()) {
+        if (u.symbol.toLowerCase() === target.toLowerCase()) return u;
+      }
     }
     return undefined;
   }
@@ -521,11 +624,35 @@ export class UnitPricingService {
     }
 
     const unitsById = await this.loadUnitsMap(user.tenantId);
-    const sellingUnit = this.resolveUnit(
+    let sellingUnit = this.resolveUnit(
       unitsById,
       body.sellingUnitId,
       body.sellingUnitSymbol,
     );
+    if (!sellingUnit && product.pricingUnitId && unitsById.has(product.pricingUnitId)) {
+      sellingUnit = unitsById.get(product.pricingUnitId);
+    }
+    if (!sellingUnit && product.baseUnitId && unitsById.has(product.baseUnitId)) {
+      sellingUnit = unitsById.get(product.baseUnitId);
+    }
+    if (!sellingUnit) {
+      const defaultProductUnit = product.productUnits?.find((pu) => pu.isDefaultSellingUnit);
+      if (defaultProductUnit && unitsById.has(defaultProductUnit.unitId)) {
+        sellingUnit = unitsById.get(defaultProductUnit.unitId);
+      }
+    }
+    if (!sellingUnit) {
+      const uom = (product as any).unitOfMeasure ?? (product as any).sellUnit;
+      if (uom) {
+        sellingUnit = this.resolveUnit(unitsById, null, uom);
+      }
+    }
+    if (!sellingUnit) {
+      sellingUnit =
+        this.resolveUnit(unitsById, null, 'pcs') ??
+        this.resolveUnit(unitsById, null, 'service') ??
+        unitsById.values().next().value;
+    }
     if (!sellingUnit) {
       throw new NotFoundException('Selling unit not found or not enabled');
     }

@@ -1239,14 +1239,13 @@ export class CatalogService {
           ...(dto.basePrice !== undefined || dto.pricePerPricingUnit !== undefined
             ? (() => {
                 const updatedPrice = dto.basePrice ?? dto.pricePerPricingUnit;
-                const priceDec = updatedPrice != null ? dec(updatedPrice) : undefined;
+                const priceDec = updatedPrice != null ? (dec(updatedPrice) ?? undefined) : undefined;
                 const mrpDec =
                   dto.mrp !== undefined
                     ? dec(dto.mrp ?? undefined)
                     : priceDec;
                 return {
-                  basePrice: priceDec,
-                  pricePerPricingUnit: priceDec,
+                  ...(priceDec ? { basePrice: priceDec, pricePerPricingUnit: priceDec } : {}),
                   mrp: mrpDec,
                 };
               })()

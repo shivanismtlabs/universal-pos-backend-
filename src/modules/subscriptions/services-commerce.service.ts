@@ -96,6 +96,18 @@ export class ServicesCommerceService {
         typeof meta.durationMinutes === 'number'
           ? meta.durationMinutes
           : Number(meta.durationMinutes ?? 0) || null,
+      durationUnit:
+        typeof meta.durationUnit === 'string' && meta.durationUnit.trim()
+          ? meta.durationUnit.trim()
+          : null,
+      durationQuantity:
+        typeof meta.durationQuantity === 'number' && meta.durationQuantity > 0
+          ? meta.durationQuantity
+          : null,
+      sessionDurationMinutes:
+        typeof meta.sessionDurationMinutes === 'number' && meta.sessionDurationMinutes > 0
+          ? meta.sessionDurationMinutes
+          : null,
       taxRatePercent: resolveProductTaxRatePercent({
         taxCode: p.taxCode,
         meta: p.meta,
@@ -154,10 +166,12 @@ export class ServicesCommerceService {
           canSell: true,
           availableInPos: true,
           basePrice: money(dto.price).toFixed(2),
-          meta:
-            dto.durationMinutes != null
-              ? { durationMinutes: dto.durationMinutes }
-              : {},
+          meta: {
+            ...(dto.durationMinutes != null ? { durationMinutes: dto.durationMinutes } : {}),
+            ...(dto.durationUnit ? { durationUnit: dto.durationUnit.trim() } : {}),
+            ...(dto.durationQuantity != null ? { durationQuantity: dto.durationQuantity } : {}),
+            ...(dto.sessionDurationMinutes != null ? { sessionDurationMinutes: dto.sessionDurationMinutes } : {}),
+          },
         },
         include: { category: { select: { id: true, name: true } } },
       });
@@ -232,8 +246,9 @@ export class ServicesCommerceService {
       throw new BadRequestException('Service price must be greater than 0');
     }
 
-    const qty = Math.max(1, Math.min(99, Math.floor(Number(dto.quantity) || 1)));
-    const subtotal = unitPrice.mul(qty);
+    const rawQty = Number(dto.quantity);
+    const qty = Number.isFinite(rawQty) && rawQty > 0 ? Math.min(999, rawQty) : 1;
+    const subtotal = unitPrice.mul(qty).toDecimalPlaces(2);
     const taxRate =
       resolveProductTaxRatePercent({
         taxCode: product.taxCode,
@@ -253,6 +268,20 @@ export class ServicesCommerceService {
       typeof meta.durationMinutes === 'number'
         ? meta.durationMinutes
         : Number(meta.durationMinutes ?? 0) || null;
+    const durationUnit =
+      typeof meta.durationUnit === 'string' && meta.durationUnit.trim()
+        ? meta.durationUnit.trim()
+        : null;
+    const durationQuantity =
+      typeof meta.durationQuantity === 'number' && meta.durationQuantity > 0
+        ? meta.durationQuantity
+        : null;
+    const sessionDurationMinutes =
+      typeof meta.sessionDurationMinutes === 'number' && meta.sessionDurationMinutes > 0
+        ? meta.sessionDurationMinutes
+        : null;
+
+    const orderedUnitSymbol = dto.orderedUnitSymbol?.trim() || durationUnit || 'service';
 
     const methodMap: Record<string, PaymentMethod> = {
       cash: PaymentMethod.cash,
@@ -294,6 +323,7 @@ export class ServicesCommerceService {
           grandTotal: grandTotal.toFixed(2),
           taxRatePercent: taxRate,
           quantity: qty,
+          orderedUnitSymbol,
         },
       };
     }
@@ -339,7 +369,12 @@ export class ServicesCommerceService {
             serviceBill: true,
             productId: product.id,
             quantity: qty,
+            orderedQuantity: qty,
+            orderedUnitSymbol,
             ...(durationMinutes != null ? { durationMinutes } : {}),
+            ...(durationUnit ? { durationUnit } : {}),
+            ...(durationQuantity != null ? { durationQuantity } : {}),
+            ...(sessionDurationMinutes != null ? { sessionDurationMinutes } : {}),
             ...(taxRate > 0 ? { taxRatePercent: taxRate } : {}),
             ...(dto.appointmentId
               ? { appointmentId: dto.appointmentId }
@@ -361,7 +396,12 @@ export class ServicesCommerceService {
           lineTotal: subtotal.toFixed(2),
           taxAmount: taxTotal.toFixed(2),
           meta: {
+            orderedQuantity: qty,
+            orderedUnitSymbol,
             ...(durationMinutes != null ? { durationMinutes } : {}),
+            ...(durationUnit ? { durationUnit } : {}),
+            ...(durationQuantity != null ? { durationQuantity } : {}),
+            ...(sessionDurationMinutes != null ? { sessionDurationMinutes } : {}),
             ...(taxRate > 0 ? { taxRatePercent: taxRate } : {}),
           },
         },

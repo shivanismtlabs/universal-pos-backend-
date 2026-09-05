@@ -310,4 +310,222 @@ describe('Flipkart-Style Product Discount Engine & Rules', () => {
       expect(refundCalc.amount).toBe(360);
     });
   });
+
+  describe('Universal POS Standardized Discount, Tax & Round-Off Regression Suite', () => {
+    const taxProfileGst5 = buildTaxProfile({
+      taxMode: 'in_gst',
+      settings: {
+        taxMode: 'in_gst',
+        taxInclusive: false,
+        gstRatePercent: 5,
+      },
+    });
+
+    it('1. FreshMart Scenario: ₹260 with 5% product discount + 5% GST', () => {
+      const product: ProductPricingRef = {
+        id: 'p-grocery-260',
+        name: 'Basmati Rice 5kg',
+        basePrice: d(260),
+        mrp: d(260),
+        productDiscount: {
+          type: 'percentage',
+          value: d(5), // 5% product discount
+        },
+      };
+
+      const calc = calculateLineAmount({
+        product,
+        enteredQty: d(1),
+      });
+
+      // Gross MRP = 260.00
+      expect(calc.grossMrp.toFixed(2)).toBe('260.00');
+      // Product Discount = 13.00
+      expect(calc.productDiscount.toFixed(2)).toBe('13.00');
+      // Product Net / Subtotal = 247.00
+      expect(calc.productNet.toFixed(2)).toBe('247.00');
+
+      // 5% GST on ₹247.00 -> CGST 2.5% (6.18) + SGST 2.5% (6.18) = 12.36
+      const taxed = computeLineTax(taxProfileGst5, {
+        lineGross: calc.productNet,
+        inclusive: false,
+        rate: 0.05,
+      });
+
+      expect(taxed.lineTotal.toFixed(2)).toBe('247.00');
+      expect(taxed.taxAmount.toFixed(2)).toBe('12.36');
+
+      // Net before round-off = 259.36
+      const grand = taxed.lineTotal.add(taxed.taxAmount);
+      expect(grand.toFixed(2)).toBe('259.36');
+
+      // Round-off to nearest rupee: paise < 50 rounds down (-0.36 -> 259.00)
+      const rounded = grand.round();
+      const roundOff = rounded.sub(grand);
+      expect(rounded.toFixed(2)).toBe('259.00');
+      expect(roundOff.toFixed(2)).toBe('-0.36');
+    });
+
+    it('2. Pool Store Scenario: ₹32.99 with 5% product discount + 5% GST with symmetric CGST/SGST', () => {
+      const product: ProductPricingRef = {
+        id: 'p-pool-3299',
+        name: 'Pool Chlorine Tablet',
+        basePrice: d('32.99'),
+        mrp: d('32.99'),
+        productDiscount: {
+          type: 'percentage',
+          value: d(5), // 5% product discount
+        },
+      };
+
+      const calc = calculateLineAmount({
+        product,
+        enteredQty: d(1),
+      });
+
+      // Gross MRP = 32.99
+      expect(calc.grossMrp.toFixed(2)).toBe('32.99');
+      // Product Discount = 32.99 * 0.05 = 1.6495 -> 1.65
+      expect(calc.productDiscount.toFixed(2)).toBe('1.65');
+      // Product Net = 32.99 - 1.65 = 31.34
+      expect(calc.productNet.toFixed(2)).toBe('31.34');
+
+      // 5% GST on ₹31.34 -> CGST 2.5% (0.78) + SGST 2.5% (0.78) = 1.56
+      const taxed = computeLineTax(taxProfileGst5, {
+        lineGross: calc.productNet,
+        inclusive: false,
+        rate: 0.05,
+      });
+
+      expect(taxed.lineTotal.toFixed(2)).toBe('31.34');
+      // Symmetric CGST (0.78) + SGST (0.78) = 1.56 (never 1.57 asymmetric)
+      expect(taxed.taxAmount.toFixed(2)).toBe('1.56');
+
+      // Net before round-off = 31.34 + 1.56 = 32.90
+      const grand = taxed.lineTotal.add(taxed.taxAmount);
+      expect(grand.toFixed(2)).toBe('32.90');
+
+      // Round-off to nearest rupee: +0.10 -> 33.00
+      const rounded = grand.round();
+      const roundOff = rounded.sub(grand);
+      expect(rounded.toFixed(2)).toBe('33.00');
+      expect(roundOff.toFixed(2)).toBe('0.10');
+    });
+
+    it('3. Fractional UOM Sale: 2.5 kg @ ₹80/kg with 10% product discount', () => {
+      const unitKg: UnitRef = {
+        id: 'u-kg',
+        symbol: 'kg',
+        name: 'Kilogram',
+        unitGroupId: 'grp-weight',
+        unitGroupCode: 'WEIGHT',
+        conversionToGroupBase: 1000,
+        isActive: true,
+      };
+
+      const product: ProductPricingRef = {
+        id: 'p-fractional-kg',
+        name: 'Bulk Grain',
+        baseUnitId: unitKg.id,
+        pricingUnitId: unitKg.id,
+        pricingStrategy: 'CONVERTED',
+        basePrice: d(80),
+        mrp: d(80),
+        productDiscount: {
+          type: 'percentage',
+          value: d(10), // 10% OFF
+        },
+      };
+
+      const calc = calculateLineAmount({
+        product,
+        enteredQty: d('2.5'),
+        sellingUnit: unitKg,
+        unitsById: new Map([[unitKg.id, unitKg]]),
+      });
+
+      // Gross MRP = 80 * 2.5 = 200.00
+      expect(calc.grossMrp.toFixed(2)).toBe('200.00');
+      // Product Discount = 20.00
+      expect(calc.productDiscount.toFixed(2)).toBe('20.00');
+      // Product Net = 180.00
+      expect(calc.productNet.toFixed(2)).toBe('180.00');
+    });
+
+    it('4. Product Discount vs Bill Discount Pipeline Separation', () => {
+      const product: ProductPricingRef = {
+        id: 'p-apparel-200',
+        name: 'Jeans',
+        basePrice: d(200),
+        mrp: d(200),
+        productDiscount: {
+          type: 'percentage',
+          value: d(10), // 10% product discount -> ₹20 off
+        },
+      };
+
+      const calc = calculateLineAmount({
+        product,
+        enteredQty: d(1),
+      });
+
+      // Pipeline Stage 1: MRP
+      expect(calc.grossMrp.toFixed(2)).toBe('200.00');
+      // Pipeline Stage 2: Product Discount
+      expect(calc.productDiscount.toFixed(2)).toBe('20.00');
+      // Pipeline Stage 3: Subtotal (Net)
+      expect(calc.productNet.toFixed(2)).toBe('180.00');
+
+      // Pipeline Stage 4: Bill Discount (₹30.00)
+      const billDiscount = d(30);
+      const taxableValue = calc.productNet.sub(billDiscount);
+      expect(taxableValue.toFixed(2)).toBe('150.00');
+
+      // Pipeline Stage 5: Tax (GST 18% on ₹150.00 = ₹27.00)
+      const taxed = computeLineTax(
+        buildTaxProfile({ taxMode: 'in_gst', settings: { taxMode: 'in_gst', taxInclusive: false, gstRatePercent: 18 } }),
+        { lineGross: taxableValue, inclusive: false, rate: 0.18 },
+      );
+      expect(taxed.taxAmount.toFixed(2)).toBe('27.00');
+
+      // Pipeline Stage 6: Net Payable = 150 + 27 = 177.00
+      expect(taxed.lineTotal.add(taxed.taxAmount).toFixed(2)).toBe('177.00');
+    });
+
+    it('5. No Discount Standard Sale', () => {
+      const product: ProductPricingRef = {
+        id: 'p-standard',
+        name: 'Notebook',
+        basePrice: d(50),
+        mrp: d(50),
+      };
+
+      const calc = calculateLineAmount({
+        product,
+        enteredQty: d(2),
+      });
+
+      expect(calc.grossMrp.toFixed(2)).toBe('100.00');
+      expect(calc.productDiscount.toFixed(2)).toBe('0.00');
+      expect(calc.productNet.toFixed(2)).toBe('100.00');
+      expect(calc.hasProductDiscount).toBe(false);
+    });
+
+    it('6. Legacy Sale without MRP Configuration', () => {
+      const product: ProductPricingRef = {
+        id: 'p-legacy',
+        name: 'Legacy Item',
+        basePrice: d(75),
+      };
+
+      const calc = calculateLineAmount({
+        product,
+        enteredQty: d(1),
+      });
+
+      expect(calc.grossMrp.toFixed(2)).toBe('75.00');
+      expect(calc.productDiscount.toFixed(2)).toBe('0.00');
+      expect(calc.productNet.toFixed(2)).toBe('75.00');
+    });
+  });
 });

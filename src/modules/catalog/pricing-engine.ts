@@ -31,6 +31,7 @@ export type UnitRef = {
   unitGroupId: string;
   unitGroupCode: string;
   conversionToGroupBase: DecimalValue;
+  isBaseUnit?: boolean;
   name?: string;
   decimals?: number;
   isActive?: boolean;
@@ -314,11 +315,46 @@ export function validateEnteredQuantity(opts: {
     : undefined;
 
   const group = opts.unit.unitGroupCode;
-  const defaultFraction = group !== 'COUNT';
-  const allowFraction = pu?.allowFraction ?? defaultFraction;
+  const unitFactorVal = opts.unit.conversionToGroupBase != null ? d(opts.unit.conversionToGroupBase) : new Decimal(1);
+  const isCompositeCount = group === 'COUNT' && unitFactorVal.gt(1);
+  const unitExplicitFraction =
+    (opts.unit as Record<string, unknown>).allowFractionalQuantity ??
+    (opts.unit as Record<string, unknown>).decimalQty;
+
+  const productAllowFraction =
+    (opts.product as Record<string, unknown> | undefined)?.allowFractionalQuantity ??
+    (opts.product?.meta as Record<string, unknown> | undefined)?.allowFractionalQuantity ??
+    (opts.product?.meta as Record<string, unknown> | undefined)?.allowFraction;
+
+  let allowFraction: boolean;
+  if (pu?.allowFraction != null) {
+    allowFraction = pu.allowFraction;
+  } else if (typeof productAllowFraction === 'boolean') {
+    allowFraction = productAllowFraction;
+  } else if (typeof unitExplicitFraction === 'boolean') {
+    allowFraction = unitExplicitFraction;
+  } else if (group !== 'COUNT') {
+    // Physical continuous dimensions (WEIGHT, VOLUME, LENGTH, AREA, TIME) default to fractional
+    allowFraction = true;
+  } else if (opts.unit.decimals !== undefined && opts.unit.decimals > 0) {
+    allowFraction = true;
+  } else if (isCompositeCount) {
+    // Splittable composite count units (e.g. factor > 1) allow fractional parts
+    allowFraction = true;
+  } else {
+    // Base atomic discrete count units default to whole numbers unless configured
+    allowFraction = false;
+  }
+
   const precision =
     pu?.quantityPrecision ??
-    (allowFraction ? (group === 'TIME' ? 4 : 6) : 0);
+    (allowFraction
+      ? opts.unit.decimals !== undefined && opts.unit.decimals > 0
+        ? opts.unit.decimals
+        : group === 'TIME'
+          ? 4
+          : 6
+      : 0);
   const minQty = pu?.minQuantity != null ? d(pu.minQuantity) : new Decimal(0);
   const step =
     pu?.quantityStep != null
@@ -571,10 +607,20 @@ export function convertQuantity(opts: {
     return found.qty;
   }
 
+  const isCountGroup =
+    opts.fromUnit.unitGroupCode === 'COUNT' &&
+    opts.toUnit.unitGroupCode === 'COUNT';
+
+  const fromFactor = opts.fromUnit.conversionToGroupBase != null ? d(opts.fromUnit.conversionToGroupBase) : new Decimal(1);
+  const toFactor = opts.toUnit.conversionToGroupBase != null ? d(opts.toUnit.conversionToGroupBase) : new Decimal(1);
+  const hasFixedCountRatio =
+    isCountGroup &&
+    (fromFactor.gt(1) || toFactor.gt(1) || (opts.fromUnit.isBaseUnit && opts.toUnit.isBaseUnit));
+
   if (
     opts.fromUnit.unitGroupId === opts.toUnit.unitGroupId &&
-    opts.fromUnit.unitGroupCode !== 'COUNT' &&
-    opts.fromUnit.unitGroupCode !== 'CUSTOM'
+    opts.fromUnit.unitGroupCode !== 'CUSTOM' &&
+    (opts.fromUnit.unitGroupCode !== 'COUNT' || hasFixedCountRatio)
   ) {
     return sameGroupConvert(quantity, opts.fromUnit, opts.toUnit);
   }
@@ -1062,27 +1108,27 @@ export function calculateLineAmount(opts: {
 
 export function serializeLineCalc(line: LineCalcResult): Record<string, unknown> {
   return {
-    orderedQuantity: line.orderedQuantity.toFixed(),
+    orderedQuantity: line.orderedQuantity.toString(),
     orderedUnitId: line.orderedUnitId,
     orderedUnit: line.orderedUnitSymbol,
     orderedUnitSymbol: line.orderedUnitSymbol,
-    baseQuantity: line.baseQuantity.toFixed(),
+    baseQuantity: line.baseQuantity.toString(),
     baseUnitId: line.baseUnitId,
     baseUnit: line.baseUnitSymbol,
     baseUnitSymbol: line.baseUnitSymbol,
-    conversionFactor: line.conversionFactor.toFixed(),
+    conversionFactor: line.conversionFactor.toString(),
     conversionPath: line.conversionPath,
-    unitPrice: line.unitPrice.toFixed(),
+    unitPrice: line.unitPrice.toString(),
     priceUnit: line.priceUnitSymbol,
     priceUnitId: line.priceUnitId,
     priceSource: line.priceSource,
-    grossAmount: line.grossAmount.toFixed(),
-    discountAmount: line.discountAmount.toFixed(),
-    taxableAmount: line.taxableAmount.toFixed(),
-    taxAmount: line.taxAmount.toFixed(),
-    lineTotal: line.lineTotal.toFixed(),
-    finalAmount: line.finalAmount.toFixed(),
-    inventoryImpact: line.inventoryImpact.toFixed(),
+    grossAmount: line.grossAmount.toFixed(2),
+    discountAmount: line.discountAmount.toFixed(2),
+    taxableAmount: line.taxableAmount.toFixed(2),
+    taxAmount: line.taxAmount.toFixed(2),
+    lineTotal: line.lineTotal.toFixed(2),
+    finalAmount: line.finalAmount.toFixed(2),
+    inventoryImpact: line.inventoryImpact.toString(),
     validationWarnings: line.validationWarnings,
     mrp: line.mrp.toFixed(2),
     grossMrp: line.grossMrp.toFixed(2),
@@ -1092,11 +1138,11 @@ export function serializeLineCalc(line: LineCalcResult): Record<string, unknown>
     productDiscountPercent: line.productDiscountPercent,
     productNet: line.productNet.toFixed(2),
     hasProductDiscount: line.hasProductDiscount,
-    qtyBase: Number(line.qtyBase.toFixed()),
+    qtyBase: line.qtyBase.toNumber(),
     amount: Number(line.amount.toFixed(2)),
     conversionFactorUsed: Number(line.conversionFactorUsed.toFixed(8)),
     enteredUnitId: line.enteredUnitId,
-    enteredQty: Number(line.enteredQty.toFixed()),
+    enteredQty: line.enteredQty.toNumber(),
   };
 }
 

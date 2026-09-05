@@ -1989,7 +1989,7 @@ export class PosService {
               pu.fixedPrice != null ? Number(pu.fixedPrice) : null,
             isDefaultSellingUnit: pu.isDefaultSellingUnit,
           })),
-          /** Counter entry units: same group as base/sellUnit (kg↔g, L↔ml) + packaging rows */
+          /** Counter entry units: explicitly configured product units + base/pricing unit */
           entryUnits: (() => {
             const map = new Map<
               string,
@@ -2008,15 +2008,13 @@ export class PosService {
                 symbol: matchedUnit.symbol,
                 name: matchedUnit.name,
               });
-              for (const u of unitsByGroup.get(
-                matchedUnit.unitGroupId,
-              ) ?? []) {
-                map.set(u.id, {
-                  unitId: u.id,
-                  symbol: u.symbol,
-                  name: u.name,
-                });
-              }
+            }
+            if (row.product.pricingUnit) {
+              map.set(row.product.pricingUnit.id, {
+                unitId: row.product.pricingUnit.id,
+                symbol: row.product.pricingUnit.symbol,
+                name: row.product.pricingUnit.name,
+              });
             }
             for (const pu of row.product.productUnits ?? []) {
               map.set(pu.unitId, {
@@ -3138,7 +3136,7 @@ export class PosService {
     await this.prisma.$transaction(async (tx) => {
       for (const item of order.items) {
         if (!item.stockLevelId) continue;
-        const qty = Number(inventoryQtyOf(item).toFixed());
+        const qty = inventoryQtyOf(item).toNumber();
         const level = await tx.stockLevel.findFirst({
           where: { id: item.stockLevelId, tenantId: user.tenantId },
           include: { product: { select: { trackQty: true } } },

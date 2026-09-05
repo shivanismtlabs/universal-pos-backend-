@@ -46,8 +46,8 @@ export function calcMeta(calc: LineCalcResult, extra: Record<string, unknown> = 
     priceSource: calc.priceSource,
     orderedUnit: calc.orderedUnitSymbol,
     baseUnit: calc.baseUnitSymbol,
-    baseQuantity: calc.baseQuantity.toFixed(),
-    conversionFactor: calc.conversionFactor.toFixed(),
+    baseQuantity: calc.baseQuantity.toString(),
+    conversionFactor: calc.conversionFactor.toString(),
     // Flipkart pricing snapshot
     mrp: calc.mrp.toFixed(2),
     grossMrp: calc.grossMrp.toFixed(2),

@@ -67,11 +67,15 @@ const SYSTEM_UNITS: Array<[string, string, string, boolean, number]> = [
   ['carton', 'Carton', 'COUNT', false, 1],
   ['set', 'Set', 'COUNT', false, 1],
   ['service', 'Service', 'COUNT', false, 1],
+  ['session', 'Session', 'COUNT', false, 1],
+  ['visit', 'Visit', 'COUNT', false, 1],
   ['min', 'Minute', 'TIME', true, 1],
   ['hour', 'Hour', 'TIME', false, 60],
   ['day', 'Day', 'TIME', false, 1440],
   ['week', 'Week', 'TIME', false, 10080],
   ['month', 'Month', 'TIME', false, 43200],
+  ['quarter', 'Quarter', 'TIME', false, 129600],
+  ['year', 'Year', 'TIME', false, 525600],
 ];
 
 @Injectable()
@@ -369,18 +373,24 @@ export class UnitPricingService {
       (product.productUnits && product.productUnits.length > 0) ||
       (edges && edges.length > 0);
 
+    const uom = (product as any).unitOfMeasure ?? (product as any).sellUnit;
+    const uomRef = uom && unitsById ? this.resolveUnit(unitsById, null, uom) : undefined;
+
     if (
       (!baseUnitId ||
+        (uomRef &&
+          baseUnitRef &&
+          baseUnitRef.id !== uomRef.id &&
+          !hasConversions) ||
         (preferredSellingUnit &&
           baseUnitRef &&
           baseUnitRef.unitGroupId !== preferredSellingUnit.unitGroupId &&
           !hasConversions)) &&
       unitsById
     ) {
-      const uom = (product as any).unitOfMeasure ?? (product as any).sellUnit;
       const match =
+        uomRef ??
         preferredSellingUnit ??
-        (uom ? this.resolveUnit(unitsById, null, uom) : null) ??
         this.resolveUnit(unitsById, null, 'pcs');
       if (match) baseUnitId = match.id;
     }

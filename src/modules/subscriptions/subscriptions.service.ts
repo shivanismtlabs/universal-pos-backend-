@@ -15,6 +15,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import { randomUUID } from 'crypto';
+import { addServiceDuration } from '../../common/service-duration';
 import { parseCommerceModes } from '../../common/commerce-schema';
 import { validateSku } from '../../common/sell-units';
 import { PrismaService } from '../../database/database.module';
@@ -45,7 +46,7 @@ export class SubscriptionsService {
   private async assertMode(tenantId: string, mode: 'subscription' | 'service') {
     const tenant = await this.prisma.tenant.findFirstOrThrow({
       where: { id: tenantId },
-      select: { settings: true, currencyCode: true },
+      select: { settings: true, currencyCode: true, timezone: true },
     });
     const parsed = parseCommerceModes(tenant.settings);
     if (!parsed.modes.includes(mode)) {
@@ -100,6 +101,15 @@ export class SubscriptionsService {
       typeof meta.billingPeriodDays === 'number'
         ? meta.billingPeriodDays
         : Number(meta.billingPeriodDays ?? 30);
+    const durationUnit =
+      typeof meta.durationUnit === 'string' && meta.durationUnit.trim()
+        ? meta.durationUnit.trim()
+        : null;
+    const durationQuantity =
+      typeof meta.durationQuantity === 'number' && meta.durationQuantity > 0
+        ? meta.durationQuantity
+        : null;
+
     return {
       id: p.id,
       title: p.name,
@@ -107,6 +117,8 @@ export class SubscriptionsService {
       description: p.description,
       price: p.basePrice,
       billingPeriodDays: Number.isFinite(days) && days > 0 ? days : 30,
+      durationUnit,
+      durationQuantity,
       isActive: p.isActive,
       category: p.category,
       categoryId: p.categoryId,
@@ -154,6 +166,8 @@ export class SubscriptionsService {
     });
     if (!cat) throw new NotFoundException('Category not found');
 
+    const durationDays = dto.billingPeriodDays ?? 30;
+
     try {
       const product = await this.prisma.product.create({
         data: {
@@ -167,7 +181,11 @@ export class SubscriptionsService {
           trackQty: false,
           trackSerial: false,
           basePrice: money(dto.price).toFixed(2),
-          meta: { billingPeriodDays: dto.billingPeriodDays },
+          meta: {
+            billingPeriodDays: durationDays,
+            ...(dto.durationUnit ? { durationUnit: dto.durationUnit.trim() } : {}),
+            ...(dto.durationQuantity != null ? { durationQuantity: dto.durationQuantity } : {}),
+          },
         },
         include: { category: { select: { id: true, name: true } } },
       });
@@ -200,6 +218,14 @@ export class SubscriptionsService {
         : {};
     if (dto.billingPeriodDays != null) {
       meta.billingPeriodDays = dto.billingPeriodDays;
+    }
+    if (dto.durationUnit !== undefined) {
+      if (dto.durationUnit) meta.durationUnit = dto.durationUnit.trim();
+      else delete meta.durationUnit;
+    }
+    if (dto.durationQuantity !== undefined) {
+      if (dto.durationQuantity != null) meta.durationQuantity = dto.durationQuantity;
+      else delete meta.durationQuantity;
     }
 
     const updated = await this.prisma.product.update({
@@ -476,8 +502,22 @@ export class SubscriptionsService {
       dto.idempotencyKey?.trim() ||
       `sub-enroll-${user.tenantId}-${customer.id}-${product.id}-${Date.now()}`;
 
+    const durationUnit =
+      typeof meta.durationUnit === 'string' && meta.durationUnit.trim()
+        ? meta.durationUnit.trim()
+        : 'day';
+    const durationQuantity =
+      typeof meta.durationQuantity === 'number' && meta.durationQuantity > 0
+        ? meta.durationQuantity
+        : periodDays;
+
     const now = new Date();
-    const periodEnd = addDays(now, periodDays);
+    const periodEnd = addServiceDuration({
+      startDate: now,
+      quantity: durationQuantity,
+      durationUnitCode: durationUnit,
+      timeZone: tenant.timezone ?? 'Asia/Kolkata',
+    });
 
     const result = await this.prisma.$transaction(async (tx) => {
       const orderCount = await tx.order.count({
@@ -503,6 +543,8 @@ export class SubscriptionsService {
             subscriptionEnroll: true,
             productId: product.id,
             billingPeriodDays: periodDays,
+            durationUnit,
+            durationQuantity,
           },
         },
       });
@@ -513,12 +555,16 @@ export class SubscriptionsService {
           orderId: order.id,
           itemKind: OrderItemKind.product,
           productId: product.id,
-          description: `${product.name} (${periodDays} days)`,
+          description: `${product.name} (${durationQuantity} ${durationUnit})`,
           quantity: 1,
           unitPrice: price.toFixed(2),
           lineTotal: price.toFixed(2),
           taxAmount: '0.00',
-          meta: { billingPeriodDays: periodDays },
+          meta: {
+            billingPeriodDays: periodDays,
+            durationUnit,
+            durationQuantity,
+          },
         },
       });
 
@@ -556,7 +602,11 @@ export class SubscriptionsService {
           currentPeriodStart: now,
           currentPeriodEnd: periodEnd,
           lastOrderId: order.id,
-          meta: { enrolledByUserId: user.userId },
+          meta: {
+            enrolledByUserId: user.userId,
+            durationUnit,
+            durationQuantity,
+          },
         },
         include: {
           customer: {
@@ -621,10 +671,28 @@ export class SubscriptionsService {
       dto.idempotencyKey?.trim() ||
       `sub-renew-${id}-${Date.now()}`;
 
+    const planMeta =
+      sub.product.meta && typeof sub.product.meta === 'object'
+        ? (sub.product.meta as Record<string, unknown>)
+        : {};
+    const durationUnit =
+      typeof planMeta.durationUnit === 'string' && planMeta.durationUnit.trim()
+        ? planMeta.durationUnit.trim()
+        : 'day';
+    const durationQuantity =
+      typeof planMeta.durationQuantity === 'number' && planMeta.durationQuantity > 0
+        ? planMeta.durationQuantity
+        : periodDays;
+
     const base =
       sub.currentPeriodEnd > new Date() ? sub.currentPeriodEnd : new Date();
     const nextStart = base;
-    const nextEnd = addDays(base, periodDays);
+    const nextEnd = addServiceDuration({
+      startDate: base,
+      quantity: durationQuantity,
+      durationUnitCode: durationUnit,
+      timeZone: tenant.timezone ?? 'Asia/Kolkata',
+    });
 
     const result = await this.prisma.$transaction(async (tx) => {
       const orderCount = await tx.order.count({

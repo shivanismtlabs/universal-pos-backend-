@@ -1456,16 +1456,20 @@ export class SaleReturnsService {
         ? (ev.itemsJson as Array<{
             stockLevelId?: string;
             quantity?: number;
+            returnBaseQty?: number;
+            baseQuantity?: number;
             kind?: string;
           }>)
         : [];
       for (const l of lines) {
         // Exchange events store return + replace rows; only returned qty reserves.
         if (l.kind === 'replace') continue;
-        if (!l.stockLevelId || !l.quantity) continue;
+        if (!l.stockLevelId) continue;
+        const returnedBase = l.returnBaseQty ?? l.baseQuantity ?? l.quantity ?? 0;
+        if (returnedBase <= 0) continue;
         map.set(
           l.stockLevelId,
-          (map.get(l.stockLevelId) ?? 0) + Number(l.quantity),
+          (map.get(l.stockLevelId) ?? 0) + Number(returnedBase),
         );
       }
     }
@@ -1500,17 +1504,15 @@ export class SaleReturnsService {
       },
     });
     const orig = originals[0];
-    let restockQty = line.quantity;
-    if (orig) {
+    let restockQty = line.returnBaseQty ?? line.quantity;
+    if (orig && line.returnBaseQty == null) {
       const ordered = orig.orderedQuantity ?? orig.quantity;
       const base = orig.baseQuantity ?? orig.quantity;
-      restockQty = Number(
-        reverseHistoricalBaseQty({
-          originalOrderedQty: ordered,
-          originalBaseQty: base,
-          returnOrderedQty: line.quantity,
-        }).toFixed(),
-      );
+      restockQty = reverseHistoricalBaseQty({
+        originalOrderedQty: ordered,
+        originalBaseQty: base,
+        returnOrderedQty: line.quantity,
+      }).toNumber();
     }
     const resellable = RESELLABLE.has(line.condition || 'good');
     const recipe = await this.stock.hasRecipeExplosion(
@@ -1847,6 +1849,13 @@ export class SaleReturnsService {
       unitPrice: l.unitPrice,
       condition: l.condition,
       refundShare: l.refundShare,
+      returnBaseQty: l.returnBaseQty,
+      orderedQuantity: l.orderedQuantity,
+      orderedUnitSymbol: l.orderedUnitSymbol,
+      baseQuantity: l.baseQuantity,
+      baseUnitSymbol: l.baseUnitSymbol,
+      priceQuantity: l.priceQuantity,
+      priceUnitSymbol: l.priceUnitSymbol,
       name:
         orderItems.find((i) => i.stockLevelId === l.stockLevelId)
           ?.description ??

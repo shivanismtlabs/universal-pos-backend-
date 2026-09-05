@@ -45,12 +45,25 @@ export class CreatePlanDto {
   @Min(0.01)
   price!: number;
 
-  @ApiProperty({ example: 30, description: 'Billing period in days' })
+  @ApiPropertyOptional({ example: 30, description: 'Billing period in days' })
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(3660)
-  billingPeriodDays!: number;
+  billingPeriodDays?: number;
+
+  @ApiPropertyOptional({ example: 'month', description: 'Duration unit code/symbol' })
+  @IsOptional()
+  @IsString()
+  durationUnit?: string;
+
+  @ApiPropertyOptional({ example: 1, description: 'Duration quantity' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  durationQuantity?: number;
 }
 
 export class UpdatePlanDto {
@@ -81,6 +94,18 @@ export class UpdatePlanDto {
   @Min(1)
   @Max(3660)
   billingPeriodDays?: number;
+
+  @ApiPropertyOptional({ example: 'month' })
+  @IsOptional()
+  @IsString()
+  durationUnit?: string;
+
+  @ApiPropertyOptional({ example: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  durationQuantity?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -200,9 +225,28 @@ export class CreateServiceProductDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
-  @Min(5)
+  @Min(1)
   @Max(24 * 60)
   durationMinutes?: number;
+
+  @ApiPropertyOptional({ example: 'hour' })
+  @IsOptional()
+  @IsString()
+  durationUnit?: string;
+
+  @ApiPropertyOptional({ example: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  durationQuantity?: number;
+
+  @ApiPropertyOptional({ example: 60, description: 'Optional session duration in minutes' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  sessionDurationMinutes?: number;
 }
 
 export class BillServiceDto {
@@ -225,10 +269,15 @@ export class BillServiceDto {
   @ApiPropertyOptional({ example: 1, minimum: 1, maximum: 99 })
   @IsOptional()
   @Type(() => Number)
-  @IsInt()
-  @Min(1)
+  @IsNumber()
+  @Min(0.01)
   @Max(99)
   quantity?: number;
+
+  @ApiPropertyOptional({ example: 'hour' })
+  @IsOptional()
+  @IsString()
+  orderedUnitSymbol?: string;
 
   @ApiPropertyOptional()
   @IsOptional()

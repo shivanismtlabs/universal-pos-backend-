@@ -1187,124 +1187,126 @@ export class CatalogService {
     const status = dto.status ?? existing.status;
     try {
       await this.prisma.$transaction(async (tx) => {
+        const updateData: Prisma.ProductUncheckedUpdateInput = {
+          ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
+          ...(dto.shortName !== undefined
+            ? { shortName: dto.shortName?.trim() || null }
+            : {}),
+          ...(dto.skuCode !== undefined
+            ? { skuCode: dto.skuCode.trim().toUpperCase() }
+            : {}),
+          ...(dto.kind !== undefined ? { kind: dto.kind } : {}),
+          ...(dto.status !== undefined
+            ? {
+                status: dto.status,
+                isActive: statusToActive(dto.status),
+                availableInPos:
+                  dto.availableInPos !== undefined
+                    ? dto.availableInPos
+                    : dto.status === ProductStatus.active
+                      ? existing.availableInPos
+                      : false,
+              }
+            : {}),
+          ...(dto.categoryId !== undefined
+            ? { categoryId: dto.categoryId }
+            : {}),
+          ...(dto.brandId !== undefined ? { brandId: dto.brandId } : {}),
+          ...(dto.barcode !== undefined
+            ? {
+                barcode: nextBarcode ?? null,
+                barcodeType: nextBarcodeType ?? null,
+              }
+            : dto.barcodeType !== undefined
+              ? { barcodeType: nextBarcodeType ?? null }
+              : {}),
+          ...(dto.qrCode !== undefined
+            ? { qrCode: dto.qrCode?.trim() || null }
+            : {}),
+          ...(dto.internalCode !== undefined
+            ? { internalCode: dto.internalCode?.trim() || null }
+            : {}),
+          ...(dto.shortDescription !== undefined
+            ? { shortDescription: dto.shortDescription?.trim() || null }
+            : {}),
+          ...(dto.description !== undefined
+            ? { description: dto.description?.trim() || null }
+            : {}),
+          ...(nextPhotoUrl !== undefined ? { photoUrl: nextPhotoUrl } : {}),
+          ...(dto.taxCode !== undefined
+            ? { taxCode: dto.taxCode?.trim() || null }
+            : {}),
+          ...(dto.basePrice !== undefined || dto.pricePerPricingUnit !== undefined
+            ? (() => {
+                const updatedPrice = dto.basePrice ?? dto.pricePerPricingUnit;
+                const priceDec = updatedPrice != null ? dec(updatedPrice) : undefined;
+                const mrpDec =
+                  dto.mrp !== undefined
+                    ? dec(dto.mrp ?? undefined)
+                    : priceDec;
+                return {
+                  basePrice: priceDec,
+                  pricePerPricingUnit: priceDec,
+                  mrp: mrpDec,
+                };
+              })()
+            : dto.mrp !== undefined
+              ? { mrp: dec(dto.mrp ?? undefined) }
+              : {}),
+          ...(dto.unitOfMeasure !== undefined
+            ? { unitOfMeasure: dto.unitOfMeasure.trim().slice(0, 16) }
+            : {}),
+          ...(dto.baseUnitId !== undefined
+            ? { baseUnitId: dto.baseUnitId }
+            : {}),
+          ...(dto.pricingUnitId !== undefined
+            ? { pricingUnitId: dto.pricingUnitId }
+            : {}),
+          ...(dto.pricingStrategy !== undefined
+            ? {
+                pricingStrategy:
+                  dto.pricingStrategy === 'fixed_tier'
+                    ? PricingStrategy.fixed_tier
+                    : PricingStrategy.converted,
+              }
+            : {}),
+          ...(dto.trackInventory !== undefined ||
+          dto.trackSerial !== undefined ||
+          dto.trackBatch !== undefined
+            ? (() => {
+                const trackQty =
+                  dto.trackInventory !== undefined
+                    ? dto.trackInventory
+                    : existing.trackQty;
+                const trackSerial =
+                  Boolean(
+                    dto.trackSerial !== undefined
+                      ? dto.trackSerial
+                      : existing.trackSerial,
+                  ) && trackQty;
+                const trackBatch =
+                  Boolean(
+                    dto.trackBatch !== undefined
+                      ? dto.trackBatch
+                      : existing.trackBatch,
+                  ) && trackQty;
+                return { trackQty, trackSerial, trackBatch };
+              })()
+            : {}),
+          ...(dto.canSell !== undefined ? { canSell: dto.canSell } : {}),
+          ...(dto.canPurchase !== undefined
+            ? { canPurchase: dto.canPurchase }
+            : {}),
+          ...(dto.availableInPos !== undefined && dto.status === undefined
+            ? { availableInPos: dto.availableInPos }
+            : {}),
+          meta: nextMeta as Prisma.InputJsonValue,
+          updatedById: user.userId,
+        };
+
         await tx.product.update({
           where: { id },
-          data: {
-            ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
-            ...(dto.shortName !== undefined
-              ? { shortName: dto.shortName?.trim() || null }
-              : {}),
-            ...(dto.skuCode !== undefined
-              ? { skuCode: dto.skuCode.trim().toUpperCase() }
-              : {}),
-            ...(dto.kind !== undefined ? { kind: dto.kind } : {}),
-            ...(dto.status !== undefined
-              ? {
-                  status: dto.status,
-                  isActive: statusToActive(dto.status),
-                  availableInPos:
-                    dto.availableInPos !== undefined
-                      ? dto.availableInPos
-                      : dto.status === ProductStatus.active
-                        ? existing.availableInPos
-                        : false,
-                }
-              : {}),
-            ...(dto.categoryId !== undefined
-              ? { categoryId: dto.categoryId }
-              : {}),
-            ...(dto.brandId !== undefined ? { brandId: dto.brandId } : {}),
-            ...(dto.barcode !== undefined
-              ? {
-                  barcode: nextBarcode ?? null,
-                  barcodeType: nextBarcodeType ?? null,
-                }
-              : dto.barcodeType !== undefined
-                ? { barcodeType: nextBarcodeType ?? null }
-                : {}),
-            ...(dto.qrCode !== undefined
-              ? { qrCode: dto.qrCode?.trim() || null }
-              : {}),
-            ...(dto.internalCode !== undefined
-              ? { internalCode: dto.internalCode?.trim() || null }
-              : {}),
-            ...(dto.shortDescription !== undefined
-              ? { shortDescription: dto.shortDescription?.trim() || null }
-              : {}),
-            ...(dto.description !== undefined
-              ? { description: dto.description?.trim() || null }
-              : {}),
-            ...(nextPhotoUrl !== undefined ? { photoUrl: nextPhotoUrl } : {}),
-            ...(dto.taxCode !== undefined
-              ? { taxCode: dto.taxCode?.trim() || null }
-              : {}),
-            ...(dto.basePrice !== undefined || dto.pricePerPricingUnit !== undefined
-              ? (() => {
-                  const updatedPrice = dto.basePrice ?? dto.pricePerPricingUnit;
-                  const priceDec = updatedPrice != null ? dec(updatedPrice) : undefined;
-                  const mrpDec =
-                    dto.mrp !== undefined
-                      ? dec(dto.mrp ?? undefined)
-                      : priceDec;
-                  return {
-                    basePrice: priceDec,
-                    pricePerPricingUnit: priceDec,
-                    mrp: mrpDec,
-                  };
-                })()
-              : dto.mrp !== undefined
-                ? { mrp: dec(dto.mrp ?? undefined) }
-                : {}),
-            ...(dto.unitOfMeasure !== undefined
-              ? { unitOfMeasure: dto.unitOfMeasure.trim().slice(0, 16) }
-              : {}),
-            ...(dto.baseUnitId !== undefined
-              ? { baseUnitId: dto.baseUnitId }
-              : {}),
-            ...(dto.pricingUnitId !== undefined
-              ? { pricingUnitId: dto.pricingUnitId }
-              : {}),
-            ...(dto.pricingStrategy !== undefined
-              ? {
-                  pricingStrategy:
-                    dto.pricingStrategy === 'fixed_tier'
-                      ? PricingStrategy.fixed_tier
-                      : PricingStrategy.converted,
-                }
-              : {}),
-            ...(dto.trackInventory !== undefined ||
-            dto.trackSerial !== undefined ||
-            dto.trackBatch !== undefined
-              ? (() => {
-                  const trackQty =
-                    dto.trackInventory !== undefined
-                      ? dto.trackInventory
-                      : existing.trackQty;
-                  const trackSerial =
-                    Boolean(
-                      dto.trackSerial !== undefined
-                        ? dto.trackSerial
-                        : existing.trackSerial,
-                    ) && trackQty;
-                  const trackBatch =
-                    Boolean(
-                      dto.trackBatch !== undefined
-                        ? dto.trackBatch
-                        : existing.trackBatch,
-                    ) && trackQty;
-                  return { trackQty, trackSerial, trackBatch };
-                })()
-              : {}),
-            ...(dto.canSell !== undefined ? { canSell: dto.canSell } : {}),
-            ...(dto.canPurchase !== undefined
-              ? { canPurchase: dto.canPurchase }
-              : {}),
-            ...(dto.availableInPos !== undefined && dto.status === undefined
-              ? { availableInPos: dto.availableInPos }
-              : {}),
-            meta: nextMeta as Prisma.InputJsonValue,
-            updatedById: user.userId,
-          },
+          data: updateData,
         });
 
         // Keep location stock in sync — Counter sells from stockLevel.sellPrice/unit

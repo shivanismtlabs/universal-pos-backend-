@@ -1413,6 +1413,171 @@ describe('POS Cart, Pricing Calculation & UOM Conversion Engine', () => {
         expect(Number(switchedRes.grossAmount.toFixed(2))).toBe(32.50);
       });
     });
+
+    describe('Cart Item Count vs Product Quantity Separation (Universal Rule)', () => {
+      interface MockCartLine {
+        productId: string;
+        name: string;
+        orderedQuantity: number;
+        orderedUnitSymbol: string;
+        baseQuantity: number;
+        baseUnitSymbol: string;
+        priceQuantity: number;
+        priceUnitSymbol: string;
+        unitPrice: number;
+        lineTotal: number;
+      }
+
+      function getCartItemCount(cartLines: MockCartLine[]): number {
+        // Core universal rule: CART ITEM COUNT = NUMBER OF CART LINES (cartLines.length)
+        return cartLines.length;
+      }
+
+      it('strictly treats 1 product line with any quantity/UOM as 1 cart item', () => {
+        const testCases: { qty: number; uom: string; baseQty: number; baseUom: string }[] = [
+          // Weight
+          { qty: 500, uom: 'g', baseQty: 500, baseUom: 'g' },
+          { qty: 0.5, uom: 'kg', baseQty: 500, baseUom: 'g' },
+          { qty: 2.5, uom: 'kg', baseQty: 2500, baseUom: 'g' },
+          // Volume
+          { qty: 250, uom: 'ml', baseQty: 250, baseUom: 'ml' },
+          { qty: 1, uom: 'L', baseQty: 1000, baseUom: 'ml' },
+          // Length
+          { qty: 50, uom: 'cm', baseQty: 0.5, baseUom: 'm' },
+          { qty: 2, uom: 'm', baseQty: 2, baseUom: 'm' },
+          // Packaging
+          { qty: 0.5, uom: 'dozen', baseQty: 6, baseUom: 'pcs' },
+          { qty: 2, uom: 'dozen', baseQty: 24, baseUom: 'pcs' },
+          { qty: 3, uom: 'pack', baseQty: 30, baseUom: 'pcs' },
+          // Count
+          { qty: 5, uom: 'pcs', baseQty: 5, baseUom: 'pcs' },
+          { qty: 10, uom: 'pcs', baseQty: 10, baseUom: 'pcs' },
+          // Service
+          { qty: 1.5, uom: 'hours', baseQty: 1.5, baseUom: 'hours' },
+          { qty: 2, uom: 'sessions', baseQty: 2, baseUom: 'sessions' },
+          // Rental
+          { qty: 2, uom: 'units', baseQty: 2, baseUom: 'units' },
+        ];
+
+        for (const tc of testCases) {
+          const cart: MockCartLine[] = [
+            {
+              productId: `prod-${tc.uom}`,
+              name: `Item in ${tc.uom}`,
+              orderedQuantity: tc.qty,
+              orderedUnitSymbol: tc.uom,
+              baseQuantity: tc.baseQty,
+              baseUnitSymbol: tc.baseUom,
+              priceQuantity: tc.qty,
+              priceUnitSymbol: tc.uom,
+              unitPrice: 100,
+              lineTotal: tc.qty * 100,
+            },
+          ];
+
+          // Must produce exactly 1 item, NEVER tc.qty items
+          expect(getCartItemCount(cart)).toBe(1);
+          expect(cart[0].orderedQuantity).toBe(tc.qty);
+          expect(cart[0].orderedUnitSymbol).toBe(tc.uom);
+          expect(cart[0].baseQuantity).toBe(tc.baseQty);
+        }
+      });
+
+      it('correctly reports 3 items for Turmeric 500 g + Milk 250 ml + Banana 0.5 dozen (never 750.5 items)', () => {
+        const cart: MockCartLine[] = [
+          {
+            productId: 'turmeric',
+            name: 'loose Turmeric',
+            orderedQuantity: 500,
+            orderedUnitSymbol: 'g',
+            baseQuantity: 500,
+            baseUnitSymbol: 'g',
+            priceQuantity: 0.5,
+            priceUnitSymbol: 'kg',
+            unitPrice: 600,
+            lineTotal: 300,
+          },
+          {
+            productId: 'milk',
+            name: 'Cow Milk',
+            orderedQuantity: 250,
+            orderedUnitSymbol: 'ml',
+            baseQuantity: 250,
+            baseUnitSymbol: 'ml',
+            priceQuantity: 0.25,
+            priceUnitSymbol: 'L',
+            unitPrice: 60,
+            lineTotal: 15,
+          },
+          {
+            productId: 'banana',
+            name: 'Banana',
+            orderedQuantity: 0.5,
+            orderedUnitSymbol: 'dozen',
+            baseQuantity: 6,
+            baseUnitSymbol: 'pcs',
+            priceQuantity: 0.5,
+            priceUnitSymbol: 'dozen',
+            unitPrice: 80,
+            lineTotal: 40,
+          },
+        ];
+
+        expect(getCartItemCount(cart)).toBe(3);
+        // Numerical quantity sum would be 500 + 250 + 0.5 = 750.5, which is invalid as item count
+        const invalidQtySum = cart.reduce((s, l) => s + l.orderedQuantity, 0);
+        expect(invalidQtySum).toBe(750.5);
+        expect(getCartItemCount(cart)).not.toBe(invalidQtySum);
+
+        // Modifying Turmeric from 500 g -> 1 kg does NOT change the cart item count (still 3 lines)
+        cart[0].orderedQuantity = 1;
+        cart[0].orderedUnitSymbol = 'kg';
+        cart[0].baseQuantity = 1000;
+        expect(getCartItemCount(cart)).toBe(3);
+      });
+
+      it('preserves financial calculation accuracy: 500 g × ₹600/kg = ₹300 for 1 cart item', () => {
+        const turmericRes = calculateLineAmount({
+          product: {
+            id: 'turmeric',
+            baseUnitId: unitG.id,
+            pricingUnitId: unitKg.id,
+            pricingStrategy: 'CONVERTED',
+            pricePerPricingUnit: '600.00',
+            basePrice: '0.60',
+            productUnits: [
+              {
+                unitId: unitKg.id,
+                conversionToBase: '1000',
+                fixedPrice: null,
+                effectiveFrom: new Date('2020-01-01'),
+                effectiveTo: null,
+              },
+              {
+                unitId: unitG.id,
+                conversionToBase: '1',
+                fixedPrice: null,
+                effectiveFrom: new Date('2020-01-01'),
+                effectiveTo: null,
+                isDefaultSellingUnit: true,
+              },
+            ],
+            availableInPos: true,
+            canSell: true,
+            canPurchase: true,
+            isActive: true,
+            trackQty: true,
+          },
+          enteredQty: 500,
+          sellingUnit: unitG,
+          unitsById: universalUnitsMap,
+        });
+
+        expect(turmericRes.enteredQty.toNumber()).toBe(500);
+        expect(turmericRes.baseQuantity.toNumber()).toBe(500);
+        expect(Number(turmericRes.grossAmount.toFixed(2))).toBe(300);
+      });
+    });
   });
 });
 

@@ -987,7 +987,11 @@ export class PosService {
               }
             : {}),
           ...(dto.price !== undefined
-            ? { basePrice: Number(dto.price) }
+            ? {
+                basePrice: Number(dto.price),
+                pricePerPricingUnit: Number(dto.price),
+                mrp: Number(dto.price),
+              }
             : {}),
           ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
           ...(dto.sellUnit !== undefined

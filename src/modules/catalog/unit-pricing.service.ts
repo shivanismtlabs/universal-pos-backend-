@@ -541,14 +541,29 @@ export class UnitPricingService implements OnModuleInit {
         product.pricingStrategy === PricingStrategy.fixed_tier
           ? 'FIXED_TIER'
           : 'CONVERTED',
-      pricePerPricingUnit:
-        product.pricePerPricingUnit != null
-          ? product.pricePerPricingUnit
-          : product.basePrice != null
-            ? product.basePrice
-            : null,
-      basePrice: product.basePrice,
-      mrp: (product as any).mrp != null ? d((product as any).mrp) : null,
+      pricePerPricingUnit: (() => {
+        const stockPrice = (product as any).stockLevels && (product as any).stockLevels.length > 0 ? (product as any).stockLevels[0].sellPrice : null;
+        return stockPrice != null ? d(stockPrice) : (product.basePrice != null ? product.basePrice : product.pricePerPricingUnit != null ? product.pricePerPricingUnit : null);
+      })(),
+      basePrice: (() => {
+        const stockPrice = (product as any).stockLevels && (product as any).stockLevels.length > 0 ? (product as any).stockLevels[0].sellPrice : null;
+        return stockPrice != null ? d(stockPrice) : product.basePrice;
+      })(),
+      mrp: (() => {
+        const stockPrice = (product as any).stockLevels && (product as any).stockLevels.length > 0 ? (product as any).stockLevels[0].sellPrice : null;
+        const eff = stockPrice != null ? d(stockPrice) : product.basePrice;
+        if ((product as any).mrp != null) {
+          const m = d((product as any).mrp);
+          return eff != null && m.greaterThan(eff) ? eff : m;
+        }
+        return eff;
+      })(),
+      configuredPriceQuantity:
+        (product as any).configuredPriceQuantity ??
+        (product as any).meta?.configuredPriceQuantity ??
+        (product as any).meta?.priceQuantity ??
+        (product as any).meta?.priceBasisQuantity ??
+        1,
       meta: (product as any).meta ?? null,
       productDiscount:
         (product as any).productDiscount ??
@@ -617,6 +632,7 @@ export class UnitPricingService implements OnModuleInit {
         productUnits: { where: { effectiveTo: null } },
         baseUnit: { include: { unitGroup: true } },
         pricingUnit: { include: { unitGroup: true } },
+        stockLevels: { select: { sellPrice: true } },
       },
     });
     if (!product) throw new NotFoundException('Product not found');
@@ -697,11 +713,44 @@ export class UnitPricingService implements OnModuleInit {
       enteredQty: number;
       sellingUnitId?: string;
       sellingUnitSymbol?: string;
+      unitPriceOverride?: number | string;
       customer?: CustomerContext;
     },
   ) {
     const line = await this.calculateLine(user, body);
-    return serializeLineCalc(line);
+    const serialized = serializeLineCalc(line);
+
+    const product = await this.prisma.product.findFirst({
+      where: { id: body.productId, tenantId: user.tenantId },
+      select: {
+        trackQty: true,
+        stockLevels: { select: { qtyOnHand: true } },
+      },
+    });
+    const stockAvailable =
+      product?.stockLevels?.reduce(
+        (sum, s) => sum + Number(s.qtyOnHand ?? 0),
+        0,
+      ) ?? 0;
+    const baseQtyNum = Number(line.baseQuantity.toString());
+    const stockRemaining = stockAvailable - baseQtyNum;
+    const sufficientStock = product?.trackQty === false || stockRemaining >= 0;
+
+    return {
+      ...serialized,
+      enteredQuantity: line.orderedQuantity.toString(),
+      enteredUnitSymbol: line.orderedUnitSymbol,
+      baseQuantity: line.baseQuantity.toString(),
+      baseUnitSymbol: line.baseUnitSymbol,
+      priceQuantity: line.priceQuantity.toString(),
+      priceUnitSymbol: line.priceUnitSymbol,
+      configuredPriceQuantity: line.configuredPriceQuantity.toString(),
+      unitPrice: line.unitPrice.toString(),
+      amount: Number(line.amount.toFixed(2)),
+      stockAvailable,
+      stockRemaining,
+      sufficientStock,
+    };
   }
 
   /** Convert for GRN / stock — returns qty in product base unit */

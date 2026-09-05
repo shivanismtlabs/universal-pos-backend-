@@ -1310,6 +1310,109 @@ describe('POS Cart, Pricing Calculation & UOM Conversion Engine', () => {
         ).toThrow(/Incompatible units/i);
       });
     });
+
+    describe('Loose / Variable Quantity Dynamic Unit Selector & Physical Preservation', () => {
+      const wheatProduct: ProductPricingRef = {
+        id: 'p-broken-wheat',
+        baseUnitId: unitG.id, // Base UOM = g
+        pricingUnitId: unitKg.id, // Price = ₹65/kg
+        pricingStrategy: 'CONVERTED',
+        pricePerPricingUnit: 65,
+        basePrice: 65,
+        productUnits: [
+          {
+            unitId: unitG.id,
+            conversionToBase: 1,
+            fixedPrice: null,
+            effectiveFrom: new Date('2020-01-01'),
+            effectiveTo: null,
+            allowFraction: true,
+          },
+          {
+            unitId: unitKg.id,
+            conversionToBase: 1000,
+            fixedPrice: null,
+            effectiveFrom: new Date('2020-01-01'),
+            effectiveTo: null,
+            allowFraction: true,
+          },
+        ],
+      };
+
+      const testMatrix = [
+        { inputQty: 5, unit: unitG, expectedBaseQty: 5, expectedPrice: 0.33 },
+        { inputQty: 100, unit: unitG, expectedBaseQty: 100, expectedPrice: 6.50 },
+        { inputQty: 250, unit: unitG, expectedBaseQty: 250, expectedPrice: 16.25 },
+        { inputQty: 500, unit: unitG, expectedBaseQty: 500, expectedPrice: 32.50 },
+        { inputQty: 1, unit: unitKg, expectedBaseQty: 1000, expectedPrice: 65.00 },
+        { inputQty: 2.5, unit: unitKg, expectedBaseQty: 2500, expectedPrice: 162.50 },
+      ];
+
+      test.each(testMatrix)(
+        'Broken Wheat $inputQty $unit.symbol → base $expectedBaseQty g, price ₹$expectedPrice',
+        ({ inputQty, unit, expectedBaseQty, expectedPrice }) => {
+          const res = calculateLineAmount({
+            product: wheatProduct,
+            enteredQty: inputQty,
+            sellingUnit: unit,
+            unitsById: universalUnitsMap,
+          });
+          expect(res.enteredQty.toNumber()).toBe(inputQty);
+          expect(res.baseQuantity.toNumber()).toBe(expectedBaseQty);
+          expect(Number(res.grossAmount.toFixed(2))).toBe(expectedPrice);
+        },
+      );
+
+      it('preserves physical quantity when switching unit from 5 g to kg → 0.005 kg', () => {
+        // Current: 5 g
+        const currentRes = calculateLineAmount({
+          product: wheatProduct,
+          enteredQty: 5,
+          sellingUnit: unitG,
+          unitsById: universalUnitsMap,
+        });
+        const currentBaseQty = currentRes.baseQuantity.toNumber(); // 5 g
+
+        // User switches selector to kg: new entered qty = 5 g / 1000 = 0.005 kg
+        const switchedQty = currentBaseQty / 1000;
+        expect(switchedQty).toBe(0.005);
+
+        const switchedRes = calculateLineAmount({
+          product: wheatProduct,
+          enteredQty: switchedQty,
+          sellingUnit: unitKg,
+          unitsById: universalUnitsMap,
+        });
+        expect(switchedRes.enteredQty.toNumber()).toBe(0.005);
+        expect(switchedRes.baseQuantity.toNumber()).toBe(5);
+        expect(Number(switchedRes.grossAmount.toFixed(2))).toBe(0.33);
+      });
+
+      it('preserves physical quantity when switching unit from 0.5 kg to g → 500 g', () => {
+        // Current: 0.5 kg
+        const currentRes = calculateLineAmount({
+          product: wheatProduct,
+          enteredQty: 0.5,
+          sellingUnit: unitKg,
+          unitsById: universalUnitsMap,
+        });
+        const currentBaseQty = currentRes.baseQuantity.toNumber(); // 500 g
+
+        // User switches selector to g: new entered qty = 500 g / 1 = 500 g
+        const switchedQty = currentBaseQty / 1;
+        expect(switchedQty).toBe(500);
+
+        const switchedRes = calculateLineAmount({
+          product: wheatProduct,
+          enteredQty: switchedQty,
+          sellingUnit: unitG,
+          unitsById: universalUnitsMap,
+        });
+        expect(switchedRes.enteredQty.toNumber()).toBe(500);
+        expect(switchedRes.baseQuantity.toNumber()).toBe(500);
+        expect(Number(switchedRes.grossAmount.toFixed(2))).toBe(32.50);
+      });
+    });
   });
 });
 

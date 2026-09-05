@@ -99,7 +99,7 @@ export type ProductPricingRef = {
   basePrice?: DecimalValue | null;
   /** Maximum Retail Price / list price (per base/pricing unit). */
   mrp?: DecimalValue | null;
-  /** Product-level discount rule */
+  configuredPriceQuantity?: DecimalValue | null;
   productDiscount?: ProductDiscountRule | null;
   meta?: Record<string, unknown> | null;
   productUnits?: ProductUnitRef[];
@@ -164,6 +164,8 @@ export type LineCalcResult = {
   /** True when product discount is active */
   hasProductDiscount: boolean;
 
+  priceQuantity: Prisma.Decimal;
+  configuredPriceQuantity: Prisma.Decimal;
   /** Back-compat aliases used by quote API / existing tests */
   qtyBase: Prisma.Decimal;
   amount: Prisma.Decimal;
@@ -869,9 +871,14 @@ export function calculateLineAmount(opts: {
         at,
         validate: false,
       });
+      const configuredPriceQty =
+        product.configuredPriceQuantity != null && d(product.configuredPriceQuantity).gt(0)
+          ? d(product.configuredPriceQuantity)
+          : new Decimal(1);
+
       baselineUnitPrice = enteredQty.gt(0)
-        ? pricingQty.mul(price).div(enteredQty)
-        : price;
+        ? pricingQty.div(configuredPriceQty).mul(price).div(enteredQty)
+        : price.div(configuredPriceQty);
       priceSource = 'converted';
       priceUnit = pricingUnit;
     }
@@ -879,9 +886,14 @@ export function calculateLineAmount(opts: {
 
   // ─── 1. Determine MRP per Selling Unit ───
   let mrpPerSellingUnit: Prisma.Decimal;
+  const configuredPriceQty =
+    product.configuredPriceQuantity != null && d(product.configuredPriceQuantity).gt(0)
+      ? d(product.configuredPriceQuantity)
+      : new Decimal(1);
+
   if (product.mrp != null && d(product.mrp).gt(0)) {
     const baseMrp = d(product.mrp);
-    if (sellingUnit.id === (product.baseUnitId || sellingUnit.id)) {
+    if (sellingUnit.id === (product.baseUnitId || sellingUnit.id) && configuredPriceQty.eq(1)) {
       mrpPerSellingUnit = baseMrp;
     } else {
       const rawPricingUnit = product.pricingUnitId ? unitsById.get(product.pricingUnitId) : undefined;
@@ -901,8 +913,8 @@ export function calculateLineAmount(opts: {
         validate: false,
       });
       mrpPerSellingUnit = enteredQty.gt(0)
-        ? pricingQty.mul(baseMrp).div(enteredQty)
-        : baseMrp;
+        ? pricingQty.div(configuredPriceQty).mul(baseMrp).div(enteredQty)
+        : baseMrp.div(configuredPriceQty);
     }
   } else if (opts.unitPriceOverride != null) {
     mrpPerSellingUnit = baselineUnitPrice;
@@ -1066,6 +1078,23 @@ export function calculateLineAmount(opts: {
   const productDiscountRounded = roundMoney(lineProductDiscount, places, mode);
   const productNetRounded = roundMoney(lineProductNet, places, mode);
 
+  const rawPricingUnitForRes = product.pricingUnitId ? unitsById.get(product.pricingUnitId) : undefined;
+  const pricingUnitForRes =
+    rawPricingUnitForRes &&
+    (rawPricingUnitForRes.unitGroupId === baseUnit.unitGroupId || hasUnitConversions)
+      ? rawPricingUnitForRes
+      : baseUnit;
+  const priceQtyEquiv = convertQuantity({
+    quantity: qtyBase,
+    fromUnit: baseUnit,
+    toUnit: pricingUnitForRes,
+    product,
+    unitsById,
+    extraEdges: opts.extraEdges,
+    at,
+    validate: false,
+  });
+
   return {
     orderedQuantity: enteredQty,
     orderedUnitId: sellingUnit.id,
@@ -1097,6 +1126,9 @@ export function calculateLineAmount(opts: {
     productDiscountPercent: Math.round(productDiscountPercent * 100) / 100,
     productNet: productNetRounded,
     hasProductDiscount,
+
+    priceQuantity: priceQtyEquiv,
+    configuredPriceQuantity: configuredPriceQty,
 
     qtyBase,
     amount: grossMrpRounded,
@@ -1138,6 +1170,8 @@ export function serializeLineCalc(line: LineCalcResult): Record<string, unknown>
     productDiscountPercent: line.productDiscountPercent,
     productNet: line.productNet.toFixed(2),
     hasProductDiscount: line.hasProductDiscount,
+    priceQuantity: line.priceQuantity ? line.priceQuantity.toString() : line.baseQuantity.toString(),
+    configuredPriceQuantity: line.configuredPriceQuantity ? line.configuredPriceQuantity.toString() : '1',
     qtyBase: line.qtyBase.toNumber(),
     amount: Number(line.amount.toFixed(2)),
     conversionFactorUsed: Number(line.conversionFactorUsed.toFixed(8)),

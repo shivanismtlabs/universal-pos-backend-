@@ -188,7 +188,13 @@ export class CatalogController {
   quoteLine(
     @CurrentUser() user: AuthUser,
     @Body()
-    body: { productId: string; enteredQty: number; sellingUnitId: string },
+    body: {
+      productId: string;
+      enteredQty: number;
+      sellingUnitId?: string;
+      sellingUnitSymbol?: string;
+      unitPriceOverride?: number;
+    },
   ) {
     return this.unitPricing.quoteLine(user, body);
   }

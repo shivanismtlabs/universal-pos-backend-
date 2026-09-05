@@ -236,6 +236,19 @@ export class InventoryOpsService {
         location: { select: { id: true, name: true, code: true, type: true } },
       },
     });
+
+    if (dto.sellPrice !== undefined) {
+      const newPriceVal = new Prisma.Decimal(dto.sellPrice);
+      await this.prisma.product.update({
+        where: { id: level.productId },
+        data: {
+          basePrice: newPriceVal,
+          pricePerPricingUnit: newPriceVal,
+          mrp: newPriceVal,
+        },
+      });
+    }
+
     return this.mapLevelRich(updated);
   }
 

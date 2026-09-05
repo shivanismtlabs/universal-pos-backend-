@@ -1238,15 +1238,23 @@ export class CatalogService {
             ...(dto.taxCode !== undefined
               ? { taxCode: dto.taxCode?.trim() || null }
               : {}),
-            ...(dto.basePrice !== undefined
-              ? { basePrice: dto.basePrice }
-              : {}),
-            ...(dto.costPrice !== undefined
-              ? { costPrice: dec(dto.costPrice ?? undefined) }
-              : {}),
-            ...(dto.mrp !== undefined
-              ? { mrp: dec(dto.mrp ?? undefined) }
-              : {}),
+            ...(dto.basePrice !== undefined || dto.pricePerPricingUnit !== undefined
+              ? (() => {
+                  const updatedPrice = dto.basePrice ?? dto.pricePerPricingUnit;
+                  const priceDec = updatedPrice != null ? dec(updatedPrice) : undefined;
+                  const mrpDec =
+                    dto.mrp !== undefined
+                      ? dec(dto.mrp ?? undefined)
+                      : priceDec;
+                  return {
+                    basePrice: priceDec,
+                    pricePerPricingUnit: priceDec,
+                    mrp: mrpDec,
+                  };
+                })()
+              : dto.mrp !== undefined
+                ? { mrp: dec(dto.mrp ?? undefined) }
+                : {}),
             ...(dto.unitOfMeasure !== undefined
               ? { unitOfMeasure: dto.unitOfMeasure.trim().slice(0, 16) }
               : {}),
@@ -1262,14 +1270,6 @@ export class CatalogService {
                     dto.pricingStrategy === 'fixed_tier'
                       ? PricingStrategy.fixed_tier
                       : PricingStrategy.converted,
-                }
-              : {}),
-            ...(dto.pricePerPricingUnit !== undefined
-              ? {
-                  pricePerPricingUnit:
-                    dto.pricePerPricingUnit != null
-                      ? dec(dto.pricePerPricingUnit)
-                      : null,
                 }
               : {}),
             ...(dto.trackInventory !== undefined ||
@@ -1312,8 +1312,11 @@ export class CatalogService {
         if (dto.unitOfMeasure !== undefined) {
           stockPatch.sellUnit = dto.unitOfMeasure.trim().slice(0, 8);
         }
-        if (dto.basePrice !== undefined) {
-          stockPatch.sellPrice = new Prisma.Decimal(dto.basePrice);
+        if (dto.basePrice !== undefined || dto.pricePerPricingUnit !== undefined) {
+          const updatedPriceVal = dto.basePrice ?? dto.pricePerPricingUnit;
+          if (updatedPriceVal != null) {
+            stockPatch.sellPrice = new Prisma.Decimal(updatedPriceVal);
+          }
         }
         if (dto.reorderPoint !== undefined) {
           stockPatch.reorderPoint =

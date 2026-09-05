@@ -987,7 +987,11 @@ export class PosService {
               }
             : {}),
           ...(dto.price !== undefined
-            ? { basePrice: Number(dto.price) }
+            ? {
+                basePrice: Number(dto.price),
+                pricePerPricingUnit: Number(dto.price),
+                mrp: Number(dto.price),
+              }
             : {}),
           ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
           ...(dto.sellUnit !== undefined
@@ -1989,31 +1993,53 @@ export class PosService {
               pu.fixedPrice != null ? Number(pu.fixedPrice) : null,
             isDefaultSellingUnit: pu.isDefaultSellingUnit,
           })),
+          baseUnitSymbol: row.product.baseUnit?.symbol ?? row.sellUnit ?? null,
+          pricingUnitSymbol: row.product.pricingUnit?.symbol ?? null,
           /** Counter entry units: explicitly configured product units + base/pricing unit */
           entryUnits: (() => {
             const map = new Map<
               string,
-              { unitId: string; symbol: string; name: string }
+              {
+                unitId: string;
+                symbol: string;
+                name: string;
+                conversionToBase?: number;
+                isDefaultSellingUnit?: boolean;
+              }
             >();
-            const matchedUnit =
-              row.product.baseUnit ??
-              systemUnits.find(
+            const baseRef = row.product.baseUnit;
+            if (baseRef) {
+              map.set(baseRef.id, {
+                unitId: baseRef.id,
+                symbol: baseRef.symbol,
+                name: baseRef.name,
+                conversionToBase: 1,
+              });
+            } else {
+              const matchedUnit = systemUnits.find(
                 (u) =>
                   u.symbol.toLowerCase() ===
                   (row.sellUnit ?? '').trim().toLowerCase(),
               );
-            if (matchedUnit) {
-              map.set(matchedUnit.id, {
-                unitId: matchedUnit.id,
-                symbol: matchedUnit.symbol,
-                name: matchedUnit.name,
-              });
+              if (matchedUnit) {
+                map.set(matchedUnit.id, {
+                  unitId: matchedUnit.id,
+                  symbol: matchedUnit.symbol,
+                  name: matchedUnit.name,
+                  conversionToBase: 1,
+                });
+              }
             }
             if (row.product.pricingUnit) {
+              const pu = row.product.productUnits?.find(
+                (p) => p.unitId === row.product.pricingUnitId,
+              );
               map.set(row.product.pricingUnit.id, {
                 unitId: row.product.pricingUnit.id,
                 symbol: row.product.pricingUnit.symbol,
                 name: row.product.pricingUnit.name,
+                conversionToBase: pu ? Number(pu.conversionToBase) : undefined,
+                isDefaultSellingUnit: pu?.isDefaultSellingUnit,
               });
             }
             for (const pu of row.product.productUnits ?? []) {
@@ -2021,6 +2047,8 @@ export class PosService {
                 unitId: pu.unitId,
                 symbol: pu.unit.symbol,
                 name: pu.unit.name,
+                conversionToBase: Number(pu.conversionToBase),
+                isDefaultSellingUnit: pu.isDefaultSellingUnit,
               });
             }
             return [...map.values()];

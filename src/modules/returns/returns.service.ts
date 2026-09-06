@@ -192,7 +192,7 @@ export class ReturnsService {
         },
         payments: {
           where: { status: PaymentStatus.succeeded },
-          select: { id: true, amount: true, type: true },
+          select: { id: true, amount: true, type: true, status: true },
         },
         items: {
           include: {
@@ -213,23 +213,31 @@ export class ReturnsService {
 
     return {
       items: orders.map((o) => {
-        const totalAmount = Number(o.totalAmount ?? 0);
+        const totalAmount =
+          Number(o.subtotal ?? 0) +
+          Number(o.taxTotal ?? 0) -
+          Number(o.discountTotal ?? 0);
+        const balanceDue = Number(o.balanceDue ?? 0);
         let paidAmount = 0;
         let heldDeposit = 0;
         let depositRefunded = 0;
 
         for (const p of o.payments ?? []) {
+          if (p.status && p.status !== PaymentStatus.succeeded) continue;
           const amt = Number(p.amount ?? 0);
-          if (p.type === PaymentType.deposit) {
-            heldDeposit += amt;
-          } else if (p.type === PaymentType.deposit_refund) {
+          if (p.type === PaymentType.deposit_refund || p.type === PaymentType.refund) {
             depositRefunded += amt;
           } else {
             paidAmount += amt;
           }
         }
-        heldDeposit = Math.max(0, heldDeposit - depositRefunded);
-        const balanceDue = Math.max(0, totalAmount - paidAmount);
+        // Real rent cost is totalAmount. Refund upon return is total paid minus rent cost minus already refunded
+        heldDeposit = Math.max(0, paidAmount - totalAmount - depositRefunded);
+        const meta = (o.meta ?? {}) as Record<string, unknown>;
+        const isSettled = Boolean(meta.depositSettledAt);
+        if (isSettled) {
+          heldDeposit = 0;
+        }
 
         const returnedUnitIds = new Set(
           o.returnEvents.map((r) => r.stockUnitId).filter(Boolean),
@@ -247,7 +255,9 @@ export class ReturnsService {
 
         const unitsOut = o.items
           .filter((i) => {
-            if (i.stockUnitId && returnedUnitIds.has(i.stockUnitId)) return false;
+            // Only physical stock units can be returned — skip services/products
+            if (!i.stockUnitId) return false;
+            if (returnedUnitIds.has(i.stockUnitId)) return false;
             if (returnedItemIds.has(i.id)) return false;
             return true;
           })
@@ -279,8 +289,10 @@ export class ReturnsService {
           balanceDue,
           heldDeposit,
           unitsOut,
+          isSettled,
         };
-      }),
+      })
+      .filter((o) => o.unitsOut.length > 0 || (!o.isSettled && o.heldDeposit > 0)),
     };
   }
 
@@ -505,7 +517,14 @@ export class ReturnsService {
   ) {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, tenantId: user.tenantId },
-      select: { id: true, meta: true, kind: true },
+      select: {
+        id: true,
+        meta: true,
+        kind: true,
+        subtotal: true,
+        taxTotal: true,
+        discountTotal: true,
+      },
     });
     if (!order) throw new NotFoundException('Order not found');
 
@@ -514,7 +533,7 @@ export class ReturnsService {
       throw new BadRequestException('Deposit already settled on this order');
     }
 
-    const deposits = await this.prisma.payment.findMany({
+    let deposits = await this.prisma.payment.findMany({
       where: {
         tenantId: user.tenantId,
         orderId,
@@ -523,8 +542,20 @@ export class ReturnsService {
       },
       orderBy: { createdAt: 'asc' },
     });
+    const isGeneralPayment = deposits.length === 0;
     if (!deposits.length) {
-      throw new BadRequestException('No succeeded deposit payments on this order');
+      deposits = await this.prisma.payment.findMany({
+        where: {
+          tenantId: user.tenantId,
+          orderId,
+          type: PaymentType.payment,
+          status: PaymentStatus.succeeded,
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+    }
+    if (!deposits.length) {
+      throw new BadRequestException('No succeeded deposit or payment records on this order');
     }
 
     let held = 0;
@@ -534,7 +565,7 @@ export class ReturnsService {
           tenantId: user.tenantId,
           orderId,
           status: PaymentStatus.succeeded,
-          type: PaymentType.deposit_refund,
+          type: { in: [PaymentType.deposit_refund, PaymentType.refund] },
           gatewayPayload: {
             path: ['parentPaymentId'],
             equals: d.id,
@@ -544,6 +575,30 @@ export class ReturnsService {
       });
       held += Number(d.amount) - Number(already._sum.amount ?? 0);
     }
+
+    const rentAmount =
+      Number(order.subtotal ?? 0) +
+      Number(order.taxTotal ?? 0) -
+      Number(order.discountTotal ?? 0);
+    const allSucceeded = await this.prisma.payment.findMany({
+      where: {
+        tenantId: user.tenantId,
+        orderId,
+        status: PaymentStatus.succeeded,
+      },
+    });
+    let totalCustomerPaid = 0;
+    let totalRefunded = 0;
+    for (const p of allSucceeded) {
+      const amt = Number(p.amount ?? 0);
+      if (p.type === PaymentType.deposit_refund || p.type === PaymentType.refund) {
+        totalRefunded += amt;
+      } else {
+        totalCustomerPaid += amt;
+      }
+    }
+    const refundableDeposit = Math.max(0, totalCustomerPaid - rentAmount - totalRefunded);
+    held = Math.min(held, refundableDeposit);
     held = Math.round(held * 100) / 100;
 
     if (dto.refundAmount > held + 1e-9) {

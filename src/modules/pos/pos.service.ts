@@ -919,13 +919,6 @@ export class PosService {
         price: r.sellPrice,
           qty: Number(r.qtyOnHand),
           sellUnit: r.sellUnit,
-          entryUnits: [
-            { unitId: `u-${r.sellUnit}`, symbol: r.sellUnit, name: r.sellUnit },
-            ...(r.sellUnit === 'kg' ? [{ unitId: 'u-g', symbol: 'g', name: 'Gram', conversionToBase: 0.001 }] : []),
-            ...(r.sellUnit === 'g' ? [{ unitId: 'u-kg', symbol: 'kg', name: 'Kilogram', conversionToBase: 1000 }] : []),
-            ...(r.sellUnit === 'L' ? [{ unitId: 'u-ml', symbol: 'ml', name: 'Millilitre', conversionToBase: 0.001 }] : []),
-            ...(r.sellUnit === 'ml' ? [{ unitId: 'u-L', symbol: 'L', name: 'Litre', conversionToBase: 1000 }] : []),
-          ],
         isActive: r.product.isActive,
           barcode: r.product.barcode,
           kind: r.product.kind,
@@ -2422,26 +2415,13 @@ export class PosService {
     const qtyEntered = line.quantity;
     const qtyErr = validateSellQty(qtyEntered, unit, units);
     let calc: LineCalcResult | null = null;
-    const targetSym =
-      line.sellingUnitSymbol ??
-      (line.sellingUnitId ? undefined : level.sellUnit);
-    const isConvertedUnit =
-      Boolean(targetSym) &&
-      String(targetSym).toLowerCase() !== String(unit).toLowerCase();
-    const isUnscaledBasePrice =
-      isConvertedUnit &&
-      line.unitPrice != null &&
-      Math.abs(line.unitPrice - Number(level.sellPrice)) < 0.001;
-
     try {
       calc = await this.unitPricing.calculateLine(user, {
         productId: level.productId,
         enteredQty: qtyEntered,
         sellingUnitId: line.sellingUnitId,
-        sellingUnitSymbol:
-          line.sellingUnitSymbol ??
-          (line.sellingUnitId ? undefined : level.sellUnit),
-        unitPriceOverride: isUnscaledBasePrice ? undefined : line.unitPrice,
+        sellingUnitSymbol: line.sellingUnitSymbol ?? (line.sellingUnitId ? undefined : level.sellUnit),
+        unitPriceOverride: line.unitPrice,
         inventorySign: -1,
       });
     } catch (e) {

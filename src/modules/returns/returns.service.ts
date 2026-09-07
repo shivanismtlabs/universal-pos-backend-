@@ -44,14 +44,19 @@ export class ReturnsService {
 
     const rentalOk =
       order.rentalExt?.lifecycle === RentalOrderLifecycle.checked_out ||
-      order.rentalExt?.lifecycle === RentalOrderLifecycle.returned;
+      order.rentalExt?.lifecycle === RentalOrderLifecycle.returned ||
+      order.rentalExt?.lifecycle === RentalOrderLifecycle.inspected ||
+      order.rentalExt?.lifecycle === RentalOrderLifecycle.ready ||
+      order.rentalExt?.lifecycle === RentalOrderLifecycle.reserved ||
+      order.rentalExt?.lifecycle === RentalOrderLifecycle.fitted;
     const coreOk =
       order.status === OrderStatus.fulfilled ||
       order.status === OrderStatus.ready ||
-      order.status === OrderStatus.closed;
+      order.status === OrderStatus.closed ||
+      order.status === OrderStatus.confirmed;
     if (!rentalOk && !coreOk) {
       throw new BadRequestException(
-        `Order status ${order.status} / lifecycle ${order.rentalExt?.lifecycle ?? 'n/a'} is not returnable yet`,
+        `Order ${order.orderNumber} is not checked out yet and cannot be returned`,
       );
     }
 
@@ -59,107 +64,159 @@ export class ReturnsService {
       where: {
         orderId: dto.orderId,
         tenantId: user.tenantId,
-        stockUnitId: unitId,
+        OR: [{ stockUnitId: unitId }, { id: unitId }],
       },
     });
     if (!item) {
-      throw new BadRequestException('Stock unit is not on this order');
+      throw new BadRequestException('Item is not on this order');
     }
 
-    const already = await this.prisma.returnEvent.findFirst({
-      where: {
-        tenantId: user.tenantId,
-        orderId: dto.orderId,
-        stockUnitId: unitId,
-      },
+    const actualStockUnitId = item.stockUnitId ?? null;
+
+    const existingEvents = await this.prisma.returnEvent.findMany({
+      where: { tenantId: user.tenantId, orderId: dto.orderId },
+      select: { stockUnitId: true, itemsJson: true },
     });
-    if (already) {
-      throw new BadRequestException('This unit was already returned on this order');
+
+    let alreadyReturnedQty = 0;
+    for (const e of existingEvents) {
+      if (actualStockUnitId && e.stockUnitId === actualStockUnitId) {
+        throw new BadRequestException('This serialized unit was already returned on this order');
+      }
+      if (Array.isArray(e.itemsJson)) {
+        for (const it of e.itemsJson as Array<{ orderItemId?: string; quantity?: number }>) {
+          if (it.orderItemId === item.id) {
+            alreadyReturnedQty += Number(it.quantity ?? 1);
+          }
+        }
+      }
+    }
+
+    const orderedQty = Number(item.quantity ?? 1);
+    const returnQty = Number(dto.quantityToReturn ?? 1);
+    if (alreadyReturnedQty + returnQty > orderedQty) {
+      throw new BadRequestException(
+        `Cannot return ${returnQty} units. Only ${orderedQty - alreadyReturnedQty} units remain checked out on this order.`,
+      );
     }
 
     const event = await this.prisma.$transaction(async (tx) => {
+      const isDamaged = dto.inspectStatus === 'damaged';
+      const isCleaningNeeded = dto.cleaningRequired || dto.inspectStatus === 'needs_cleaning';
+
       const returnEvent = await tx.returnEvent.create({
         data: {
           tenantId: user.tenantId,
           orderId: dto.orderId,
-          stockUnitId: unitId,
+          stockUnitId: actualStockUnitId,
           receivedById: user.userId,
           notes: dto.inspectNotes,
+          itemsJson: [{ orderItemId: item.id, quantity: returnQty }],
+          approvedById: dto.inspectStatus ? user.userId : undefined,
         },
       });
 
-      await tx.stockReservation.updateMany({
-        where: {
-          tenantId: user.tenantId,
-          orderItemId: item.id,
-          status: ReservationStatus.checked_out,
-        },
-        data: { status: ReservationStatus.released },
-      });
-
-      await tx.stockUnit.update({
-        where: { id: unitId },
-        data: {
-          status: dto.cleaningRequired
-            ? StockUnitStatus.cleaning
-            : StockUnitStatus.available,
-        },
-      });
-
-      await tx.stockMovement.create({
-        data: {
-          tenantId: user.tenantId,
-          stockUnitId: unitId,
-          fromStatus: StockUnitStatus.checked_out,
-          toStatus: dto.cleaningRequired
-            ? StockUnitStatus.cleaning
-            : StockUnitStatus.available,
-          reason: 'rental.returned',
-          actorUserId: user.userId,
-          orderId: dto.orderId,
-        },
-      });
-
-      if (dto.cleaningRequired) {
-        await tx.modRentalCleaningJob.create({
-          data: {
+      if (actualStockUnitId) {
+        await tx.stockReservation.updateMany({
+          where: {
             tenantId: user.tenantId,
-            stockUnitId: unitId,
-            status: 'queued',
-            notes: dto.inspectNotes,
+            orderItemId: item.id,
+            status: ReservationStatus.checked_out,
+          },
+          data: { status: ReservationStatus.released },
+        });
+
+        const targetStatus = isDamaged
+          ? StockUnitStatus.repair
+          : isCleaningNeeded
+            ? StockUnitStatus.cleaning
+            : StockUnitStatus.available;
+
+        await tx.stockUnit.update({
+          where: { id: actualStockUnitId },
+          data: {
+            status: targetStatus,
+            ...(isDamaged ? { condition: 'damaged' } : {}),
           },
         });
+
+        if (isDamaged) {
+          await tx.modRentalDamageRecord.create({
+            data: {
+              tenantId: user.tenantId,
+              stockUnitId: actualStockUnitId,
+              inspectStatus: 'damaged',
+              notes: dto.inspectNotes,
+              chargeAmount: dto.damageFee,
+            },
+          });
+        }
+
+        await tx.stockMovement.create({
+          data: {
+            tenantId: user.tenantId,
+            stockUnitId: actualStockUnitId,
+            fromStatus: StockUnitStatus.checked_out,
+            toStatus: targetStatus,
+            reason: isDamaged ? 'rental.returned_damaged' : 'rental.returned',
+            actorUserId: user.userId,
+            orderId: dto.orderId,
+          },
+        });
+
+        if (isCleaningNeeded) {
+          await tx.modRentalCleaningJob.create({
+            data: {
+              tenantId: user.tenantId,
+              stockUnitId: actualStockUnitId,
+              status: 'queued',
+              notes: dto.inspectNotes,
+            },
+          });
+        }
       }
 
-      // Only mark order returned when every unit line has a return event
-      if (
-        order.rentalExt &&
-        order.rentalExt.lifecycle === RentalOrderLifecycle.checked_out
-      ) {
+      // Update lifecycle status (checked_out or returned/inspected)
+      if (order.rentalExt) {
         const unitLines = await tx.orderItem.findMany({
           where: {
             orderId: dto.orderId,
             tenantId: user.tenantId,
-            stockUnitId: { not: null },
           },
-          select: { stockUnitId: true },
+          select: { id: true, stockUnitId: true, quantity: true },
         });
         const returned = await tx.returnEvent.findMany({
           where: { orderId: dto.orderId, tenantId: user.tenantId },
-          select: { stockUnitId: true },
+          select: { stockUnitId: true, itemsJson: true },
         });
-        const returnedSet = new Set(
+        const returnedUnitIds = new Set(
           returned.map((r) => r.stockUnitId).filter(Boolean),
         );
-        const allBack = unitLines.every(
-          (l) => l.stockUnitId && returnedSet.has(l.stockUnitId),
-        );
-        if (allBack) {
-          await tx.modRentalOrder.update({
-            where: { orderId: dto.orderId },
-            data: { lifecycle: RentalOrderLifecycle.returned },
-          });
+        const itemReturnedQtyMap = new Map<string, number>();
+        for (const r of returned) {
+          if (Array.isArray(r.itemsJson)) {
+            for (const it of r.itemsJson as Array<{ orderItemId?: string; quantity?: number }>) {
+              if (it.orderItemId) {
+                const prev = itemReturnedQtyMap.get(it.orderItemId) ?? 0;
+                itemReturnedQtyMap.set(it.orderItemId, prev + Number(it.quantity ?? 1));
+              }
+            }
+          }
         }
+        const allBack = unitLines.every(
+          (l) =>
+            (l.stockUnitId && returnedUnitIds.has(l.stockUnitId)) ||
+            ((itemReturnedQtyMap.get(l.id) ?? 0) >= Number(l.quantity ?? 1)),
+        );
+
+        const newLifecycle = allBack
+          ? (dto.inspectStatus ? RentalOrderLifecycle.inspected : RentalOrderLifecycle.returned)
+          : RentalOrderLifecycle.checked_out;
+
+        await tx.modRentalOrder.update({
+          where: { orderId: dto.orderId },
+          data: { lifecycle: newLifecycle },
+        });
       }
 
       return returnEvent;
@@ -173,18 +230,20 @@ export class ReturnsService {
     const orders = await this.prisma.order.findMany({
       where: {
         tenantId: user.tenantId,
-        kind: OrderKind.rental,
-        rentalExt: {
-          lifecycle: {
-            in: [
-              RentalOrderLifecycle.checked_out,
-              RentalOrderLifecycle.returned,
-            ],
+        OR: [
+          { kind: OrderKind.rental },
+          { rentalExt: { isNot: null } },
+          { depositTotal: { gt: 0 } },
+        ],
+        status: { notIn: [OrderStatus.cancelled] },
+        NOT: {
+          rentalExt: {
+            lifecycle: RentalOrderLifecycle.cancelled,
           },
         },
       },
       orderBy: { createdAt: 'desc' },
-      take: 80,
+      take: 100,
       include: {
         customer: { select: { id: true, fullName: true, phone: true } },
         rentalExt: {
@@ -194,8 +253,11 @@ export class ReturnsService {
             returnDueDate: true,
           },
         },
+        payments: {
+          where: { status: PaymentStatus.succeeded },
+          select: { id: true, amount: true, type: true, status: true },
+        },
         items: {
-          where: { stockUnitId: { not: null } },
           include: {
             stockUnit: {
               select: {
@@ -208,44 +270,145 @@ export class ReturnsService {
             product: { select: { id: true, name: true, skuCode: true } },
           },
         },
-        returnEvents: { select: { stockUnitId: true } },
+        returnEvents: { select: { stockUnitId: true, itemsJson: true } },
       },
     });
 
-    return {
-      items: orders
-        .map((o) => {
-          const returnedIds = new Set(
-            o.returnEvents.map((r) => r.stockUnitId).filter(Boolean),
-          );
-          const unitsOut = o.items
-            .filter(
-              (i) =>
-                i.stockUnitId &&
-                !returnedIds.has(i.stockUnitId) &&
-                i.stockUnit?.status === StockUnitStatus.checked_out,
-            )
-            .map((i) => ({
-              stockUnitId: i.stockUnitId!,
-              barcode: i.stockUnit!.barcodeSku,
-              barcodeSku: i.stockUnit!.barcodeSku,
-              variant: i.stockUnit!.variantLabel,
-              size: i.stockUnit!.variantLabel,
-              title: i.product?.name ?? i.description,
-              productId: i.product?.id ?? null,
-            }));
-          return {
-            id: o.id,
-            orderNumber: o.orderNumber,
-            lifecycle: o.rentalExt?.lifecycle ?? null,
-            customerName: o.customer?.fullName ?? 'Walk-in',
-            customerPhone: o.customer?.phone ?? null,
-            pickupDate: o.rentalExt?.pickupDate ?? null,
-            returnDueDate: o.rentalExt?.returnDueDate ?? null,
-            unitsOut,
-          };
+    const allStockUnitIds = orders
+      .flatMap((o) => o.items.map((i) => i.stockUnitId))
+      .filter((id): id is string => Boolean(id));
+
+    const damageRecords = allStockUnitIds.length
+      ? await this.prisma.modRentalDamageRecord.findMany({
+          where: { tenantId: user.tenantId, stockUnitId: { in: allStockUnitIds } },
+          select: { stockUnitId: true, chargeAmount: true },
         })
-        .filter((o) => o.unitsOut.length > 0),
+      : [];
+
+    const damageMap = new Map<string, number>();
+    for (const d of damageRecords) {
+      if (d.stockUnitId) {
+        const prev = damageMap.get(d.stockUnitId) ?? 0;
+        damageMap.set(d.stockUnitId, prev + Number(d.chargeAmount ?? 0));
+      }
+    }
+
+    return {
+      items: orders.map((o) => {
+        const totalAmount =
+          Number((o as { totalAmount?: number }).totalAmount ?? 0) ||
+          (Number(o.subtotal ?? 0) +
+            Number(o.taxTotal ?? 0) -
+            Number(o.discountTotal ?? 0));
+        const balanceDue = Number(o.balanceDue ?? 0);
+        const depTotal = Number(o.depositTotal ?? 0);
+        let paidAmount = 0;
+        let heldDeposit = 0;
+        let depositRefunded = 0;
+
+        for (const p of o.payments ?? []) {
+          if (p.status && p.status !== PaymentStatus.succeeded) continue;
+          const amt = Number(p.amount ?? 0);
+          if (p.type === PaymentType.deposit_refund || p.type === PaymentType.refund) {
+            depositRefunded += amt;
+          } else {
+            paidAmount += amt;
+          }
+        }
+
+        const rawHeld =
+          depTotal > 0
+            ? depTotal
+            : Math.max(0, paidAmount - totalAmount);
+
+        heldDeposit = Math.max(0, rawHeld - depositRefunded);
+        const meta = (o.meta ?? {}) as Record<string, unknown>;
+        const isSettled = Boolean(meta.depositSettledAt);
+        if (isSettled) {
+          heldDeposit = 0;
+        }
+
+        const returnedUnitIds = new Set(
+          o.returnEvents.map((r) => r.stockUnitId).filter(Boolean),
+        );
+        const itemReturnedQtyMap = new Map<string, number>();
+        for (const r of o.returnEvents) {
+          if (Array.isArray(r.itemsJson)) {
+            for (const it of r.itemsJson as Array<{ orderItemId?: string; quantity?: number }>) {
+              if (it.orderItemId) {
+                const prev = itemReturnedQtyMap.get(it.orderItemId) ?? 0;
+                itemReturnedQtyMap.set(it.orderItemId, prev + Number(it.quantity ?? 1));
+              }
+            }
+          }
+        }
+
+        const unitsOut = o.items
+          .filter((i) => {
+            const unitId = i.stockUnitId ?? i.id;
+            if (returnedUnitIds.has(unitId)) return false;
+            const alreadyReturned = itemReturnedQtyMap.get(i.id) ?? 0;
+            const orderedQty = Number(i.quantity ?? 1);
+            return alreadyReturned < orderedQty;
+          })
+          .map((i) => {
+            const alreadyReturned = itemReturnedQtyMap.get(i.id) ?? 0;
+            const remainingQty = Math.max(0, Number(i.quantity ?? 1) - alreadyReturned);
+            return {
+              stockUnitId: i.stockUnitId ?? i.id,
+              barcode:
+                i.stockUnit?.barcodeSku ??
+                i.product?.skuCode ??
+                i.id.slice(0, 8),
+              barcodeSku:
+                i.stockUnit?.barcodeSku ??
+                i.product?.skuCode ??
+                i.id.slice(0, 8),
+              variant: i.stockUnit?.variantLabel ?? null,
+              size: i.stockUnit?.variantLabel ?? null,
+              title: i.product?.name ?? i.description ?? 'Rental Item',
+              productId: i.product?.id ?? null,
+              quantity: remainingQty,
+            };
+          });
+
+        const totalDamageFees = o.items.reduce((sum, i) => {
+          if (!i.stockUnitId) return sum;
+          return sum + (damageMap.get(i.stockUnitId) ?? 0);
+        }, 0);
+
+        const returnDueDate = o.rentalExt?.returnDueDate ? new Date(o.rentalExt.returnDueDate) : null;
+        let overdueDays = 0;
+        let overdueFee = 0;
+        if (returnDueDate && new Date() > returnDueDate) {
+          const diffMs = new Date().getTime() - returnDueDate.getTime();
+          overdueDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+          const dailyRate = Math.max(10, Math.round(totalAmount * 0.05));
+          overdueFee = overdueDays * dailyRate;
+        }
+        const suggestedRefund = Math.max(0, heldDeposit - overdueFee - totalDamageFees);
+
+        return {
+          id: o.id,
+          orderNumber: o.orderNumber,
+          lifecycle: o.rentalExt?.lifecycle ?? null,
+          customerName: o.customer?.fullName ?? 'Walk-in',
+          customerPhone: o.customer?.phone ?? null,
+          pickupDate: o.rentalExt?.pickupDate ?? null,
+          returnDueDate: o.rentalExt?.returnDueDate ?? null,
+          totalAmount,
+          paidAmount,
+          balanceDue,
+          heldDeposit,
+          overdueDays,
+          overdueFee,
+          totalDamageFees,
+          suggestedRefund,
+          unitsOut,
+          isSettled,
+        };
+      })
+      .filter((o) => o.unitsOut.length > 0 || (!o.isSettled && o.heldDeposit > 0)),
     };
   }
 
@@ -470,7 +633,14 @@ export class ReturnsService {
   ) {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, tenantId: user.tenantId },
-      select: { id: true, meta: true, kind: true },
+      select: {
+        id: true,
+        meta: true,
+        kind: true,
+        subtotal: true,
+        taxTotal: true,
+        discountTotal: true,
+      },
     });
     if (!order) throw new NotFoundException('Order not found');
 
@@ -479,7 +649,7 @@ export class ReturnsService {
       throw new BadRequestException('Deposit already settled on this order');
     }
 
-    const deposits = await this.prisma.payment.findMany({
+    let deposits = await this.prisma.payment.findMany({
       where: {
         tenantId: user.tenantId,
         orderId,
@@ -488,8 +658,20 @@ export class ReturnsService {
       },
       orderBy: { createdAt: 'asc' },
     });
+    const isGeneralPayment = deposits.length === 0;
     if (!deposits.length) {
-      throw new BadRequestException('No succeeded deposit payments on this order');
+      deposits = await this.prisma.payment.findMany({
+        where: {
+          tenantId: user.tenantId,
+          orderId,
+          type: PaymentType.payment,
+          status: PaymentStatus.succeeded,
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+    }
+    if (!deposits.length) {
+      throw new BadRequestException('No succeeded deposit or payment records on this order');
     }
 
     let held = 0;
@@ -499,7 +681,7 @@ export class ReturnsService {
           tenantId: user.tenantId,
           orderId,
           status: PaymentStatus.succeeded,
-          type: PaymentType.deposit_refund,
+          type: { in: [PaymentType.deposit_refund, PaymentType.refund] },
           gatewayPayload: {
             path: ['parentPaymentId'],
             equals: d.id,
@@ -509,6 +691,30 @@ export class ReturnsService {
       });
       held += Number(d.amount) - Number(already._sum.amount ?? 0);
     }
+
+    const rentAmount =
+      Number(order.subtotal ?? 0) +
+      Number(order.taxTotal ?? 0) -
+      Number(order.discountTotal ?? 0);
+    const allSucceeded = await this.prisma.payment.findMany({
+      where: {
+        tenantId: user.tenantId,
+        orderId,
+        status: PaymentStatus.succeeded,
+      },
+    });
+    let totalCustomerPaid = 0;
+    let totalRefunded = 0;
+    for (const p of allSucceeded) {
+      const amt = Number(p.amount ?? 0);
+      if (p.type === PaymentType.deposit_refund || p.type === PaymentType.refund) {
+        totalRefunded += amt;
+      } else {
+        totalCustomerPaid += amt;
+      }
+    }
+    const refundableDeposit = Math.max(0, totalCustomerPaid - rentAmount - totalRefunded);
+    held = Math.min(held, refundableDeposit);
     held = Math.round(held * 100) / 100;
 
     if (dto.refundAmount > held + 1e-9) {

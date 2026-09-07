@@ -1,9 +1,8 @@
-import { Prisma, TaxMode } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import {
   calculateLineAmount,
   ProductPricingRef,
   serializeLineCalc,
-  UnitRef,
 } from './pricing-engine';
 import { computeReturnRefundFromOriginal } from '../pos/sale-return-math';
 import { computeLineTax, buildTaxProfile } from '../../common/tax-engine';
@@ -186,9 +185,9 @@ describe('Flipkart-Style Product Discount Engine & Rules', () => {
   describe('Tax & Bill Discount Separation (Rules 7, 8, 9, 10)', () => {
     it('applies productNet -> bill discount allocation -> taxable value -> GST with no double deduction', () => {
       const taxProfile = buildTaxProfile({
-        taxMode: 'gst' as any,
+        taxMode: 'gst',
         settings: {
-          taxMode: 'gst' as any,
+          taxMode: 'gst',
           taxInclusive: false, // GST exclusive
           gstRatePercent: 18,
         },
@@ -237,9 +236,9 @@ describe('Flipkart-Style Product Discount Engine & Rules', () => {
 
     it('extracts GST accurately for tax-inclusive pricing from productNet', () => {
       const taxProfile = buildTaxProfile({
-        taxMode: 'gst' as any,
+        taxMode: 'gst',
         settings: {
-          taxMode: 'gst' as any,
+          taxMode: 'gst',
           taxInclusive: true, // GST inclusive
           gstRatePercent: 18,
         },

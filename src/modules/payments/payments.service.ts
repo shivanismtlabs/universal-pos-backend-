@@ -120,7 +120,7 @@ export class PaymentsService {
       }
 
       if (
-        CREDIT.includes(type) &&
+        type === PaymentType.payment &&
         status === PaymentStatus.succeeded &&
         !opts?.allowFailedRecord
       ) {

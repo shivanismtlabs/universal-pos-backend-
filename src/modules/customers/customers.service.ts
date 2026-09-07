@@ -72,6 +72,16 @@ export class CustomersService {
         e instanceof Prisma.PrismaClientKnownRequestError &&
         e.code === 'P2002'
       ) {
+        if (dto.returnExisting) {
+          const fallbackExisting = await this.prisma.customer.findFirst({
+            where: {
+              tenantId: user.tenantId,
+              deletedAt: null,
+              OR: [{ phone: { in: variants } }, { phone }],
+            },
+          });
+          if (fallbackExisting) return fallbackExisting;
+        }
         throw new ConflictException('Customer with this phone already exists');
       }
       throw e;

@@ -1261,7 +1261,7 @@ describe('POS Cart, Pricing Calculation & UOM Conversion Engine', () => {
         'packaging sale $qty $unit.symbol → base $expectedBaseQty, amount ₹$expectedGross',
         ({ qty, unit, prod, expectedBaseQty, expectedGross }) => {
           const res = calculateLineAmount({
-            product: prod as ProductPricingRef,
+            product: prod,
             enteredQty: qty,
             sellingUnit: unit,
             unitsById: universalUnitsMap,

@@ -42,6 +42,25 @@ export class CreateReturnDto {
   @IsString()
   @MaxLength(2000)
   inspectNotes?: string;
+
+  @ApiPropertyOptional({ default: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  quantityToReturn?: number;
+
+  @ApiPropertyOptional({ enum: InspectStatus })
+  @IsOptional()
+  @IsEnum(InspectStatus)
+  inspectStatus?: InspectStatus;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  damageFee?: number;
 }
 
 export class ListReturnsQueryDto extends PaginationQueryDto {

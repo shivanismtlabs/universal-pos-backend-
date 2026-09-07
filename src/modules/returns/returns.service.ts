@@ -59,18 +59,23 @@ export class ReturnsService {
       where: {
         orderId: dto.orderId,
         tenantId: user.tenantId,
-        stockUnitId: unitId,
+        OR: [{ stockUnitId: unitId }, { id: unitId }],
       },
     });
     if (!item) {
-      throw new BadRequestException('Stock unit is not on this order');
+      throw new BadRequestException('Item is not on this order');
     }
+
+    const actualStockUnitId = item.stockUnitId ?? null;
 
     const already = await this.prisma.returnEvent.findFirst({
       where: {
         tenantId: user.tenantId,
         orderId: dto.orderId,
-        stockUnitId: unitId,
+        OR: [
+          ...(actualStockUnitId ? [{ stockUnitId: actualStockUnitId }] : []),
+          { itemsJson: { equals: [{ orderItemId: item.id }] } },
+        ],
       },
     });
     if (already) {
@@ -82,53 +87,56 @@ export class ReturnsService {
         data: {
           tenantId: user.tenantId,
           orderId: dto.orderId,
-          stockUnitId: unitId,
+          stockUnitId: actualStockUnitId,
           receivedById: user.userId,
           notes: dto.inspectNotes,
+          itemsJson: [{ orderItemId: item.id, quantity: Number(item.quantity ?? 1) }],
         },
       });
 
-      await tx.stockReservation.updateMany({
-        where: {
-          tenantId: user.tenantId,
-          orderItemId: item.id,
-          status: ReservationStatus.checked_out,
-        },
-        data: { status: ReservationStatus.released },
-      });
-
-      await tx.stockUnit.update({
-        where: { id: unitId },
-        data: {
-          status: dto.cleaningRequired
-            ? StockUnitStatus.cleaning
-            : StockUnitStatus.available,
-        },
-      });
-
-      await tx.stockMovement.create({
-        data: {
-          tenantId: user.tenantId,
-          stockUnitId: unitId,
-          fromStatus: StockUnitStatus.checked_out,
-          toStatus: dto.cleaningRequired
-            ? StockUnitStatus.cleaning
-            : StockUnitStatus.available,
-          reason: 'rental.returned',
-          actorUserId: user.userId,
-          orderId: dto.orderId,
-        },
-      });
-
-      if (dto.cleaningRequired) {
-        await tx.modRentalCleaningJob.create({
-          data: {
+      if (actualStockUnitId) {
+        await tx.stockReservation.updateMany({
+          where: {
             tenantId: user.tenantId,
-            stockUnitId: unitId,
-            status: 'queued',
-            notes: dto.inspectNotes,
+            orderItemId: item.id,
+            status: ReservationStatus.checked_out,
+          },
+          data: { status: ReservationStatus.released },
+        });
+
+        await tx.stockUnit.update({
+          where: { id: actualStockUnitId },
+          data: {
+            status: dto.cleaningRequired
+              ? StockUnitStatus.cleaning
+              : StockUnitStatus.available,
           },
         });
+
+        await tx.stockMovement.create({
+          data: {
+            tenantId: user.tenantId,
+            stockUnitId: actualStockUnitId,
+            fromStatus: StockUnitStatus.checked_out,
+            toStatus: dto.cleaningRequired
+              ? StockUnitStatus.cleaning
+              : StockUnitStatus.available,
+            reason: 'rental.returned',
+            actorUserId: user.userId,
+            orderId: dto.orderId,
+          },
+        });
+
+        if (dto.cleaningRequired) {
+          await tx.modRentalCleaningJob.create({
+            data: {
+              tenantId: user.tenantId,
+              stockUnitId: actualStockUnitId,
+              status: 'queued',
+              notes: dto.inspectNotes,
+            },
+          });
+        }
       }
 
       // Only mark order returned when every unit line has a return event
@@ -140,19 +148,30 @@ export class ReturnsService {
           where: {
             orderId: dto.orderId,
             tenantId: user.tenantId,
-            stockUnitId: { not: null },
           },
-          select: { stockUnitId: true },
+          select: { id: true, stockUnitId: true },
         });
         const returned = await tx.returnEvent.findMany({
           where: { orderId: dto.orderId, tenantId: user.tenantId },
-          select: { stockUnitId: true },
+          select: { stockUnitId: true, itemsJson: true },
         });
-        const returnedSet = new Set(
+        const returnedUnitIds = new Set(
           returned.map((r) => r.stockUnitId).filter(Boolean),
         );
+        const returnedItemIds = new Set(
+          returned.flatMap((r) => {
+            if (Array.isArray(r.itemsJson)) {
+              return (r.itemsJson as Array<{ orderItemId?: string }>)
+                .map((x) => x.orderItemId)
+                .filter(Boolean);
+            }
+            return [];
+          }),
+        );
         const allBack = unitLines.every(
-          (l) => l.stockUnitId && returnedSet.has(l.stockUnitId),
+          (l) =>
+            (l.stockUnitId && returnedUnitIds.has(l.stockUnitId)) ||
+            returnedItemIds.has(l.id),
         );
         if (allBack) {
           await tx.modRentalOrder.update({
@@ -214,10 +233,12 @@ export class ReturnsService {
     return {
       items: orders.map((o) => {
         const totalAmount =
-          Number(o.subtotal ?? 0) +
-          Number(o.taxTotal ?? 0) -
-          Number(o.discountTotal ?? 0);
+          Number((o as { totalAmount?: number }).totalAmount ?? 0) ||
+          (Number(o.subtotal ?? 0) +
+            Number(o.taxTotal ?? 0) -
+            Number(o.discountTotal ?? 0));
         const balanceDue = Number(o.balanceDue ?? 0);
+        const depTotal = Number(o.depositTotal ?? 0);
         let paidAmount = 0;
         let heldDeposit = 0;
         let depositRefunded = 0;
@@ -231,8 +252,13 @@ export class ReturnsService {
             paidAmount += amt;
           }
         }
-        // Real rent cost is totalAmount. Refund upon return is total paid minus rent cost minus already refunded
-        heldDeposit = Math.max(0, paidAmount - totalAmount - depositRefunded);
+
+        const rawHeld =
+          depTotal > 0 && depTotal > totalAmount
+            ? depTotal - totalAmount
+            : Math.max(0, paidAmount - totalAmount);
+
+        heldDeposit = Math.max(0, rawHeld - depositRefunded);
         const meta = (o.meta ?? {}) as Record<string, unknown>;
         const isSettled = Boolean(meta.depositSettledAt);
         if (isSettled) {
@@ -255,9 +281,8 @@ export class ReturnsService {
 
         const unitsOut = o.items
           .filter((i) => {
-            // Only physical stock units can be returned — skip services/products
-            if (!i.stockUnitId) return false;
-            if (returnedUnitIds.has(i.stockUnitId)) return false;
+            const unitId = i.stockUnitId ?? i.id;
+            if (returnedUnitIds.has(unitId)) return false;
             if (returnedItemIds.has(i.id)) return false;
             return true;
           })

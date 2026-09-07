@@ -240,7 +240,6 @@ export class OrdersService {
           location: { select: { id: true, name: true, code: true } },
           rentalExt: true,
           items: {
-            take: 8,
             select: {
               id: true,
               description: true,
@@ -256,17 +255,33 @@ export class OrdersService {
 
     return {
       items: items.map((o) => {
-        const productNames = o.items.map(
-          (i) => i.product?.name || i.description || 'Item',
-        );
-        const more = Math.max(0, o._count.items - productNames.length);
+        let totalQty = 0;
+        const nameMap = new Map<string, number>();
+        for (const i of o.items) {
+          const name = i.product?.name || i.description || 'Item';
+          const qty = Number(i.quantity ?? 1);
+          totalQty += qty;
+          nameMap.set(name, (nameMap.get(name) ?? 0) + qty);
+        }
+
+        const summaryParts: string[] = [];
+        const productNames: string[] = [];
+        for (const [name, qty] of nameMap.entries()) {
+          productNames.push(name);
+          if (qty > 1) {
+            summaryParts.push(`${qty} × ${name}`);
+          } else {
+            summaryParts.push(name);
+          }
+        }
+
         return {
           ...o,
           store: o.location,
           storeId: o.locationId,
-          productSummary: productNames.join(', ') + (more > 0 ? ` +${more}` : ''),
+          productSummary: summaryParts.join(', '),
           productNames,
-          itemCount: o._count.items,
+          itemCount: totalQty || o._count.items,
         };
       }),
       meta: pageMeta(total, page, limit),
@@ -839,6 +854,26 @@ export class OrdersService {
         throw new BadRequestException(
           'productId or stockLevelId required for product line',
         );
+      }
+    }
+
+    if (kind === OrderItemKind.product && productId && !stockUnitId) {
+      const existing = await tx.orderItem.findFirst({
+        where: { orderId, tenantId, productId, stockUnitId: null },
+      });
+      if (existing) {
+        const newQty = Number(existing.quantity ?? 1) + qty;
+        const uPrice = dto.unitPrice !== undefined ? Number(dto.unitPrice) : Number(existing.unitPrice);
+        const newLineTotal = money(uPrice).mul(newQty);
+        await tx.orderItem.update({
+          where: { id: existing.id },
+          data: {
+            quantity: newQty,
+            unitPrice: money(uPrice).toFixed(2),
+            lineTotal: newLineTotal.toFixed(2),
+          },
+        });
+        return;
       }
     }
 

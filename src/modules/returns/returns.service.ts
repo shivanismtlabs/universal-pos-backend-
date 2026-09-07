@@ -233,16 +233,17 @@ export class ReturnsService {
         OR: [
           { kind: OrderKind.rental },
           { rentalExt: { isNot: null } },
+          { depositTotal: { gt: 0 } },
         ],
-        status: { notIn: [OrderStatus.cancelled, OrderStatus.draft] },
-        rentalExt: {
-          lifecycle: {
-            notIn: [RentalOrderLifecycle.quote, RentalOrderLifecycle.cancelled],
+        status: { notIn: [OrderStatus.cancelled] },
+        NOT: {
+          rentalExt: {
+            lifecycle: RentalOrderLifecycle.cancelled,
           },
         },
       },
       orderBy: { createdAt: 'desc' },
-      take: 80,
+      take: 100,
       include: {
         customer: { select: { id: true, fullName: true, phone: true } },
         rentalExt: {
@@ -273,6 +274,25 @@ export class ReturnsService {
       },
     });
 
+    const allStockUnitIds = orders
+      .flatMap((o) => o.items.map((i) => i.stockUnitId))
+      .filter((id): id is string => Boolean(id));
+
+    const damageRecords = allStockUnitIds.length
+      ? await this.prisma.modRentalDamageRecord.findMany({
+          where: { tenantId: user.tenantId, stockUnitId: { in: allStockUnitIds } },
+          select: { stockUnitId: true, chargeAmount: true },
+        })
+      : [];
+
+    const damageMap = new Map<string, number>();
+    for (const d of damageRecords) {
+      if (d.stockUnitId) {
+        const prev = damageMap.get(d.stockUnitId) ?? 0;
+        damageMap.set(d.stockUnitId, prev + Number(d.chargeAmount ?? 0));
+      }
+    }
+
     return {
       items: orders.map((o) => {
         const totalAmount =
@@ -297,8 +317,8 @@ export class ReturnsService {
         }
 
         const rawHeld =
-          depTotal > 0 && depTotal > totalAmount
-            ? depTotal - totalAmount
+          depTotal > 0
+            ? depTotal
             : Math.max(0, paidAmount - totalAmount);
 
         heldDeposit = Math.max(0, rawHeld - depositRefunded);
@@ -352,15 +372,10 @@ export class ReturnsService {
             };
           });
 
-        const stockUnitIds = o.items.map((i) => i.stockUnitId).filter((id): id is string => Boolean(id));
-        let totalDamageFees = 0;
-        if (stockUnitIds.length) {
-          const damageRecs = await this.prisma.modRentalDamageRecord.findMany({
-            where: { tenantId: user.tenantId, stockUnitId: { in: stockUnitIds } },
-            select: { chargeAmount: true },
-          });
-          totalDamageFees = damageRecs.reduce((sum, d) => sum + Number(d.chargeAmount ?? 0), 0);
-        }
+        const totalDamageFees = o.items.reduce((sum, i) => {
+          if (!i.stockUnitId) return sum;
+          return sum + (damageMap.get(i.stockUnitId) ?? 0);
+        }, 0);
 
         const returnDueDate = o.rentalExt?.returnDueDate ? new Date(o.rentalExt.returnDueDate) : null;
         let overdueDays = 0;

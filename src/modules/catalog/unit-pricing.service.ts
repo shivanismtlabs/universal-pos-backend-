@@ -477,26 +477,33 @@ export class UnitPricingService implements OnModuleInit {
       (product.productUnits && product.productUnits.length > 0) ||
       (edges && edges.length > 0);
 
-    const uom = (product as any).unitOfMeasure ?? (product as any).sellUnit;
+    const uom =
+      (product as any).stockLevels?.[0]?.sellUnit ??
+      (product as any).meta?.sellUnit ??
+      (product as any).meta?.unit ??
+      (product as any).meta?.baseUnit ??
+      (product as any).sellUnit ??
+      (product as any).unitOfMeasure;
     const uomRef = uom && unitsById ? this.resolveUnit(unitsById, null, uom) : undefined;
 
-    if (
-      (!baseUnitId ||
-        (uomRef &&
-          baseUnitRef &&
-          baseUnitRef.id !== uomRef.id &&
-          !hasConversions) ||
-        (preferredSellingUnit &&
-          baseUnitRef &&
-          baseUnitRef.unitGroupId !== preferredSellingUnit.unitGroupId &&
-          !hasConversions)) &&
-      unitsById
-    ) {
+    if (!baseUnitId && unitsById) {
       const match =
         uomRef ??
-        preferredSellingUnit ??
+        (preferredSellingUnit && (!baseUnitRef || baseUnitRef.unitGroupId === preferredSellingUnit.unitGroupId)
+          ? preferredSellingUnit
+          : undefined) ??
         this.resolveUnit(unitsById, null, 'pcs');
       if (match) baseUnitId = match.id;
+    } else if (
+      baseUnitId &&
+      baseUnitRef &&
+      uomRef &&
+      baseUnitRef.id !== uomRef.id &&
+      baseUnitRef.unitGroupId !== uomRef.unitGroupId &&
+      !hasConversions &&
+      unitsById
+    ) {
+      baseUnitId = uomRef.id;
     }
     if (!baseUnitId) {
       throw new BadRequestException(
@@ -632,7 +639,7 @@ export class UnitPricingService implements OnModuleInit {
         productUnits: { where: { effectiveTo: null } },
         baseUnit: { include: { unitGroup: true } },
         pricingUnit: { include: { unitGroup: true } },
-        stockLevels: { select: { sellPrice: true } },
+        stockLevels: { select: { sellPrice: true, sellUnit: true } },
       },
     });
     if (!product) throw new NotFoundException('Product not found');

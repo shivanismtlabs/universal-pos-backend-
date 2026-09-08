@@ -248,7 +248,7 @@ export function activeProductUnit(
   return (product.productUnits ?? []).find(
     (pu) =>
       pu.unitId === unitId &&
-      pu.effectiveFrom <= at &&
+      (pu.effectiveFrom == null || pu.effectiveFrom <= at) &&
       (pu.effectiveTo == null || pu.effectiveTo > at),
   );
 }

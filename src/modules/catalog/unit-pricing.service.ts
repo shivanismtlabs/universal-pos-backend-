@@ -549,21 +549,49 @@ export class UnitPricingService implements OnModuleInit {
           ? 'FIXED_TIER'
           : 'CONVERTED',
       pricePerPricingUnit: (() => {
-        const stockPrice = (product as any).stockLevels && (product as any).stockLevels.length > 0 ? (product as any).stockLevels[0].sellPrice : null;
-        return stockPrice != null ? d(stockPrice) : (product.basePrice != null ? product.basePrice : product.pricePerPricingUnit != null ? product.pricePerPricingUnit : null);
+        if (product.pricePerPricingUnit != null) return d(product.pricePerPricingUnit);
+        const pricingPu = productUnits.find((pu) => pu.unitId === pricingUnitId);
+        if (pricingPu?.fixedPrice != null) return d(pricingPu.fixedPrice);
+        const stockLevel = (product as any).stockLevels?.[0];
+        if (stockLevel?.sellPrice != null) {
+          const stockUnitSym = String(stockLevel.sellUnit ?? '').toLowerCase();
+          const pricingUnitSym = rawPricingUnitRef?.symbol.toLowerCase();
+          if (pricingUnitSym && stockUnitSym === pricingUnitSym) {
+            return d(stockLevel.sellPrice);
+          }
+        }
+        return product.basePrice != null ? d(product.basePrice) : null;
       })(),
       basePrice: (() => {
-        const stockPrice = (product as any).stockLevels && (product as any).stockLevels.length > 0 ? (product as any).stockLevels[0].sellPrice : null;
-        return stockPrice != null ? d(stockPrice) : product.basePrice;
+        if (product.basePrice != null) return d(product.basePrice);
+        const basePu = productUnits.find((pu) => pu.unitId === baseUnitId);
+        if (basePu?.fixedPrice != null) return d(basePu.fixedPrice);
+        const stockLevel = (product as any).stockLevels?.[0];
+        if (stockLevel?.sellPrice != null) {
+          const stockUnitSym = String(stockLevel.sellUnit ?? '').toLowerCase();
+          const baseUnitSym = effectiveBaseRef?.symbol.toLowerCase();
+          if (baseUnitSym && stockUnitSym === baseUnitSym) {
+            return d(stockLevel.sellPrice);
+          }
+          const basePuConv = basePu?.conversionToBase != null ? Number(basePu.conversionToBase) : 1;
+          const pricingPu = productUnits.find((pu) => pu.unitId === pricingUnitId);
+          const pricingConv = pricingPu?.conversionToBase != null ? Number(pricingPu.conversionToBase) : 1;
+          if (pricingConv > 0) {
+            return d(stockLevel.sellPrice).mul(basePuConv).div(pricingConv);
+          }
+        }
+        return null;
       })(),
       mrp: (() => {
-        const stockPrice = (product as any).stockLevels && (product as any).stockLevels.length > 0 ? (product as any).stockLevels[0].sellPrice : null;
-        const eff = stockPrice != null ? d(stockPrice) : product.basePrice;
-        if ((product as any).mrp != null) {
-          const m = d((product as any).mrp);
-          return eff != null && m.greaterThan(eff) ? eff : m;
+        if ((product as any).mrp != null) return d((product as any).mrp);
+        if (product.basePrice != null) return d(product.basePrice);
+        const basePu = productUnits.find((pu) => pu.unitId === baseUnitId);
+        if (basePu?.fixedPrice != null) return d(basePu.fixedPrice);
+        const stockLevel = (product as any).stockLevels?.[0];
+        if (stockLevel?.sellPrice != null) {
+          return d(stockLevel.sellPrice);
         }
-        return eff;
+        return null;
       })(),
       configuredPriceQuantity:
         (product as any).configuredPriceQuantity ??
